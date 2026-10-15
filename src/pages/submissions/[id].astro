@@ -1,0 +1,186 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import { sqlSubmissionStore } from '../../lib/server/submissions-db';
+import {
+  isSubmissionPreview,
+  previewSubmissionView,
+  readSubmission,
+  type SubmissionView,
+} from '../../lib/server/submissions';
+
+const id = Astro.params.id ?? '';
+const preview = isSubmissionPreview(id);
+if (!preview && !Astro.locals.user) {
+  return Astro.redirect(`/login?next=${encodeURIComponent(Astro.url.pathname)}`);
+}
+
+const result = preview
+  ? { status: 200 as const, view: previewSubmissionView() }
+  : await readSubmission({ userId: Astro.locals.user!.id, gameId: id, store: sqlSubmissionStore });
+
+if (result.status === 401) return Astro.redirect(`/login?next=${encodeURIComponent(Astro.url.pathname)}`);
+if (result.status !== 200) return Astro.rewrite('/404');
+
+const view: SubmissionView = result.view;
+const staticChecks = view.validation?.checks.filter((c) => c.source === 'static') ?? [];
+const runChecks = view.validation?.checks.filter((c) => c.source === 'run') ?? [];
+const stageLabel = { pending: 'Pending', proving: 'Proving Grounds', live: 'Monetized', rejected: 'Rejected' }[view.game.stage];
+---
+
+<Layout title={`${view.game.title} · Submission`} description={`Validation status for ${view.game.title}.`}>
+  <section
+    class="section wrap report"
+    id="submission"
+    data-id={view.game.id}
+    data-stamp={view.stamp}
+    data-terminal={view.terminal ? '1' : '0'}
+    data-preview={preview ? '1' : '0'}
+  >
+    <span class="eyebrow">Submission</span>
+    <div class="spread head">
+      <h1>{view.game.title}</h1>
+      <span class="row">
+        <span class:list={['badge', view.game.stage]}>{stageLabel}</span>
+        <span class:list={['badge', 'phase', view.phase]} aria-live="polite">{view.headline}</span>
+      </span>
+    </div>
+    <p class="muted lead">{view.detail}</p>
+
+    {view.published && (
+      <p class="row">
+        <a class="btn" href={`/play/${view.game.slug}`}>Open in the Proving Grounds</a>
+      </p>
+    )}
+    {view.phase === 'failed' && (
+      <p class="row">
+        <a class="btn" href="/upload">Upload a fixed version</a>
+      </p>
+    )}
+
+    <section class="panel">
+      <h2>Static checks</h2>
+      {staticChecks.length ? (
+        <ul class="checks">
+          {staticChecks.map((c) => (
+            <li>
+              <span class:list={['mark', c.level]}>{c.level}</span>
+              <div>
+                <strong>{c.name}</strong>
+                <p>{c.message}</p>
+              </div>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p class="muted">No static checks recorded yet.</p>
+      )}
+    </section>
+    <section class="panel">
+      <h2>Headless run</h2>
+      {runChecks.length ? (
+        <ul class="checks">
+          {runChecks.map((c) => (
+            <li>
+              <span class:list={['mark', c.level]}>{c.level}</span>
+              <div>
+                <strong>{c.name}</strong>
+                <p>{c.message}</p>
+              </div>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p class="muted">{view.phase === 'waiting' || view.phase === 'queued' ? 'The headless run has not started.' : 'No headless checks recorded yet.'}</p>
+      )}
+    </section>
+
+    {view.validation?.console.length ? (
+      <section class="panel">
+        <h2>Console</h2>
+        <ul class="log">
+          {view.validation.console.map((line) => <li>{line}</li>)}
+        </ul>
+      </section>
+    ) : null}
+
+    {view.validation?.blockedRequests.length ? (
+      <section class="panel">
+        <h2>Blocked requests</h2>
+        <ul class="log">
+          {view.validation.blockedRequests.map((line) => <li>{line}</li>)}
+        </ul>
+      </section>
+    ) : null}
+
+    {view.validation?.timings ? (
+      <section class="panel">
+        <h2>Timings</h2>
+        <ul class="log">
+          {Object.entries(view.validation.timings).map(([key, value]) => <li>{key}: {value}</li>)}
+        </ul>
+      </section>
+    ) : null}
+
+    {!view.terminal && <p id="poll-note" class="muted poll">This page checks again every few seconds until validation finishes.</p>}
+  </section>
+</Layout>
+
+<script>
+  const root = document.getElementById('submission');
+  const note = document.getElementById('poll-note');
+  if (root && note && root.dataset.terminal !== '1' && root.dataset.preview !== '1') {
+    const stamp = root.dataset.stamp;
+    const id = root.dataset.id ?? '';
+    const started = Date.now();
+    const tick = async () => {
+      if (Date.now() - started > 10 * 60 * 1000) {
+        note.textContent = 'This is taking longer than usual. Refresh to check again.';
+        return;
+      }
+      try {
+        const res = await fetch(`/api/submissions/${encodeURIComponent(id)}`, { headers: { accept: 'application/json' } });
+        if (res.status === 401) {
+          location.assign(`/login?next=${encodeURIComponent(location.pathname)}`);
+          return;
+        }
+        if (!res.ok) {
+          setTimeout(tick, 4000);
+          return;
+        }
+        const data = (await res.json()) as { stamp?: string };
+        if (data.stamp && data.stamp !== stamp) location.reload();
+        else setTimeout(tick, 2000);
+      } catch {
+        setTimeout(tick, 4000);
+      }
+    };
+    setTimeout(tick, 2000);
+  }
+</script>
+
+<style>
+  .report { max-width: 820px; display: grid; gap: 1rem; }
+  .head { align-items: flex-end; }
+  .head h1 { margin: 0; }
+  .lead { margin: 0; max-width: 62ch; }
+  .phase.running, .phase.queued, .phase.waiting { color: var(--warn); border-color: #ffb34055; }
+  .phase.passed { color: var(--accent); border-color: #c4ff3d55; }
+  .phase.failed, .phase.error { color: var(--bad); border-color: #ff5d5d55; }
+  .checks { list-style: none; padding: 0; margin: 0.75rem 0 0; display: grid; gap: 0.75rem; }
+  .checks li { display: grid; grid-template-columns: auto 1fr; gap: 0.75rem; align-items: start; }
+  .checks p { margin: 0.15rem 0 0; color: var(--muted); }
+  .mark {
+    font: 700 0.68rem/1 var(--mono);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    padding: 0.35rem 0.5rem;
+    border-radius: 999px;
+    border: 1px solid var(--line);
+  }
+  .mark.pass { color: var(--accent); border-color: #c4ff3d55; }
+  .mark.warn { color: var(--warn); border-color: #ffb34055; }
+  .mark.fail { color: var(--bad); border-color: #ff5d5d55; }
+  .log { list-style: none; padding: 0; margin: 0.5rem 0 0; font: 0.85rem/1.45 var(--mono); color: var(--muted); }
+  .poll { margin: 0; }
+  h2 { font-size: 1rem; margin: 0; }
+</style>

@@ -29,6 +29,7 @@
     "@astrojs/vercel": "11.0.14",
     "@supabase/ssr": "0.12.7",
     "@supabase/supabase-js": "2.117.3",
+    "acorn": "^8.19.0",
     "astro": "7.3.5",
     "postgres": "3.4.9"
   },

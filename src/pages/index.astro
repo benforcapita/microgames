@@ -5,25 +5,37 @@ import GameThumb from '../components/GameThumb.astro';
 import { listGames, platformStats } from '../lib/server/games';
 import { REVENUE } from '../lib/server/config';
 import { compact } from '../lib/format';
+import { getContent, getFeatured } from '../lib/server/content';
 
-const [live, fresh, stats] = await Promise.all([
+const [live, fresh, stats, copy, banner, featured] = await Promise.all([
   listGames({ stage: 'live', sort: 'top', limit: 8 }),
   listGames({ stage: 'proving', sort: 'new', limit: 4 }),
   platformStats(),
+  getContent('home.hero'),
+  getContent('home.banner'),
+  getFeatured(),
 ]);
-const hero = live[0];
+// Featured games come from featured_games; without any, the hero falls back to the current ordering (top live game).
+const hero = featured[0]?.game ?? live[0];
+const heroLabel = featured[0]?.label || 'Featured';
 const loggedIn = !!Astro.locals.user;
 ---
 
 <Layout>
+  {
+    banner.text && (
+      <aside class:list={['banner', 'wrap', `tone-${banner.tone}`]} role="note" aria-label="Announcement">
+        {banner.image_url && <img src={banner.image_url} alt="" class="banner-img" loading="lazy" />}
+        <p>{banner.text}</p>
+        {banner.link_href && banner.link_label && <a class="btn sm" href={banner.link_href}>{banner.link_label}</a>}
+      </aside>
+    )
+  }
   <section class="hero wrap">
     <div class="copy">
-      <span class="eyebrow">No installs · no engines · just the web</span>
-      <h1>The open ground for <span class="accent">instant 3D</span> web games.</h1>
-      <p class="lede muted">
-        Hundreds of tiny, strange, brilliant browser games, each one a single file that loads in seconds. Play them,
-        rate them, and decide which ones make it out of the Proving Grounds.
-      </p>
+      <span class="eyebrow">{copy.eyebrow}</span>
+      <h1>{copy.title_before}<span class="accent">{copy.title_accent}</span>{copy.title_after}</h1>
+      <p class="lede muted">{copy.lede}</p>
       <div class="row">
         <a class="btn" href="/games">Start playing</a>
         <a class="btn ghost" href="/proving">Scout the Proving Grounds →</a>
@@ -39,7 +51,7 @@ const loggedIn = !!Astro.locals.user;
         <a class="feature" href={`/play/${hero.slug}`}>
           <GameThumb game={hero} class="feature-art" />
           <div class="feature-cap">
-            <span class="badge live">Featured</span>
+            <span class="badge live">{heroLabel}</span>
             <h2>{hero.title}</h2>
             <p class="muted">{hero.tagline}</p>
             <span class="btn sm">▶ Play now</span>
@@ -68,6 +80,24 @@ const loggedIn = !!Astro.locals.user;
             <li><b>Cloud saves</b><span class="muted">Progress follows you across devices.</span></li>
             <li><b>Uploading</b><span class="muted">Ship your own single-file game and earn ad revenue.</span></li>
           </ul>
+        </div>
+      </section>
+    )
+  }
+
+  {
+    featured.length > 0 && (
+      <section class="section wrap" aria-labelledby="featured-title">
+        <div class="spread head">
+          <h2 id="featured-title">Featured</h2>
+        </div>
+        <div class="grid">
+          {featured.map((f) => (
+            <div class="featured-item">
+              {f.label && <span class="eyebrow">{f.label}</span>}
+              <GameCard game={f.game} />
+            </div>
+          ))}
         </div>
       </section>
     )
@@ -149,6 +179,21 @@ const loggedIn = !!Astro.locals.user;
   }
   .feature-cap h2 { margin: 0.6rem 0 0.25rem; font-size: 2rem; }
   .head { margin-bottom: 1.25rem; }
+  .banner {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    margin-top: 1.25rem;
+    padding: 0.85rem 1.1rem;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: #ffffff08;
+  }
+  .banner p { margin: 0; flex: 1; }
+  .banner-img { width: 48px; height: 48px; object-fit: cover; border-radius: 10px; }
+  .tone-promo { border-color: #c4ff3d66; background: #c4ff3d12; }
+  .tone-warning { border-color: #ffb43d88; background: #ffb43d14; }
+  .featured-item { display: grid; gap: 0.4rem; }
   .head h2 { margin: 0; }
   .head a { text-decoration: none; }
   .creators { display: grid; grid-template-columns: 1fr 1fr; gap: 2.5rem; padding: 2.5rem; }
