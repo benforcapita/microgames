@@ -58,6 +58,11 @@ describe('inputSupport declaration', () => {
   it('Prompt B checks the declaration', () => {
     const b = CREATOR_PROMPTS.find((p) => p.id === 'b')!.text;
     assert.match(b, /Input support declaration: .*WARN if missing/);
+    const item15 = b.split('\n').find((line) => line.startsWith('15. Input support declaration:'))!;
+    assert.ok(item15, 'Prompt B must contain item 15');
+    assert.ok(item15.includes('WARN for any other value'));
+    assert.ok(item15.includes("WARN if the declared platforms don't match"));
+    assert.doesNotMatch(item15, /FAIL/);
   });
   it('contract says the CDN CSP is the outer limit and the contract may be stricter', () => {
     assert.match(contract, /CSP is the outer safety limit; this contract may be stricter/);
