@@ -2,6 +2,7 @@ import { defineMiddleware } from 'astro:middleware';
 import { ADSENSE_CLIENT, CDN_ORIGIN } from './lib/server/config';
 import { createRequestClient } from './lib/server/supabase';
 import { getProfile } from './lib/server/profiles';
+import { applyDeviceHeaders, detectDevice } from './lib/server/device';
 import { isSubmissionPreviewPath } from './lib/server/submissions';
 
 const AD_FRAMES = ADSENSE_CLIENT ? ' https://*.googlesyndication.com https://*.doubleclick.net https://*.google.com' : '';
@@ -20,6 +21,7 @@ export const onRequest = defineMiddleware(async (ctx, next) => {
   ctx.locals.supabase = createRequestClient(ctx.request, ctx.cookies, authHeaders);
   ctx.locals.user = null;
   ctx.locals.profile = null;
+  ctx.locals.device = detectDevice(ctx.request.headers);
 
   if (isSubmissionPreviewPath(pathname)) {
     ctx.locals.user = { id: 'preview-owner', email: 'preview@meshgrounds.local' };
@@ -41,5 +43,6 @@ export const onRequest = defineMiddleware(async (ctx, next) => {
   res.headers.set('Content-Security-Policy', pathname === '/upload' ? UPLOAD_CSP : CSP);
   res.headers.set('X-Content-Type-Options', 'nosniff');
   res.headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
+  applyDeviceHeaders(res.headers, pathname);
   return res;
 });
