@@ -60,7 +60,7 @@ export function mountPlayer(host: HTMLElement, game: PlayerGame, opts: PlayerOpt
   host.replaceChildren(frame);
   let destroyed = false;
   loadSave(game.id, saveKey, !!opts.cloudSaves).then((save) => {
-    if (!destroyed) frame.src = `${opts.cdnOrigin}/g/${game.id}/index.html#mgs=${encodeURIComponent(save)}`;
+    if (!destroyed) frame.src = `${opts.cdnOrigin}/g/${game.id}/index.html?embed=${encodeURIComponent(location.origin)}#mgs=${encodeURIComponent(save)}`;
   });
 
   let pendingSave: string | null = null;
