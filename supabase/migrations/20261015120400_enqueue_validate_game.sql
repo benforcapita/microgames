@@ -1,12 +1,11 @@
 -- EF-2: when a game becomes stage = 'pending', ask the validate-game Edge Function
--- to run. The function itself is EF-1 and is not implemented here.
+-- to run. The function itself is EF-1 (migration 20261015120300). This file is
+-- 20261015120400 so it sorts after SP-3, RT-2, PG-3, and EF-1.
 --
--- pg_net ships as a shared library on the Supabase image (the worker is already
--- loaded). Enable it only when the extension row is missing. Never drop it and
--- never ALTER EXTENSION. pg_cron is optional and gets the same treatment so the
--- sweeper can be scheduled; the SQL function below still works without it.
--- The URL and the stuck timeout live in private.settings (local defaults).
--- The hook secret lives in Vault. Nothing here is a hosted project key.
+-- pg_net ships as a shared library on the Supabase image. Enable it only when
+-- the extension row is missing. Never drop it and never ALTER EXTENSION.
+-- pg_cron is optional. The URL and the stuck timeout live in private.settings
+-- (local defaults). The hook secret lives in Vault. Nothing here is a hosted key.
 -- Do not apply this file to hosted Supabase from a laptop or an agent.
 
 -- Install into extensions, matching the other Supabase extensions. IF NOT EXISTS
@@ -57,9 +56,9 @@ create table private.validation_dispatch (
 alter table private.validation_dispatch enable row level security;
 revoke all on table private.validation_dispatch from public, anon, authenticated;
 
--- Main's stage check is ('proving', 'live'). Allow 'pending' so this trigger
--- can fire. If an earlier migration already added 'pending' (SP-3 also adds
--- 'rejected'), leave that check alone.
+-- Allow pending (so the trigger can fire) and rejected (so eight missed calls
+-- can leave the proving grounds). If an earlier migration already allows both
+-- (SP-3), leave that check alone.
 do $$
 declare
   def text;
@@ -69,12 +68,40 @@ begin
   where conrelid = 'public.games'::regclass
     and conname = 'games_stage_check';
 
-  if def is null or position('pending' in def) = 0 then
+  if def is null
+     or position('pending' in def) = 0
+     or position('rejected' in def) = 0 then
     alter table public.games drop constraint if exists games_stage_check;
     alter table public.games add constraint games_stage_check
-      check (stage in ('pending', 'proving', 'live'));
+      check (stage in ('pending', 'proving', 'live', 'rejected'));
   end if;
 end $$;
+
+-- SP-5 reads public.game_validations. EF-1 / SP-3 create that table when they
+-- are on the branch. Create the same shape only when it is absent, so a sweeper
+-- rejection still has a row to show. Inserts below no-op if the table is missing.
+create table if not exists public.game_validations (
+  id uuid primary key default gen_random_uuid(),
+  game_id text not null references public.games (id) on delete cascade,
+  version int not null default 1,
+  bundle_sha256 text check (bundle_sha256 ~ '^[0-9a-f]{64}$'),
+  status text not null check (status in ('queued', 'running', 'passed', 'failed', 'error')),
+  static_report jsonb not null default '{}',
+  run_report jsonb,
+  screenshot_paths text[] not null default '{}',
+  created_at timestamptz not null default now(),
+  finished_at timestamptz
+);
+
+alter table public.game_validations enable row level security;
+revoke all on table public.game_validations from anon, authenticated;
+
+create index if not exists game_validations_game_idx
+  on public.game_validations (game_id, created_at desc);
+
+create unique index if not exists game_validations_bundle_key
+  on public.game_validations (game_id, bundle_sha256)
+  where bundle_sha256 is not null;
 
 -- Local default hook secret. Stored encrypted in Vault; the request builder
 -- reads it back at call time. Replace on a hosted project with
@@ -176,9 +203,57 @@ create trigger games_enqueue_validate_game
   when (new.stage = 'pending')
   execute function private.games_enqueue_validate_game();
 
--- Re-callable. Returns how many stuck pending games were queued again.
--- Stuck means stage is still 'pending' and the last dispatch is older than
--- private.settings.validate_game_stuck_after (local default 2 minutes).
+-- Eight unanswered calls is enough. Mark the game rejected and, when
+-- game_validations exists, leave the row SP-5's /submissions/[id] page reads.
+-- A missing table does not put the game back to pending.
+create or replace function private.reject_unavailable_validation(p_game_id text)
+returns void
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_version integer;
+  v_reason text := 'validation unavailable, please re-upload';
+begin
+  update public.games
+    set stage = 'rejected'
+    where id = p_game_id and stage = 'pending';
+  if not found then
+    return;
+  end if;
+
+  update private.validation_dispatch
+    set last_reason = v_reason
+    where game_id = p_game_id;
+
+  if to_regclass('public.game_validations') is null then
+    raise warning 'game_validations is absent; % marked rejected without a report row', p_game_id;
+    return;
+  end if;
+
+  begin
+    select coalesce(max(v.version), 0) + 1 into v_version
+    from public.game_validations v
+    where v.game_id = p_game_id;
+
+    insert into public.game_validations (game_id, version, status, static_report, finished_at)
+    values (
+      p_game_id,
+      v_version,
+      'error',
+      jsonb_build_object('reason', v_reason, 'status', 'error'),
+      now()
+    );
+  exception
+    when undefined_table or undefined_column then
+      raise warning 'game_validations shape is absent; % stays rejected without a report row', p_game_id;
+  end;
+end;
+$$;
+
+-- Re-callable. Re-queues stuck pending games, and rejects those that already
+-- used validate_game_max_attempts (local default 8). Returns how many were re-queued.
 create or replace function private.sweep_stuck_pending_games()
 returns integer
 language plpgsql
@@ -188,7 +263,7 @@ as $$
 declare
   v_after interval;
   v_max integer;
-  v_id text;
+  rec record;
   v_count integer := 0;
 begin
   select value::interval into v_after
@@ -205,18 +280,25 @@ begin
     v_max := 8;
   end if;
 
-  for v_id in
-    select g.id
+  for rec in
+    select g.id, coalesce(d.attempts, 0) as attempts
     from public.games g
     left join private.validation_dispatch d on d.game_id = g.id
     where g.stage = 'pending'
-      and coalesce(d.attempts, 0) < v_max
-      and (d.last_dispatched_at is null or d.last_dispatched_at < now() - v_after)
+      and (
+        coalesce(d.attempts, 0) >= v_max
+        or d.last_dispatched_at is null
+        or d.last_dispatched_at < now() - v_after
+      )
     order by g.created_at
     limit 50
   loop
-    perform private.dispatch_validate_game(v_id, 'sweep');
-    v_count := v_count + 1;
+    if rec.attempts >= v_max then
+      perform private.reject_unavailable_validation(rec.id);
+    else
+      perform private.dispatch_validate_game(rec.id, 'sweep');
+      v_count := v_count + 1;
+    end if;
   end loop;
 
   return v_count;
@@ -225,10 +307,12 @@ $$;
 
 revoke all on function private.dispatch_validate_game(text, text) from public, anon, authenticated;
 revoke all on function private.games_enqueue_validate_game() from public, anon, authenticated;
+revoke all on function private.reject_unavailable_validation(text) from public, anon, authenticated;
 revoke all on function private.sweep_stuck_pending_games() from public, anon, authenticated;
 
 grant execute on function private.dispatch_validate_game(text, text) to postgres, service_role;
 grant execute on function private.games_enqueue_validate_game() to postgres, service_role;
+grant execute on function private.reject_unavailable_validation(text) to postgres, service_role;
 grant execute on function private.sweep_stuck_pending_games() to postgres, service_role;
 
 -- pg_cron is optional. The sweeper above is what a manual or external retry calls.
