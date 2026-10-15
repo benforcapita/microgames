@@ -1,10 +1,47 @@
 import type { APIRoute } from 'astro';
+import {
+  MG_UID_COOKIE,
+  admitSessionStart,
+  clientIp,
+  secureCookie,
+  newUid,
+  parseUid,
+  telemetryByUid,
+} from '../../lib/server/abuse';
 import { getGame, recordTelemetry, type TelemetryType } from '../../lib/server/games';
+import { hasAuthSessionCookie, sessionUserId } from '../../lib/server/session-user';
 
 const TYPES = new Set<TelemetryType>(['session_start', 'first_frame', 'start', 'complete', 'crash', 'heartbeat']);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
-export const POST: APIRoute = async ({ request }) => {
+export const POST: APIRoute = async (context) => {
+  const { request, cookies, url, locals } = context;
+
+  let socketAddress: string | undefined;
+  try {
+    socketAddress = context.clientAddress;
+  } catch {
+    socketAddress = undefined;
+  }
+  const ip = clientIp(request.headers, socketAddress, Boolean(process.env.VERCEL));
+
+  const rawUid = cookies.get(MG_UID_COOKIE)?.value;
+  let uid = parseUid(rawUid);
+  if (!uid) {
+    uid = newUid();
+    cookies.set(MG_UID_COOKIE, uid, {
+      httpOnly: true,
+      sameSite: 'lax',
+      secure: secureCookie(url.protocol, import.meta.env.PROD, Boolean(process.env.VERCEL)),
+      path: '/',
+      maxAge: 365 * 24 * 60 * 60,
+    });
+  }
+
+  if (!telemetryByUid.hit(uid)) {
+    return new Response('Too many requests', { status: 429 });
+  }
+
   const body = (await request.json().catch(() => null)) as
     | { sessionId?: unknown; gameId?: unknown; type?: unknown; value?: unknown }
     | null;
@@ -14,6 +51,19 @@ export const POST: APIRoute = async ({ request }) => {
   if (!UUID.test(sessionId) || !TYPES.has(type)) return new Response('Bad request', { status: 400 });
   if (type === 'session_start' && !(await getGame(gameId))) return new Response('Unknown game', { status: 404 });
 
-  await recordTelemetry(sessionId, gameId, type, Number(body?.value) || 0);
+  let userId: string | null = null;
+  if (type === 'session_start') {
+    if (!admitSessionStart(uid, ip, gameId)) {
+      return new Response(null, { status: 204 });
+    }
+    // Identity is resolved only here. Heartbeats stay on the anonymous hot path.
+    // No auth cookie means anonymous: skip getClaims and store a null user id.
+    if (hasAuthSessionCookie(request.headers.get('cookie'))) {
+      const { data } = await locals.supabase.auth.getClaims();
+      userId = sessionUserId(data?.claims?.sub);
+    }
+  }
+
+  await recordTelemetry(sessionId, gameId, type, body?.value, userId);
   return new Response(null, { status: 204 });
 };

@@ -7,6 +7,8 @@ interface Props {
   game: Game;
 }
 const { game } = Astro.props;
+const filled = game.avgRating === null ? 0 : Math.round(game.avgRating);
+const ratingLabel = game.avgRating === null ? 'No ratings yet' : `Rated ${stars(game.avgRating)} out of 5 from ${game.ratingCount} vote${game.ratingCount === 1 ? '' : 's'}`;
 ---
 
 <a class="card" href={`/play/${game.slug}`}>
@@ -20,7 +22,10 @@ const { game } = Astro.props;
     <div class="meta mono">
       <span>@{game.creator}</span>
       <span>{compact(game.plays)} plays</span>
-      <span>★ {stars(game.avgRating)}</span>
+      <span class="rating" role="img" aria-label={ratingLabel} title={ratingLabel}>
+        <span class="stars" aria-hidden="true">{[1, 2, 3, 4, 5].map((n) => <i class:list={{ on: n <= filled }}>★</i>)}</span>
+        {game.avgRating === null ? 'new' : `${stars(game.avgRating)} (${compact(game.ratingCount)})`}
+      </span>
     </div>
   </div>
 </a>
@@ -44,4 +49,7 @@ const { game } = Astro.props;
   h3 { margin: 0; }
   .tagline { margin: 0; font-size: 0.88rem; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
   .meta { display: flex; gap: 0.8rem; color: var(--muted); font-size: 0.75rem; flex-wrap: wrap; }
+  .rating { display: inline-flex; align-items: center; gap: 0.35rem; }
+  .stars i { font-style: normal; color: #3a3f52; }
+  .stars i.on { color: var(--accent); }
 </style>
