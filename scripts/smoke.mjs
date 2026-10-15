@@ -123,7 +123,7 @@ try {
   for (const c of new Set(seed.map((g) => g.creator))) await check(`/u/${c}`, `${WEB}/u/${c}`, 200, { auth: false });
 
   console.log('--- signed-out guards');
-  await check('/me', `${WEB}/me`, 302, { auth: false, verify: expectLoc(/^\/login/) });
+  await check('/me (signed out)', `${WEB}/me`, 302, { auth: false, verify: async (r) => (await expectLoc(/^\/login/)(r)) || expectCacheControl('private, no-store')(r) });
   await check('/onboarding', `${WEB}/onboarding`, 302, { auth: false, verify: expectLoc(/^\/login/) });
   await check('/upload', `${WEB}/upload`, 302, { auth: false, verify: expectLoc(/^\/login/) });
   await check(`/api/saves/${game.id}`, `${WEB}/api/saves/${game.id}`, 401, { auth: false });

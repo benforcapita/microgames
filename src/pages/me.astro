@@ -5,8 +5,14 @@ import { listGames } from '../lib/server/games';
 import { compact, stars, ago } from '../lib/format';
 
 const { user, profile } = Astro.locals;
-Astro.response.headers.set('Cache-Control', 'private, no-store');
-if (!user || !profile) return Astro.redirect('/login?next=/me');
+const NO_STORE = 'private, no-store';
+Astro.response.headers.set('Cache-Control', NO_STORE);
+if (!user || !profile) {
+  // Astro.redirect returns a fresh Response, so the header must be set on it directly.
+  const r = Astro.redirect('/login?next=/me');
+  r.headers.set('Cache-Control', NO_STORE);
+  return r;
+}
 const games = await listGames({ ownerId: user.id, sort: 'new', limit: 200, includeUnpublished: true });
 const plays = games.reduce((n, g) => n + g.plays, 0);
 const deleted = Astro.url.searchParams.has('deleted');
