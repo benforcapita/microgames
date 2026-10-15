@@ -6,10 +6,10 @@ import { listGames, platformStats } from '../lib/server/games';
 import { compact } from '../lib/format';
 import { getContent, getFeatured } from '../lib/server/content';
 
+// PV-1: only listable games (isListable in game-rules.ts) appear here; proving games are share-by-link only.
 const device = Astro.locals.device;
-const [live, fresh, stats, copy, banner, featured] = await Promise.all([
+const [live, stats, copy, banner, featured] = await Promise.all([
   listGames({ stage: 'live', sort: 'top', limit: 8, device }),
-  listGames({ stage: 'proving', sort: 'new', limit: 4, device }),
   platformStats(device),
   getContent('home.hero'),
   getContent('home.banner'),
@@ -38,7 +38,7 @@ const loggedIn = !!Astro.locals.user;
       <p class="lede muted">{copy.lede}</p>
       <div class="row">
         <a class="btn" href="/games">Start playing</a>
-        <a class="btn ghost" href="/proving">Scout the Proving Grounds →</a>
+        <a class="btn ghost" href="/upload">Upload your game →</a>
       </div>
       <dl class="stats mono">
         <div><dt>games</dt><dd>{compact(stats.games)}</dd></div>
@@ -109,17 +109,6 @@ const loggedIn = !!Astro.locals.user;
       <a href="/games" class="muted">All games →</a>
     </div>
     {live.length ? <div class="grid">{live.map((g) => <GameCard game={g} />)}</div> : <p class="muted">No graduated games yet.</p>}
-  </section>
-
-  <section class="section wrap">
-    <div class="spread head">
-      <div>
-        <span class="eyebrow">Fresh uploads · unmonetized</span>
-        <h2>From the Proving Grounds</h2>
-      </div>
-      <a href="/proving" class="muted">Open the feed →</a>
-    </div>
-    {fresh.length ? <div class="grid">{fresh.map((g) => <GameCard game={g} />)}</div> : <p class="muted">Nothing new yet. Be the first to upload.</p>}
   </section>
 
   <section class="section wrap">

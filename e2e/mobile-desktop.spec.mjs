@@ -24,6 +24,12 @@ async function markStackTowerDesktop() {
       where id = 'stk7wr01'
       returning slug, title, input_support`;
     if (!rows.length) throw new Error('seed game stk7wr01 is missing; start from a seeded local stack');
+    // Neon Lanes stays playable on mobile; its parent is the desktop-only game above.
+    const forks = await sql`
+      update public.games set forked_from = 'stk7wr01'
+      where id = 'neon1an3'
+      returning slug`;
+    if (!forks.length) throw new Error('seed game neon1an3 is missing; start from a seeded local stack');
   } finally {
     await sql.end();
   }
@@ -44,7 +50,7 @@ test.beforeAll(async () => {
 });
 
 test('catalog and play headers vary by client hint and user agent', async ({ request }) => {
-  for (const path of ['/', '/games', '/proving', '/play/stack-tower']) {
+  for (const path of ['/', '/games', '/proving', '/play/stack-tower', '/creators']) {
     const res = await request.get(path, { headers: { 'user-agent': DESKTOP_UA, 'sec-ch-ua-mobile': '?0' } });
     expect(res.status(), path).toBeLessThan(400);
     expectVariance(res.headers());
@@ -79,10 +85,28 @@ test('mobile requests drop desktop-only games; desktop requests keep them', asyn
   const uaOnly = await request.get('/', { headers: { 'user-agent': MOBILE_UA } });
   expect(await uaOnly.text()).not.toContain('Stack Tower');
 
-  const creator = await request.get('/u/polyprism', { headers: { 'user-agent': MOBILE_UA, 'sec-ch-ua-mobile': '?1' } });
+  // Prism Pop is proving, so PV-1 keeps it off the public profile. Neon Lanes is the live game that stays visible.
+  const creator = await request.get('/u/vhs_vector', { headers: { 'user-agent': MOBILE_UA, 'sec-ch-ua-mobile': '?1' } });
+  expect(creator.status()).toBe(200);
   const creatorHtml = await creator.text();
-  expect(creatorHtml).toContain('Prism Pop');
+  expect(creatorHtml).toContain('Neon Lanes');
   expect(creatorHtml).not.toContain('Stack Tower');
+});
+
+test('fork of a desktop-only parent is plain text on mobile and a link on desktop', async ({ request }) => {
+  const mobile = await request.get('/play/neon-lanes', {
+    headers: { 'user-agent': MOBILE_UA, 'sec-ch-ua-mobile': '?1' },
+  });
+  const desktop = await request.get('/play/neon-lanes', {
+    headers: { 'user-agent': DESKTOP_UA, 'sec-ch-ua-mobile': '?0' },
+  });
+  expect(mobile.status()).toBeLessThan(400);
+  expect(desktop.status()).toBeLessThan(400);
+  const mobileHtml = await mobile.text();
+  const desktopHtml = await desktop.text();
+  expect(mobileHtml).toContain('fork of Stack Tower');
+  expect(mobileHtml).not.toMatch(/<a [^>]*href="\/play\/stack-tower"/);
+  expect(desktopHtml).toMatch(/fork of <a href="\/play\/stack-tower"[^>]*>Stack Tower<\/a>/);
 });
 
 const pixel = devices['Pixel 5'];
@@ -107,6 +131,13 @@ test.describe('desktop browser', () => {
     await page.goto('/games');
     await expect(page.getByRole('link', { name: /Stack Tower/ })).toBeVisible();
     await page.screenshot({ path: 'docs/pr-assets/is-3-desktop-games.png', fullPage: true });
+  });
+
+  test('fork credit links to a desktop-only parent', async ({ page }) => {
+    await page.goto('/play/neon-lanes');
+    const credit = page.locator('.byline');
+    await expect(credit).toContainText('fork of Stack Tower');
+    await expect(credit.getByRole('link', { name: 'Stack Tower' })).toHaveAttribute('href', '/play/stack-tower');
   });
 });
 
@@ -141,5 +172,13 @@ test.describe('mobile browser', () => {
     await page.goto('/');
     await expect(page.getByRole('link', { name: /Stack Tower/ })).toHaveCount(0);
     await page.screenshot({ path: 'docs/pr-assets/is-3-mobile-home.png', fullPage: true });
+  });
+
+  test('fork credit names a desktop-only parent without a link', async ({ page }) => {
+    await page.goto('/play/neon-lanes');
+    const credit = page.locator('.byline');
+    await expect(credit).toContainText('fork of Stack Tower');
+    await expect(credit.getByRole('link', { name: 'Stack Tower' })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Play Neon Lanes' })).toBeVisible();
   });
 });

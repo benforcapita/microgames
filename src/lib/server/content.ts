@@ -2,7 +2,7 @@
 // in-memory cache; missing or empty tables fall back to today's hardcoded copy. See docs/CONTENT.md.
 import { FEATURED_BROKEN_MAX_CRASH_RATE, FEATURED_BROKEN_MIN_PLAYS, SUPABASE_URL } from './config';
 import {
-  CONTENT_TTL_MS, PUBLISHED_STAGES, resolveContent, selectFeatured, siteMediaPrefix, ttlCache,
+  CONTENT_TTL_MS, resolveContent, selectFeatured, siteMediaPrefix, ttlCache,
   type ContentKey, type ContentRow, type ContentShapes, type FeaturedRow,
 } from './content-core';
 import { sql } from './db';
@@ -34,7 +34,7 @@ export async function getFeatured(limit = 8, device: DeviceKind = 'desktop'): Pr
   try {
     const ids = rows.map((r) => r.game_id);
     const [games, crash] = await Promise.all([
-      listGamesByIds(ids, [...PUBLISHED_STAGES], device),
+      listGamesByIds(ids, device),
       sql<{ game_id: string; crash_rate: number | null }[]>`
         select game_id, avg(crashed::int)::float8 as crash_rate from sessions where game_id in ${sql(ids)} group by game_id`,
     ]);

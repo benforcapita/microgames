@@ -188,6 +188,29 @@ async function assertDispatchSkipped(tx: Sql, id: string): Promise<void> {
   assert.equal(await queued(tx, id), 0);
 }
 
+function dispatchFunctionSql(sql: string): string {
+  const start = sql.indexOf('create or replace function private.dispatch_validate_game');
+  const end = sql.indexOf('$$;', start);
+  assert.ok(start >= 0 && end > start, 'dispatch_validate_game definition');
+  return sql.slice(start, end + 3);
+}
+
+describe('dispatch_validate_game warning migration', () => {
+  const migrations = join(dirname(fileURLToPath(import.meta.url)), '..', 'migrations');
+  const current = readFileSync(join(migrations, '20261015120800_enqueue_validate_game.sql'), 'utf8');
+  const restated = readFileSync(join(migrations, '20261015170000_dispatch_validate_game_warning_text.sql'), 'utf8');
+
+  it('restates the current main body, with #37 warning text and the same grants', () => {
+    assert.equal(dispatchFunctionSql(restated), dispatchFunctionSql(current));
+    assert.match(restated, /private\.settings validate_game_url is not set/);
+    assert.match(restated, /private\.settings validate_game_url is blank \(empty or whitespace only\)/);
+    assert.match(restated, /security definer/);
+    assert.match(restated, /set search_path = ''/);
+    assert.match(restated, /revoke all on function private\.dispatch_validate_game\(text, text\) from public, anon, authenticated;/);
+    assert.match(restated, /grant execute on function private\.dispatch_validate_game\(text, text\) to postgres, service_role;/);
+  });
+});
+
 describe('validate-game hook dispatch', { concurrency: false }, () => {
   it('does not seed a url or hook secret, and accepts open or locked-down pg_net grants', async (t) => {
     const sql = await connect(t);
@@ -222,6 +245,28 @@ describe('validate-game hook dispatch', { concurrency: false }, () => {
       assert.equal(dispatch?.auth_dispatch, false);
       assert.equal(dispatch?.anon_login, false);
       assert.equal(dispatch?.auth_login, false);
+
+      const [definer] = await sql<{
+        prosecdef: boolean;
+        proconfig: string[] | null;
+        public_exec: boolean;
+        postgres_exec: boolean;
+        service_exec: boolean;
+      }[]>`
+        select p.prosecdef,
+               p.proconfig,
+               has_function_privilege('public', 'private.dispatch_validate_game(text,text)', 'EXECUTE') as public_exec,
+               has_function_privilege('postgres', 'private.dispatch_validate_game(text,text)', 'EXECUTE') as postgres_exec,
+               has_function_privilege('service_role', 'private.dispatch_validate_game(text,text)', 'EXECUTE') as service_exec
+        from pg_proc p
+        join pg_namespace n on n.oid = p.pronamespace
+        where n.nspname = 'private' and p.proname = 'dispatch_validate_game'
+      `;
+      assert.equal(definer?.prosecdef, true);
+      assert.ok(definer?.proconfig?.some((item) => item.replace(/"/g, '') === 'search_path='), definer?.proconfig?.join(','));
+      assert.equal(definer?.public_exec, false);
+      assert.equal(definer?.postgres_exec, true);
+      assert.equal(definer?.service_exec, true);
 
       // Post-migration grants stay open (GAP). A database already locked down
       // by supabase_admin is PASS. postgres cannot move either state.
