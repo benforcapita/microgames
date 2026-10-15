@@ -5,6 +5,7 @@ import {
   type ContentRow, type FeaturedRow,
 } from './content-core.ts';
 
+const RULES = { minPlays: 5, maxCrashRate: 0.5 }; // mirrors FEATURED_BROKEN_* in config.ts
 const PREFIX = siteMediaPrefix('http://127.0.0.1:54321/');
 const row = (key: string, locale: string, value: unknown): ContentRow => ({ key, locale, value });
 
@@ -83,14 +84,20 @@ describe('featured games', () => {
       f('pending', 0), f('broken', 0), f('gone', 0), f('b', 2),
     ];
     const games = [g('a'), g('b', 'proving'), g('c'), g('off'), g('future'), g('past'), g('pending', 'pending'), g('broken', 'live', 20, 0.9)];
-    const out = selectFeatured(rows, games, now);
+    const out = selectFeatured(rows, games, now, RULES);
     assert.deepEqual(out.map((x) => x.game.id), ['a', 'b', 'c']);
     assert.equal(out[0].label, 'Staff pick');
   });
+  it('config.ts holds the thresholds as named constants (5 plays, 50%)', async () => {
+    const { readFileSync } = await import('node:fs');
+    const cfg = readFileSync(new URL('./config.ts', import.meta.url), 'utf8');
+    assert.match(cfg, /export const FEATURED_BROKEN_MIN_PLAYS = 5;/);
+    assert.match(cfg, /export const FEATURED_BROKEN_MAX_CRASH_RATE = 0\.5;/);
+  });
   it('broken = enough plays and a crash rate over the limit', () => {
-    assert.ok(isBroken({ plays: 5, crashRate: 0.6 }));
-    assert.ok(!isBroken({ plays: 4, crashRate: 1 }));
-    assert.ok(!isBroken({ plays: 100, crashRate: null }));
+    assert.ok(isBroken({ plays: 5, crashRate: 0.6 }, RULES));
+    assert.ok(!isBroken({ plays: 4, crashRate: 1 }, RULES));
+    assert.ok(!isBroken({ plays: 100, crashRate: null }, RULES));
   });
 });
 

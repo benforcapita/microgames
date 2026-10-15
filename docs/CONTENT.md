@@ -56,7 +56,7 @@ Locales: add another row with the same `key` and a different `locale` (for examp
 A featured game is shown only if all of these hold:
 - it's active and inside its window
 - it's published (`proving` or `live`), so pending, rejected and other hidden stages are skipped
-- it isn't broken, meaning it does not have **≥5 plays with a crash rate above 50%**
+- it is not broken: **≥5 plays with a crash rate above 50%** (`FEATURED_BROKEN_MIN_PLAYS` and `FEATURED_BROKEN_MAX_CRASH_RATE` in `src/lib/server/config.ts`)
 
 With no visible featured games, the homepage keeps its current ordering: the hero shows the top live game and no Featured row appears.
 

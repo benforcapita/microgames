@@ -18,6 +18,11 @@ export const SITE_URL = env.SITE_URL?.replace(/\/$/, '');
 export const CDN_ORIGIN = (env.MG_CDN_ORIGIN ?? 'http://localhost:4322').replace(/\/$/, '');
 export const ADSENSE_CLIENT = env.PUBLIC_ADSENSE_CLIENT || import.meta.env.PUBLIC_ADSENSE_CLIENT || '';
 
+/** CM-1: a featured game is skipped as broken at >= this many plays ... */
+export const FEATURED_BROKEN_MIN_PLAYS = 5;
+/** ... with a crash rate strictly above this (0.5 = 50%). */
+export const FEATURED_BROKEN_MAX_CRASH_RATE = 0.5;
+
 export const GRADUATION = {
   ...GRADUATION_DEFAULTS,
   minPlays: Number(env.MG_MIN_PLAYS ?? GRADUATION_DEFAULTS.minPlays),

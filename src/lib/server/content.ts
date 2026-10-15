@@ -1,6 +1,6 @@
 // CM-1: Supabase-managed site content. Reads through the server (service-role) client with a ~60s
 // in-memory cache; missing or empty tables fall back to today's hardcoded copy. See docs/CONTENT.md.
-import { SUPABASE_URL } from './config';
+import { FEATURED_BROKEN_MAX_CRASH_RATE, FEATURED_BROKEN_MIN_PLAYS, SUPABASE_URL } from './config';
 import {
   CONTENT_TTL_MS, PUBLISHED_STAGES, resolveContent, selectFeatured, siteMediaPrefix, ttlCache,
   type ContentKey, type ContentRow, type ContentShapes, type FeaturedRow,
@@ -39,7 +39,7 @@ export async function getFeatured(limit = 8): Promise<{ game: Game; label: strin
     ]);
     const rate = new Map(crash.map((c) => [c.game_id, c.crash_rate]));
     const candidates = games.map((x) => ({ ...x, crashRate: rate.get(x.id) ?? null }));
-    return selectFeatured(rows, candidates, Date.now()).slice(0, limit);
+    return selectFeatured(rows, candidates, Date.now(), { minPlays: FEATURED_BROKEN_MIN_PLAYS, maxCrashRate: FEATURED_BROKEN_MAX_CRASH_RATE }).slice(0, limit);
   } catch (e) {
     console.warn('[content] featured games unavailable:', (e as Error)?.message ?? e);
     return [];

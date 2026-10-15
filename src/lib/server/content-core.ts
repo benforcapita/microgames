@@ -5,8 +5,11 @@
 export const DEFAULT_LOCALE = 'en';
 export const CONTENT_TTL_MS = 60_000;
 export const PUBLISHED_STAGES = ['proving', 'live'] as const;
-/** A featured game is skipped as broken once it has this many plays and crashes more often than the rate. */
-export const BROKEN = { minPlays: 5, maxCrashRate: 0.5 };
+/** Thresholds for skipping a broken featured game; the values live in config.ts (FEATURED_BROKEN_*). */
+export interface BrokenRules {
+  minPlays: number;
+  maxCrashRate: number;
+}
 
 export interface HeroContent {
   eyebrow: string;
@@ -144,19 +147,19 @@ export function inWindow(row: Pick<FeaturedRow, 'starts_at' | 'ends_at'>, now: n
   return (s === null || s <= now) && (e === null || now < e);
 }
 
-export function isBroken(g: Pick<FeaturedCandidate, 'plays' | 'crashRate'>): boolean {
-  return g.plays >= BROKEN.minPlays && (g.crashRate ?? 0) > BROKEN.maxCrashRate;
+export function isBroken(g: Pick<FeaturedCandidate, 'plays' | 'crashRate'>, rules: BrokenRules): boolean {
+  return g.plays >= rules.minPlays && (g.crashRate ?? 0) > rules.maxCrashRate;
 }
 
 /** Active, inside its window, published (proving/live), not broken; ordered by position. */
-export function selectFeatured<G extends FeaturedCandidate>(rows: FeaturedRow[], games: G[], now: number): { game: G; label: string }[] {
+export function selectFeatured<G extends FeaturedCandidate>(rows: FeaturedRow[], games: G[], now: number, broken: BrokenRules): { game: G; label: string }[] {
   const byId = new Map(games.map((g) => [g.id, g]));
   return rows
     .filter((r) => r.active && inWindow(r, now))
     .sort((a, b) => a.position - b.position || a.game_id.localeCompare(b.game_id))
     .flatMap((r) => {
       const g = byId.get(r.game_id);
-      if (!g || !(PUBLISHED_STAGES as readonly string[]).includes(g.stage) || isBroken(g)) return [];
+      if (!g || !(PUBLISHED_STAGES as readonly string[]).includes(g.stage) || isBroken(g, broken)) return [];
       return [{ game: g, label: cleanText(r.label, 40) ?? '' }];
     });
 }
