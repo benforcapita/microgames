@@ -8,11 +8,13 @@ import { getGame, getHealth, getUserRating, listGames } from '../../lib/server/g
 import { CDN_ORIGIN, GRADUATION, REVENUE } from '../../lib/server/config';
 import { ago, compact, formatCheck, kb } from '../../lib/format';
 
-const game = await getGame(Astro.params.slug ?? '');
+const { user } = Astro.locals;
+
+// Owners can open their own pending/rejected game; everyone else gets a 404 (canViewGame).
+const game = await getGame(Astro.params.slug ?? '', { viewerId: Astro.locals.user?.id });
 if (!game) return Astro.rewrite('/404');
 if (Astro.params.slug !== game.slug) return Astro.redirect(`/play/${game.slug}`, 301);
 
-const { user } = Astro.locals;
 const [{ checks }, mine, parent, forks, byCreator] = await Promise.all([
   getHealth(game.id),
   getUserRating(game.id, user?.id),
