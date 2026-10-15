@@ -19,7 +19,7 @@ describe('IS-4 backfill: target guards (REST only)', () => {
   const remote = { PUBLIC_SUPABASE_URL: 'https://abcdefghijkl.supabase.co', SUPABASE_SECRET_KEY: 'x' };
   it('parses --allow-remote / --yes / --ids / --force', () => {
     assert.deepEqual(parseArgs(['--dry-run', '--allow-remote', '--yes', '--force', '--ids', 'a, b']),
-      { dryRun: true, apply: false, force: true, all: false, yes: true, allowRemote: true, ids: ['a', 'b'], rest: true });
+      { dryRun: true, apply: false, force: true, yes: true, allowRemote: true, ids: ['a', 'b'], rest: true });
   });
   it('no env -> local stack, REST', () => assert.deepEqual(resolveTarget({}, parseArgs([])), { mode: 'local', db: 'rest' }));
   it('remote without --allow-remote is refused', () => assert.match(resolveTarget(remote, parseArgs([])).error ?? "", /--allow-remote/));
@@ -78,5 +78,40 @@ describe('IS-4 QA: --ids are validated before reaching PostgREST', () => {
     const src = fs.readFileSync(new URL('../backfill-input-support.mjs', import.meta.url), 'utf8');
     assert.doesNotMatch(src, /\.or\(/);
     assert.match(src, /q\.in\('id', args\.ids\)/);
+  });
+});
+
+describe('IS-4 QA round 3: strict flags, --ids=value form', () => {
+  const err = (argv: string[]) => (parseArgs(argv) as { error?: string }).error ?? '';
+  it('--ids=a,b is parsed like --ids a,b', () => {
+    assert.deepEqual(parseArgs(['--ids=pr1smp0p,a-b_C']).ids, ['pr1smp0p', 'a-b_C']);
+    assert.deepEqual(parseArgs(['--apply', '--ids=x1']), { dryRun: false, apply: true, force: false, yes: false, allowRemote: false, ids: ['x1'], rest: true });
+  });
+  it('--ids= (empty) is an error, not "all games"', () => {
+    assert.match(err(['--ids=']), /needs a comma-separated list/);
+    assert.match(err(['--ids=,']), /needs a comma-separated list/);
+    assert.match(err(['--ids', '']), /needs a comma-separated list/);
+  });
+  it('--ids=a),x and other injections are rejected with the id regex', () => {
+    assert.match(err(['--ids=a),x']), /invalid --ids.*"a\)"/);
+    assert.match(err(['--ids=ok,a b']), /invalid --ids/);
+    assert.match(err(['--ids=a,,b']), /invalid --ids.*""/, 'an empty entry in the middle is invalid too');
+    assert.match(err(['--ids=' + 'x'.repeat(33)]), /invalid --ids/);
+  });
+  it('--ids twice is an error', () => assert.match(err(['--ids=a', '--ids', 'b']), /more than once/));
+  it('unknown or malformed flags are errors (never ignored)', () => {
+    for (const argv of [['--all'], ['--idz=a'], ['--dryrun'], ['-n'], ['--apply=yes'], ['--dry-run=false'], ['--allow-remote=1'], ['--ID=a'], ['stray'], ['--apply', 'pr1smp0p']]) {
+      assert.match(err(argv), /unknown flag|does not take a value|unexpected argument/, JSON.stringify(argv));
+    }
+  });
+  it('every known flag still parses', () => {
+    const r = parseArgs(['--dry-run', '--apply', '--force', '--yes', '--allow-remote', '--ids', 'a']);
+    assert.equal((r as { error?: string }).error, undefined);
+    assert.equal(parseArgs([]).dryRun, true);
+  });
+  it('the script exits 2 on any parse error before connecting', () => {
+    const src = fs.readFileSync(new URL('../backfill-input-support.mjs', import.meta.url), 'utf8');
+    assert.ok(src.indexOf('if (args.error) die(args.error);') < src.indexOf('resolveTarget(process.env'));
+    assert.match(src, /const die = \(msg, code = 2\)/);
   });
 });

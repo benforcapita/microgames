@@ -1,5 +1,5 @@
 // Pure helpers for scripts/backfill-input-support.mjs (unit-tested in backfill-input.test.ts). No I/O here.
-import { parseArgs as parseThumbArgs, resolveTarget as resolveThumbTarget } from './thumbs.mjs';
+import { resolveTarget as resolveThumbTarget } from './thumbs.mjs';
 
 export const VALID = ['mobile', 'desktop', 'both', 'unknown'];
 
@@ -11,21 +11,53 @@ export function invalidIds(ids) {
   return (ids ?? []).filter((id) => !GAME_ID_RE.test(id));
 }
 
+export const BOOL_FLAGS = ['--dry-run', '--apply', '--force', '--yes', '--allow-remote'];
+
 /**
- * Dry run is the DEFAULT. Writing needs an explicit --apply (and --dry-run always wins over --apply).
- * `--ids` given with no value is an error rather than "all games".
+ * Strict parser. Dry run is the DEFAULT; writing needs --apply (--dry-run always wins over --apply).
+ * --ids takes a value as `--ids a,b` or `--ids=a,b`; an empty or missing value, a repeated --ids, any id
+ * outside GAME_ID_RE, an unknown flag, a boolean flag given a value, or a stray positional argument is an
+ * error ({ error }), which the script turns into exit 2 before it connects anywhere.
+ */
+/**
+ * @typedef {{ dryRun: boolean, apply: boolean, force: boolean, yes: boolean, allowRemote: boolean, ids?: string[], rest: true, error?: string }} BackfillArgs
+ * @param {string[]} argv
+ * @returns {BackfillArgs}
  */
 export function parseArgs(argv) {
-  const a = parseThumbArgs(argv);
-  const apply = argv.includes('--apply') && !a.dryRun;
-  const idsFlag = argv.includes('--ids');
-  const ids = idsFlag ? (a.ids ?? []) : undefined;
-  const error = idsFlag && (!ids.length || ids.some((x) => x.startsWith('--')))
-    ? '--ids needs a comma-separated list of game ids'
-    : ids && invalidIds(ids).length
-      ? `invalid --ids (must match ${GAME_ID_RE}): ${invalidIds(ids).map((x) => JSON.stringify(x)).join(', ')}`
-      : undefined;
-  return { dryRun: !apply, apply, force: a.force, all: a.all, yes: a.yes, allowRemote: a.allowRemote, ids, rest: true, ...(error ? { error } : {}) };
+  const seen = new Set();
+  /** @type {string[] | undefined} */
+  let ids;
+  /** @param {string} error @returns {BackfillArgs} */
+  const fail = (error) => ({ dryRun: true, apply: false, force: false, yes: false, allowRemote: false, rest: true, error });
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    const eq = arg.indexOf('=');
+    const name = arg.startsWith('--') && eq > 0 ? arg.slice(0, eq) : arg;
+    if (name === '--ids') {
+      if (ids !== undefined) return fail('--ids given more than once');
+      let value;
+      if (eq > 0) value = arg.slice(eq + 1);
+      else {
+        value = argv[i + 1];
+        if (value === undefined || value.startsWith('-')) return fail('--ids needs a comma-separated list of game ids');
+        i++;
+      }
+      ids = value.split(',').map((x) => x.trim());
+      if (!value.trim() || ids.every((x) => !x)) return fail('--ids needs a comma-separated list of game ids');
+      const bad = invalidIds(ids);
+      if (bad.length) return fail(`invalid --ids (must match ${GAME_ID_RE}): ${bad.map((x) => JSON.stringify(x)).join(', ')}`);
+      continue;
+    }
+    if (BOOL_FLAGS.includes(name)) {
+      if (eq > 0 && arg.startsWith('--')) return fail(`${name} does not take a value`);
+      seen.add(name);
+      continue;
+    }
+    return fail(arg.startsWith('-') ? `unknown flag: ${arg.split('=')[0]}` : `unexpected argument: ${JSON.stringify(arg)}`);
+  }
+  const apply = seen.has('--apply') && !seen.has('--dry-run');
+  return { dryRun: !apply, apply, force: seen.has('--force'), yes: seen.has('--yes'), allowRemote: seen.has('--allow-remote'), ...(ids ? { ids } : {}), rest: true };
 }
 
 /** Same connection rules as capture-thumbs, but always REST (PostgREST + Storage over HTTP(S); never Postgres). */

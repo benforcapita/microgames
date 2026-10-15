@@ -5,7 +5,9 @@
 //   default        DRY RUN: read + classify + report what would change; writes nothing
 //   --apply        actually write games.input_support (--dry-run, if also given, wins)
 //   scope          every game whose input_support is still 'unknown'
-//   --ids          comma-separated game ids only (each must match ^[A-Za-z0-9_-]{1,32}$, else the run aborts)
+//   --ids a,b | --ids=a,b  game ids only (each must match ^[A-Za-z0-9_-]{1,32}$, else exit 2)
+// Any unknown flag, a value on a boolean flag, an empty or repeated --ids, or a stray argument exits 2
+// before anything connects.
 //   --force        also recompute rows that already have a class
 // Connection: none of PUBLIC_SUPABASE_URL / DATABASE_URL / SUPABASE_SECRET_KEY set -> the LOCAL stack from
 // `supabase status`. Otherwise PUBLIC_SUPABASE_URL + SUPABASE_SECRET_KEY (DATABASE_URL is ignored).
