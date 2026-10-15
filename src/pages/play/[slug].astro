@@ -5,7 +5,9 @@ import GameCard from '../../components/GameCard.astro';
 import GameThumb from '../../components/GameThumb.astro';
 import { ratingLabel } from '../../lib/rating';
 import { getGame, getHealth, getUserRating, listGames } from '../../lib/server/games';
-import { CDN_ORIGIN, GRADUATION, REVENUE } from '../../lib/server/config';
+import { CDN_ORIGIN, CDN_PREVIEW_SECRET, GRADUATION, REVENUE } from '../../lib/server/config';
+import { isPublicStage } from '../../lib/server/game-rules';
+import { mintPreviewToken } from '../../../cdn/preview-token.mjs';
 import { ago, compact, formatCheck, kb } from '../../lib/format';
 
 const { user } = Astro.locals;
@@ -24,6 +26,9 @@ const [{ checks }, mine, parent, forks, byCreator] = await Promise.all([
 ]);
 const more = byCreator.filter((g) => g.id !== game.id).slice(0, 4);
 const isOwner = !!user && user.id === game.ownerId;
+// SP-6: the CDN serves pending/rejected bundles only with a short-lived token, minted only for the owner here.
+const previewToken = isOwner && !isPublicStage(game.stage) ? mintPreviewToken(CDN_PREVIEW_SECRET, game.id) : null;
+const ptQuery = previewToken ? `&pt=${encodeURIComponent(previewToken)}` : '';
 const remixable = game.license !== 'All rights reserved';
 const live = game.stage === 'live';
 const passed = checks.filter((c) => c.pass).length;
@@ -41,7 +46,7 @@ const uploaded = Astro.url.searchParams.has('uploaded');
       )
     }
     <div class="stage-wrap">
-      <div id="stage" class="stage" data-game-id={game.id} data-game-title={game.title} data-game-stage={game.stage} data-cdn={CDN_ORIGIN} data-cloud={user ? '1' : ''}>
+      <div id="stage" class="stage" data-game-id={game.id} data-game-title={game.title} data-game-stage={game.stage} data-cdn={CDN_ORIGIN} data-cloud={user ? '1' : ''} data-preview={previewToken ?? ''}>
         <button class="launch" type="button" aria-label={`Play ${game.title}`}>
           <GameThumb game={game} class="preview-art" eager />
           <span class="preview-shade" aria-hidden="true"></span>
@@ -62,7 +67,7 @@ const uploaded = Astro.url.searchParams.has('uploaded');
         <div class="row">
           <button class="btn ghost sm" type="button" id="restart">↻ Restart</button>
           <button class="btn ghost sm" type="button" id="fullscreen">⛶ Fullscreen</button>
-          {remixable && <a class="btn ghost sm" href={`${CDN_ORIGIN}/g/${game.id}/index.html?source`} target="_blank" rel="noopener">{'</>'} Source</a>}
+          {remixable && <a class="btn ghost sm" href={`${CDN_ORIGIN}/g/${game.id}/index.html?source${ptQuery}`} target="_blank" rel="noopener">{'</>'} Source</a>}
           {remixable && live && <a class="btn sm" href={`/upload?fork=${game.slug}`}>⑂ Fork</a>}
           {isOwner && <a class="btn ghost sm" href="/me">Manage</a>}
         </div>
@@ -206,7 +211,7 @@ const uploaded = Astro.url.searchParams.has('uploaded');
   import { mountPlayer, type PlayerHandle } from '../../client/player';
 
   const stage = document.getElementById('stage')!;
-  const { gameId, gameTitle, gameStage, cdn, cloud } = stage.dataset;
+  const { gameId, gameTitle, gameStage, cdn, cloud, preview } = stage.dataset;
   const game = { id: gameId!, title: gameTitle!, stage: gameStage as 'proving' | 'live' };
   const best = document.getElementById('best')!;
   const showBest = (n: number) => (best.textContent = Number.isFinite(n) ? `Your best: ${n}` : '');
@@ -218,6 +223,7 @@ const uploaded = Astro.url.searchParams.has('uploaded');
     player = mountPlayer(stage, game, {
       cdnOrigin: cdn!,
       cloudSaves: !!cloud,
+      previewToken: preview || null,
       onEvent: (type, data) => type === 'SCORE' && showBest(Number(data.best)),
     });
     player.frame.focus();
