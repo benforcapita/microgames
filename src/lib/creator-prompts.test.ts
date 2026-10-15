@@ -38,13 +38,17 @@ describe('creator prompts', () => {
 describe('inputSupport declaration', () => {
   const doc = fs.readFileSync('docs/RUNTIME-CONTRACT.md', 'utf8');
   const contract = doc.split('## Creator prompts')[0];
-  const values = INPUT_SUPPORT_VALUES.map((v) => `"${v}"`);
+  const values = INPUT_SUPPORT_VALUES.map((v) => `'${v}'`);
   it('contract, Prompt A and Prompt B all name the meta tag and the three values', () => {
     for (const [where, text] of [['contract', contract], ...CREATOR_PROMPTS.map((p) => [`Prompt ${p.id}`, p.text])]) {
       assert.ok(text.includes(`name="${INPUT_SUPPORT_META}"`), `${where}: meta name`);
+      assert.ok(text.includes('Meshgrounds?.declare?.({ inputSupport'), `${where}: declare() form`);
+      assert.match(text, /(Preferred: [^\n]*declare[^\n]*alternative: [^\n]*meta|declare\?\.\(\{ inputSupport \}\) \(preferred\) or <meta)/, `${where}: declare preferred, meta alternative`);
+      assert.doesNotMatch(text, /meshgrounds:inputSupport/, `${where}: old camelCase meta name`);
       for (const v of values) assert.ok(text.includes(v), `${where}: ${v}`);
     }
   });
+  it('meta name matches IS-1 (#34) exactly', () => assert.equal(INPUT_SUPPORT_META, 'meshgrounds:input-support'));
   it('contract names the DB column and states mobile=touch, desktop=keyboard/mouse', () => {
     assert.match(contract, /`inputSupport`/);
     assert.match(contract, /`input_support`/);
@@ -53,7 +57,7 @@ describe('inputSupport declaration', () => {
   });
   it('Prompt B checks the declaration', () => {
     const b = CREATOR_PROMPTS.find((p) => p.id === 'b')!.text;
-    assert.match(b, /Input support declaration: .*FAIL if missing/);
+    assert.match(b, /Input support declaration: .*WARN if missing/);
   });
   it('contract says the CDN CSP is the outer limit and the contract may be stricter', () => {
     assert.match(contract, /CSP is the outer safety limit; this contract may be stricter/);

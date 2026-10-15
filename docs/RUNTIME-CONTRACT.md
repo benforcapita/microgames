@@ -8,7 +8,7 @@ Rules every game uploaded to Meshgrounds must follow. Source: `docs/FEATURES-v2.
 4. **Recommended (a warning, not required, in v1):** call `Meshgrounds.ready()` once the first playable frame is shown (portal receives `__MG_READY`). Call `Meshgrounds.gameOver(score)` / `levelComplete(level, score)` at loop end (feeds completion-rate telemetry).
 5. Must render to a `<canvas>` or visible DOM within 3 s, throw no uncaught errors in the first 10 s, work in a sandboxed opaque-origin iframe (`allow-scripts allow-pointer-lock` only: no popups, forms, top navigation, `alert`).
 6. Must not use `eval` of remote code, crypto-mining, or try to escape the frame.
-7. Declare `inputSupport` — `"mobile"`, `"desktop"` or `"both"` — in the `<head>` as `<meta name="meshgrounds:inputSupport" content="both">` (stored by the portal as `input_support`). Games that support mobile must use touch controls on mobile; games that support desktop must use keyboard/mouse on desktop.
+7. Declare `inputSupport` — `'mobile'`, `'desktop'` or `'both'` (stored by the portal as `input_support`). Preferred: call `window.Meshgrounds?.declare?.({ inputSupport: 'both' })`; alternative: `<meta name="meshgrounds:input-support" content="both">` in the `<head>`. If both are present, `declare()` wins; invalid values are ignored; an undeclared game is treated as `unknown`. Games that support mobile must use touch controls on mobile; games that support desktop must use keyboard/mouse on desktop.
 
 The game CDN's CSP is the outer safety limit; this contract may be stricter than what the CSP technically allows (for example, no `fetch` and no remote images).
 
@@ -38,7 +38,7 @@ THE CONTRACT
 8. Render something visible (canvas or DOM) within 3 seconds of load, even if it's a title screen. Size the canvas to the window and handle resize. Use touch controls on mobile and keyboard/mouse on desktop, matching the inputSupport you declare (rule 11).
 9. Never throw uncaught errors: guard against nulls, check WebGL availability and show a friendly message if it's missing, handle webglcontextlost.
 10. No minified blobs of unknown origin, no eval of downloaded code, no crypto-mining, no attempts to access parent/top.
-11. Declare which devices the game supports with exactly one tag in <head>: <meta name="meshgrounds:inputSupport" content="both"> where content is "mobile", "desktop" or "both". Pick the value that matches the controls you actually implemented.
+11. Declare which devices the game supports, matching the controls you actually implemented: 'mobile', 'desktop' or 'both'. Preferred: window.Meshgrounds?.declare?.({ inputSupport: 'both' }); alternative: <meta name="meshgrounds:input-support" content="both"> in <head>. If you use both, declare() wins; undeclared games show as "unknown".
 
 OUTPUT
 - The complete final HTML file in one code block, nothing omitted ("..." is not allowed).
@@ -70,7 +70,7 @@ CHECKLIST
 12. Errors: list any code path that could throw uncaught (null access, missing WebGL, failed asset decode). FAIL if likely on load.
 13. Input: touch controls work on mobile and keyboard/mouse on desktop, for every platform the game declares; canvas resizes with the window.
 14. Safety: no eval of remote code, obfuscated blobs, mining, tracking, or attempts to reach parent/top.
-15. Input support declaration: exactly one <meta name="meshgrounds:inputSupport"> in <head> with content "mobile", "desktop" or "both" (FAIL if missing or another value; FAIL if the declared platforms don't match the controls in item 13).
+15. Input support declaration: declares inputSupport via window.Meshgrounds?.declare?.({ inputSupport }) (preferred) or <meta name="meshgrounds:input-support" content="…"> with 'mobile', 'desktop' or 'both' (WARN if missing — the game shows as "unknown"; FAIL for any other value; FAIL if the declared platforms don't match the controls in item 13).
 
 Finish with:
 VERDICT: READY or NOT READY
