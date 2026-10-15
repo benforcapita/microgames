@@ -16,7 +16,7 @@ function statements(file: string): string[] {
     .join('\n')
     .split(';')
     .map((part) => part.trim())
-    .filter(Boolean);
+    .filter((part) => part && !/^(begin|commit|rollback)$/i.test(part));
 }
 
 function localDbUrl(): string | undefined {
@@ -164,29 +164,60 @@ describe('one game_validations row per attempt', () => {
     }
   });
 
-  it('cleanup drops a stale queued row beside a real verdict and strips a lone fake pass', async (t) => {
+  it('cleanup drops a stale queued row beside a later verdict and strips a lone fake pass', async (t) => {
     const sql = await connect(t);
     if (!sql) return;
     const paired = gameId('paired');
     const lone = gameId('lone');
+    const newerQueued = gameId('newerq');
+    const running = gameId('running');
     try {
       await rollback(sql, async (tx) => {
         await insertPending(tx, paired);
         await insertPending(tx, lone);
+        await insertPending(tx, newerQueued);
+        await insertPending(tx, running);
+        const t0 = new Date('2026-10-15T09:00:00.000Z');
+        const t1 = new Date('2026-10-15T09:05:00.000Z');
+        const t2 = new Date('2026-10-15T09:10:00.000Z');
         await tx`
-          insert into public.game_validations (game_id, version, status, static_report)
-          values (${paired}, 1, 'queued', ${tx.json({ status: 'pass', checks: [] })})
+          insert into public.game_validations (game_id, version, status, static_report, created_at)
+          values (${paired}, 1, 'queued', ${tx.json({ status: 'pass', checks: [] })}, ${t0})
         `;
         await tx`
-          insert into public.game_validations (game_id, version, bundle_sha256, status, static_report, finished_at)
-          values (${paired}, 2, ${shaA}, 'passed', ${tx.json({ status: 'pass', checks: [] })}, now())
+          insert into public.game_validations (game_id, version, bundle_sha256, status, static_report, finished_at, created_at)
+          values (${paired}, 2, ${shaA}, 'passed', ${tx.json({ status: 'pass', checks: [] })}, now(), ${t1})
         `;
         await tx`
-          insert into public.game_validations (game_id, version, status, static_report)
-          values (${lone}, 1, 'queued', ${tx.json({ status: 'pass', checks: [] })})
+          insert into public.game_validations (game_id, version, status, static_report, created_at)
+          values (${lone}, 1, 'queued', ${tx.json({ status: 'pass', checks: [] })}, ${t0})
+        `;
+        await tx`
+          insert into public.game_validations (game_id, version, bundle_sha256, status, static_report, finished_at, created_at)
+          values (${newerQueued}, 1, ${shaB}, 'passed', ${tx.json({ status: 'pass', checks: [] })}, now(), ${t0})
+        `;
+        await tx`
+          insert into public.game_validations (game_id, version, status, static_report, created_at)
+          values (${newerQueued}, 2, 'queued', ${tx.json({ status: 'pass', checks: [] })}, ${t1})
+        `;
+        await tx`
+          insert into public.game_validations (game_id, version, status, static_report, created_at)
+          values (${running}, 1, 'queued', ${tx.json({ status: 'queued' })}, ${t0})
+        `;
+        await tx`
+          insert into public.game_validations (game_id, version, bundle_sha256, status, static_report, finished_at, created_at)
+          values (${running}, 2, ${shaA}, 'passed', ${tx.json({ status: 'pass', checks: [] })}, now(), ${t1})
+        `;
+        await tx`
+          insert into public.game_validations (game_id, version, status, static_report, created_at)
+          values (${running}, 3, 'running', '{}'::jsonb, ${t2})
         `;
 
-        for (const statement of statements(cleanupSql)) await tx.unsafe(statement);
+        const runnable = statements(cleanupSql);
+        assert.ok(runnable.some((statement) => /^select count\(\*\)/i.test(statement)));
+        assert.match(cleanupSql, /\bbegin\s*;/i);
+        assert.match(cleanupSql, /\bcommit\s*;/i);
+        for (const statement of runnable) await tx.unsafe(statement);
 
         const pairedRows = await tx<{ status: string; version: number }[]>`
           select status, version from public.game_validations where game_id = ${paired} order by version
@@ -201,6 +232,16 @@ describe('one game_validations row per attempt', () => {
         `;
         assert.equal(loneRow?.status, 'queued');
         assert.equal(loneRow?.report_status, 'queued');
+
+        const newerRows = await tx<{ status: string }[]>`
+          select status from public.game_validations where game_id = ${newerQueued} order by version
+        `;
+        assert.deepEqual(newerRows.map((row) => row.status), ['passed', 'queued']);
+
+        const runningRows = await tx<{ status: string }[]>`
+          select status from public.game_validations where game_id = ${running} order by version
+        `;
+        assert.deepEqual(runningRows.map((row) => row.status), ['queued', 'passed', 'running']);
       });
     } finally {
       await sql.end({ timeout: 1 });
