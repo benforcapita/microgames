@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import { GRADUATION } from './config';
 import { sql } from './db';
 import { BAYES_PRIOR_VOTES, assessHealth, clampDurationMs, clampFirstFrameMs, ratingUserId, slugify, uniqueSlug, type HealthCheck } from './game-rules';
+import { insertSessionStart, postgresSchemaClient } from './schema-rollout';
 import { bucket } from './supabase';
 
 export { normalizeTags } from './game-rules';
@@ -192,13 +193,19 @@ export async function getUserRating(gameId: string, voter: string | undefined): 
   return row?.stars ?? null;
 }
 
-export type TelemetryType = 'session_start' | 'first_frame' | 'start' | 'complete' | 'crash' | 'heartbeat';
+export type TelemetryType = 'session_start' | 'first_frame' | 'start' | 'complete' | 'crash' | 'heartbeat' | 'ready';
 
-export async function recordTelemetry(sessionId: string, gameId: string, type: TelemetryType, value: unknown = 0) {
+export async function recordTelemetry(
+  sessionId: string,
+  gameId: string,
+  type: TelemetryType,
+  value: unknown = 0,
+  userId: string | null = null,
+) {
   const where = sql`where id = ${sessionId} and game_id = ${gameId}`;
   switch (type) {
     case 'session_start':
-      await sql`insert into sessions (id, game_id) values (${sessionId}, ${gameId}) on conflict do nothing`;
+      await insertSessionStart(postgresSchemaClient(sql), { sessionId, gameId, userId });
       return;
     case 'first_frame': {
       const ms = clampFirstFrameMs(value);
@@ -207,6 +214,10 @@ export async function recordTelemetry(sessionId: string, gameId: string, type: T
       }
       return;
     }
+    case 'ready':
+      // Acknowledged only. sessions has no ready column, and this ticket does not migrate.
+      // first_frame_ms stays the automatic animation-frame metric.
+      return;
     case 'start':
       await sql`update sessions set started = true ${where}`;
       break;
