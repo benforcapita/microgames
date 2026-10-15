@@ -18,10 +18,12 @@
 --   npm run check:pg-net -- --strict
 --   psql "$DATABASE_URL" -f supabase/ops/check_pg_net_privileges.sql
 --
--- A missing schema, queue, or http_post is GAP. Run
--- supabase/ops/pg_net_lockdown.sql as the current role before expecting PASS.
--- On hosted that role is postgres, so GAP after the lockdown attempt is the
--- honest result until the grantor applies it.
+-- A missing schema, queue, or http_post is GAP.
+-- Hosted remediation: Supabase support runs supabase/ops/pg_net_lockdown.sql
+-- as supabase_admin. Then `npm run check:pg-net -- --strict` is a required
+-- post-deploy step and must exit 0. Our postgres role cannot apply the
+-- lockdown, so a GAP report after a postgres attempt is expected until support
+-- has run the script.
 
 with roles as (
   select *
