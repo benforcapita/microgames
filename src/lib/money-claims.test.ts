@@ -54,7 +54,7 @@ describe('findMoneyClaims', () => {
     ]) assert.ok(findMoneyClaims(t).length + findPaymentPromises(t).length >= 1, t);
   });
   it('FINDER-3: negations are not claims', () => {
-    for (const t of ['We will never monetize your data.', 'There is no monetize button.', "We don't take royalties.", 'Not monetization-ready yet.'])
+    for (const t of ['We will never monetize your data.', 'There is no monetize button.', "We don't take royalties.", 'Not monetization-ready yet.', 'No money is paid out', 'No money is paid out.'])
       assert.equal(findMoneyClaims(t).length + findPaymentPromises(t).length, 0, t);
   });
   it('FINDER-3 QA: a negation in an earlier clause or a non-adjacent word does not hide a claim', () => {
@@ -72,6 +72,13 @@ describe('findMoneyClaims', () => {
       'No limits on royalties',
       'No catch, earn money from your games',
       'No ads. Monetize your game.',
+      // QA round 3: the negation is about a qualifier, not the money
+      'No royalty caps',
+      'No monetization fees',
+      'No income limits',
+      'Never be paid out late',
+      "You won't be paid out late",
+      'Never any revenue share delays',
     ]) assert.ok(findMoneyClaims(t).length + findPaymentPromises(t).length >= 1, t);
   });
   it('FINDER-3: rules that predate FINDER-3 ignore negation entirely', () => {
@@ -79,7 +86,7 @@ describe('findMoneyClaims', () => {
     assert.ok(findMoneyClaims("Don't make money from ads").length >= 1);
   });
   it('FINDER-3 extras: make cash, get a cut, earn $$$, earn rewards, money-making', () => {
-    for (const t of ['Make cash from your games', 'Get a cut of every sale', 'Earn $$$ with Meshgrounds', 'Players earn rewards in games and creators too', 'money-making games for indie devs'])
+    for (const t of ['Make cash from your games', 'Get a cut of every sale', 'Earn $$$ with Meshgrounds', 'Players earn rewards in games and creators too', 'money-making games for indie devs', 'Make-cash games'])
       assert.ok(findMoneyClaims(t).length >= 1, t);
   });
   it('keeps the clawback line and monetized status copy unflagged', () => {

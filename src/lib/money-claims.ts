@@ -43,17 +43,29 @@ const NEGATABLE: RegExp[] = [
   /\bearn\s+\$\$/gi,
   /\bearn\s+rewards\b/gi,
   /\bmoney[-\s]making\b/gi,
+  /\bmake-cash\b/gi,
 ];
 
-// A negation counts only inside the same clause (look-back stops at . : , ! ?) and directly before the term,
-// with at most a little filler between ('never monetize', 'will never ever monetize', "don't take royalties").
-const NEGATION_WORD = /^(?:no|never|not|don'?t|won'?t)$/i;
-const FILLER = /^(?:will|ever|a|an|any|the|be|take)$/i;
-const negated = (flat: string, i: number) => {
-  const clause = flat.slice(0, i).split(/[.:,!?]/).pop() ?? '';
-  const words = clause.trim().split(/\s+/).filter(Boolean);
-  while (words.length && FILLER.test(words[words.length - 1])) words.pop();
-  return words.length > 0 && NEGATION_WORD.test(words[words.length - 1]);
+// A negation counts only inside the same clause (look-back stops at . : , ! ?) and directly before the term:
+//   'never monetize', 'will never ever monetize', "don't take royalties" (only 'ever'/'take' may sit between), or
+//   a negated money subject the term describes: 'No money is paid out'.
+// It never counts when the term is followed by a qualifier: then the negation is about the limit, not the money
+// ('No royalty caps', 'No monetization fees', 'Never be paid out late').
+// KNOWN-GAPS (last negation round, by scope): the negation check is heuristic, not grammar.
+//  - A negated subject other than 'no money/cash/revenue/income/earnings/payout(s) is/are/was/were/get(s)/will be'
+//    still flags ('No creator is paid out' is reported).
+//  - Qualifiers are a fixed list (caps, fees, limits, delays, late, thresholds, minimums, ceilings, restrictions, cuts);
+//    others ('No royalty paperwork') are treated as a plain negation and skipped.
+//  - 'take' is the only verb allowed between negation and term ("We don't take royalties"); 'never offer royalties' flags.
+//  - Rules from before FINDER-3 ignore negation (except the monetize verb, which honours it).
+const NEGATED_TAIL = /\b(?:no|never|not|don'?t|won'?t)\s+(?:(?:ever|take)\s+)*$/i;
+const NEGATED_SUBJECT_TAIL = /\bno\s+(?:money|cash|revenue|income|earnings|payouts?)\s+(?:is|are|was|were|gets?|will\s+be)\s+$/i;
+const QUALIFIER = /^\s*(?:caps?|fees?|limits?|delays?|late|later|thresholds?|minimums?|ceilings?|restrictions?|cuts?)\b/i;
+const negated = (flat: string, i: number, end: number) => {
+  if (QUALIFIER.test(flat.slice(end))) return false;
+  const clause = (flat.slice(0, i).split(/[.:,!?]/).pop() ?? '') ;
+  const tail = clause.replace(/\s+/g, ' ').replace(/^\s*/, ' ');
+  return NEGATED_TAIL.test(tail) || NEGATED_SUBJECT_TAIL.test(tail);
 };
 
 export function findMoneyClaims(text: string): string[] {
@@ -75,7 +87,7 @@ export function findMoneyClaims(text: string): string[] {
       const i = m.index ?? 0;
       const end = i + m[0].length;
       if (matchedRanges.some(([s, e]) => Math.max(s, i) < Math.min(e, end))) continue;
-      if (honourNegation && negated(flat, i)) continue;
+      if (honourNegation && negated(flat, i, end)) continue;
       matchedRanges.push([i, end]);
       hits.push(flat.slice(Math.max(0, i - WINDOW), end + WINDOW).trim());
     }
