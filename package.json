@@ -1,0 +1,22 @@
+{
+  "name": "meshgrounds",
+  "type": "module",
+  "version": "0.1.0",
+  "private": true,
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "dev:web": "astro dev",
+    "cdn": "node scripts/game-cdn.mjs",
+    "build": "astro build",
+    "start": "node scripts/dev.mjs start",
+    "preview": "astro preview",
+    "astro": "astro"
+  },
+  "dependencies": {
+    "@astrojs/node": "11.1.6",
+    "astro": "7.3.5"
+  }
+}

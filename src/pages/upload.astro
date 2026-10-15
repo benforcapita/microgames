@@ -1,0 +1,113 @@
+---
+import Layout from '../layouts/Layout.astro';
+import { getGame } from '../lib/server/games';
+import { REVENUE, UPLOAD } from '../lib/server/config';
+
+const forkSlug = Astro.url.searchParams.get('fork');
+const fork = forkSlug ? getGame(forkSlug) : null;
+const forkable = fork && fork.license !== 'All rights reserved' ? fork : null;
+---
+
+<Layout title="Upload a game">
+  <section class="section wrap upload">
+    <div class="intro">
+      <span class="eyebrow">{forkable ? 'Remix' : 'Ship it'}</span>
+      <h1>{forkable ? `Fork ${forkable.title}` : 'Upload a game'}</h1>
+      <p class="muted">
+        One self-contained <code>.html</code> file, up to {UPLOAD.maxHtmlBytes / 1024 / 1024} MB. Load Three.js from a CDN
+        such as jsDelivr, unpkg or esm.sh. The game goes live in the Proving Grounds straight away.
+      </p>
+      {
+        forkable && (
+          <div class="panel fork">
+            Grab the <a href={`/play/${forkable.slug}`}>original</a>'s source, remix it, and upload your version.
+            When your fork earns, {Math.round(REVENUE.forkRoyalty * 100)}% of your share goes to @{forkable.creator}.
+          </div>
+        )
+      }
+      <div class="panel tips">
+        <h3>Works out of the box</h3>
+        <ul class="muted">
+          <li>Auto-pause and mute during ad breaks</li>
+          <li><code>localStorage</code> saves persist</li>
+          <li>Crash and load-time telemetry</li>
+        </ul>
+        <p class="muted">
+          Want rewarded-ad revives and score tracking? Paste <a href="/EXCHANGE_SDK.md">EXCHANGE_SDK.md</a> into your AI
+          coding tool and ask it to integrate.
+        </p>
+      </div>
+    </div>
+
+    <form id="upload-form" class="panel form" method="post" action="/api/games" enctype="multipart/form-data">
+      {forkable && <input type="hidden" name="forkOf" value={forkable.slug} />}
+      <div id="errors" class="errors" role="alert" hidden></div>
+      <label>Game file <small>single .html, everything inlined except CDN libraries</small>
+        <input type="file" name="game" accept=".html,.htm,text/html" required />
+      </label>
+      <div class="two">
+        <label>Title <input name="title" maxlength="60" required value={forkable ? `${forkable.title} Remix` : ''} /></label>
+        <label>Creator handle <input name="creator" maxlength="32" pattern="[A-Za-z0-9_\-]{2,32}" required placeholder="neonwizard" /></label>
+      </div>
+      <label>Tagline <small>one punchy line</small><input name="tagline" maxlength="90" /></label>
+      <label>Description <small>controls, goal, what you built it with</small><textarea name="description" rows="5" maxlength="2000"></textarea></label>
+      <div class="two">
+        <label>Tags <small>comma separated, up to 6</small><input name="tags" placeholder="arcade, physics, one-button" /></label>
+        <label>License
+          <select name="license">
+            {UPLOAD.licenses.map((l) => <option value={l} selected={forkable ? l === forkable.license : l === 'MIT'}>{l}</option>)}
+          </select>
+        </label>
+      </div>
+      <label>Thumbnail <small>optional · PNG/JPEG/WebP under 512 KB, 16:10 looks best</small>
+        <input type="file" name="thumb" accept="image/png,image/jpeg,image/webp" />
+      </label>
+      <label class="agree">
+        <span><input type="checkbox" name="agree" required /> I confirm this game contains no unlicensed copyrighted art, music
+        or characters, and no voice clones of real people. <a href="/creators#rules">Content rules</a></span>
+      </label>
+      <button class="btn" type="submit">Publish to the Proving Grounds</button>
+    </form>
+  </section>
+</Layout>
+
+<style>
+  .upload { display: grid; grid-template-columns: 1fr 1.3fr; gap: 2.5rem; align-items: start; }
+  .intro { position: sticky; top: 90px; display: grid; gap: 1rem; }
+  .intro p { margin: 0; }
+  .fork { border-color: #ff4fd855; }
+  .tips ul { padding-left: 1.2rem; margin: 0.5rem 0 1rem; }
+  .form { display: grid; gap: 1.1rem; padding: 1.75rem; }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+  .agree span { font-weight: 400; font-size: 0.85rem; color: var(--muted); }
+  .agree input { width: auto; margin-right: 0.4rem; }
+  .errors { background: #ff5d5d1a; border: 1px solid #ff5d5d66; color: #ffb3b3; border-radius: 10px; padding: 0.75rem 1rem; }
+  .errors ul { margin: 0; padding-left: 1.1rem; }
+  @media (max-width: 860px) {
+    .upload, .two { grid-template-columns: 1fr; }
+    .intro { position: static; }
+  }
+</style>
+
+<script>
+  const form = document.getElementById('upload-form') as HTMLFormElement;
+  const errors = document.getElementById('errors')!;
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const btn = form.querySelector<HTMLButtonElement>('button[type="submit"]')!;
+    btn.disabled = true;
+    btn.textContent = 'Uploading…';
+    try {
+      const res = await fetch(form.action, { method: 'POST', body: new FormData(form) });
+      if (res.redirected) return void location.assign(res.url);
+      const data = (await res.json().catch(() => ({ errors: ['Upload failed.'] }))) as { errors: string[] };
+      errors.replaceChildren(Object.assign(document.createElement('ul'), {}));
+      data.errors.forEach((msg) => errors.firstElementChild!.append(Object.assign(document.createElement('li'), { textContent: msg })));
+      errors.hidden = false;
+      errors.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Publish to the Proving Grounds';
+    }
+  });
+</script>

@@ -1,0 +1,44 @@
+[
+  {
+    "id": "stk7wr01",
+    "file": "stack-tower.html",
+    "title": "Stack Tower",
+    "tagline": "One button. One tower. How high can you go?",
+    "description": "Tap, click or press Space to drop the sliding block. Any overhang gets sliced off, so line it up perfectly to keep the block full size.\n\nBuilt in one evening with Claude Code and Three.js.",
+    "creator": "polyprism",
+    "tags": ["arcade", "one-button", "stacking"],
+    "license": "MIT",
+    "hue": 95,
+    "stage": "live",
+    "sessions": 420,
+    "quality": 0.85
+  },
+  {
+    "id": "neon1an3",
+    "file": "neon-lanes.html",
+    "title": "Neon Lanes",
+    "tagline": "Synthwave lane-runner. Dodge the cyan, chase the sunset.",
+    "description": "Use arrow keys, A/D, or tap the left or right half of the screen to switch lanes. Every 400m clears a sector, and the speed keeps climbing.",
+    "creator": "vhs_vector",
+    "tags": ["runner", "synthwave", "arcade"],
+    "license": "CC-BY-SA-4.0",
+    "hue": 300,
+    "stage": "live",
+    "sessions": 260,
+    "quality": 0.75
+  },
+  {
+    "id": "pr1smp0p",
+    "file": "prism-pop.html",
+    "title": "Prism Pop",
+    "tagline": "Click the floating prisms before they escape.",
+    "description": "A tiny reflex game. Click or tap prisms to pop them. Miss five and it's over. They speed up as you go.",
+    "creator": "polyprism",
+    "tags": ["reflex", "clicker"],
+    "license": "MIT",
+    "hue": 210,
+    "stage": "proving",
+    "sessions": 34,
+    "quality": 0.6
+  }
+]

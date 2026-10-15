@@ -1,0 +1,13 @@
+---
+import Layout from '../layouts/Layout.astro';
+Astro.response.status = 404;
+---
+
+<Layout title="Not found">
+  <section class="section wrap" style="text-align:center">
+    <span class="eyebrow">404 · mesh not found</span>
+    <h1>This cartridge is missing.</h1>
+    <p class="muted">It may have been removed, or the link is wrong.</p>
+    <a class="btn" href="/games">Back to the arcade</a>
+  </section>
+</Layout>

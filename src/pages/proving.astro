@@ -1,0 +1,120 @@
+---
+import Layout from '../layouts/Layout.astro';
+import Rate from '../components/Rate.astro';
+import GameThumb from '../components/GameThumb.astro';
+import { getHealth, getUserRating, listGames } from '../lib/server/games';
+import { CDN_ORIGIN, GRADUATION } from '../lib/server/config';
+import { ago, compact } from '../lib/format';
+
+const games = listGames({ stage: 'proving', sort: 'new', limit: 40 }).map((g) => ({
+  game: g,
+  mine: getUserRating(g.id, Astro.locals.uid),
+  passed: getHealth(g.id).checks.filter((c) => c.pass).length,
+}));
+---
+
+<Layout title="Proving Grounds" description="Scout brand-new instant 3D web games and decide which ones graduate.">
+  <section class="wrap intro">
+    <span class="eyebrow">Endless feed · unmonetized</span>
+    <h1>The Proving Grounds</h1>
+    <p class="muted">
+      Every new upload starts here. Scroll, play for a minute, and rate it. Your playtime and votes decide which games
+      graduate to the main arcade. A game needs {GRADUATION.minPlays} plays and has to pass every health check.
+    </p>
+  </section>
+
+  {
+    games.length ? (
+      <div class="feed" id="feed" data-cdn={CDN_ORIGIN}>
+        {games.map(({ game, mine, passed }) => (
+          <article class="slide" data-game-id={game.id} data-game-title={game.title} data-game-stage={game.stage}>
+            <div class="screen">
+              <div class="mount">
+                <GameThumb game={game} class="poster" />
+                <span class="hint mono">scroll here to load</span>
+              </div>
+            </div>
+            <div class="side">
+              <h2>{game.title}</h2>
+              <p class="muted">@{game.creator} · {ago(game.createdAt)}</p>
+              {game.tagline && <p>{game.tagline}</p>}
+              <div class="chips">{game.tags.map((t) => <span class="tag">#{t}</span>)}</div>
+              <Rate slug={game.slug} avg={game.avgRating} count={game.ratingCount} mine={mine} />
+              <p class="mono small muted">
+                {compact(game.plays)}/{GRADUATION.minPlays} plays · {passed}/7 checks
+              </p>
+              <a class="btn ghost sm" href={`/play/${game.slug}`}>Open full page →</a>
+            </div>
+          </article>
+        ))}
+      </div>
+    ) : (
+      <section class="wrap">
+        <div class="panel empty">
+          <p>The Proving Grounds is empty right now. Every game has graduated!</p>
+          <a class="btn" href="/upload">Upload the next one</a>
+        </div>
+      </section>
+    )
+  }
+</Layout>
+
+<style>
+  .intro { padding-block: 2rem 1rem; max-width: 760px; }
+  .feed {
+    height: calc(100vh - 62px);
+    overflow-y: auto;
+    scroll-snap-type: y mandatory;
+    border-top: 1px solid var(--line);
+  }
+  .slide {
+    height: calc(100vh - 62px);
+    scroll-snap-align: start;
+    display: grid;
+    grid-template-columns: 1fr 340px;
+    gap: 1.5rem;
+    padding: 1.5rem max(1rem, calc((100vw - 1240px) / 2));
+  }
+  .screen { position: relative; border-radius: var(--radius); overflow: hidden; border: 1px solid var(--line); background: #000; }
+  .mount { position: absolute; inset: 0; }
+  .mount :global(.poster) { width: 100%; height: 100%; object-fit: cover; opacity: 0.5; }
+  .hint { position: absolute; inset: auto 0 1rem; text-align: center; color: var(--muted); font-size: 0.8rem; }
+  .side { display: flex; flex-direction: column; gap: 0.75rem; justify-content: center; }
+  .side h2 { font-size: 2rem; margin: 0; }
+  .side p { margin: 0; }
+  .small { font-size: 0.8rem; }
+  .empty { text-align: center; padding: 3rem; }
+  @media (max-width: 860px) {
+    .slide { grid-template-columns: 1fr; grid-template-rows: 1fr auto; }
+    .side { justify-content: flex-start; }
+  }
+</style>
+
+<script>
+  import { mountPlayer, type PlayerHandle } from '../client/player';
+
+  const feed = document.getElementById('feed');
+  if (feed) {
+    const cdnOrigin = feed.dataset.cdn!;
+    let active: { slide: Element; handle: PlayerHandle; poster: Node[] } | null = null;
+
+    const activate = (slide: HTMLElement) => {
+      if (active?.slide === slide) return;
+      if (active) {
+        active.handle.destroy();
+        active.slide.querySelector('.mount')!.replaceChildren(...active.poster);
+      }
+      const mount = slide.querySelector<HTMLElement>('.mount')!;
+      const poster = [...mount.childNodes];
+      const { gameId, gameTitle, gameStage } = slide.dataset;
+      const handle = mountPlayer(mount, { id: gameId!, title: gameTitle!, stage: gameStage as 'proving' }, { cdnOrigin });
+      active = { slide, handle, poster };
+    };
+
+    const io = new IntersectionObserver(
+      (entries) => entries.forEach((e) => e.isIntersecting && activate(e.target as HTMLElement)),
+      { root: feed, threshold: 0.6 },
+    );
+    feed.querySelectorAll('.slide').forEach((s) => io.observe(s));
+  }
+</script>

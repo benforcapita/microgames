@@ -1,0 +1,104 @@
+---
+import Layout from '../layouts/Layout.astro';
+import { GRADUATION, REVENUE } from '../lib/server/config';
+
+const pct = (n: number) => `${Math.round(n * 100)}%`;
+const gates = [
+  ['Plays measured', `≥ ${GRADUATION.minPlays}`],
+  ['First frame', `under ${GRADUATION.maxFirstFrameMs / 1000}s for ≥ ${pct(GRADUATION.minFirstFrameOkRate)} of plays`],
+  ['Crash rate', `≤ ${pct(GRADUATION.maxCrashRate)}`],
+  ['Start rate (player actually interacts)', `≥ ${pct(GRADUATION.minStartRate)}`],
+  ['Loop / level completion', `≥ ${pct(GRADUATION.minCompletionRate)} of players who start`],
+  ['Median session', `≥ ${GRADUATION.minMedianSessionSec}s`],
+  ['Community rating', `≥ ${GRADUATION.minAvgRating}★ once there are ${GRADUATION.minRatingsForRatingGate}+ votes`],
+];
+const snippet = `// at game over
+window.parent.postMessage({ type: 'GAME_OVER', score }, '*');
+
+// "Revive" button → rewarded ad
+reviveBtn.onclick = () => window.parent.postMessage({ type: 'REQUEST_REWARD_AD' }, '*');
+window.addEventListener('message', (e) => {
+  if (e.source === window.parent && e.data?.type === 'REWARD_GRANTED') revive();
+});`;
+---
+
+<Layout title="For creators" description="Publish single-file Three.js games on Meshgrounds and earn ad revenue.">
+  <section class="section wrap narrow">
+    <span class="eyebrow">For creators</span>
+    <h1>Ship one file. Get played. Get paid.</h1>
+    <p class="lede muted">
+      Meshgrounds doesn't care which tool built your game. If it runs in a browser tab and fits in one HTML file, it
+      belongs here. We pool traffic from every game on the site so we can get into the premium ad networks a solo
+      creator could never reach alone, and then we pay you your share.
+    </p>
+
+    <div class="cards">
+      <div class="panel"><b class="big">{pct(REVENUE.creatorShare)}</b><span class="muted">of net ad revenue to you</span></div>
+      <div class="panel"><b class="big">${REVENUE.minPayoutUsd}</b><span class="muted">minimum payout</span></div>
+      <div class="panel"><b class="big">{pct(REVENUE.forkRoyalty)}</b><span class="muted">royalty from every fork of your game</span></div>
+      <div class="panel"><b class="big">0</b><span class="muted">lines of code required to publish</span></div>
+    </div>
+
+    <h2>How a game goes live</h2>
+    <ol class="flow">
+      <li><b>Upload → the Proving Grounds.</b> Your game goes live straight away in an unmonetized discovery feed. Players scout it, play it, and rate it.</li>
+      <li><b>Telemetry, not gatekeepers.</b> Our runtime measures every play automatically: load time, crashes, whether players actually start, whether they finish a loop, and how long they stay.</li>
+      <li><b>Graduation.</b> When every check below passes, the game moves to the main arcade, ads switch on, your revenue share begins, and other creators can fork it.</li>
+    </ol>
+    <div class="panel">
+      <table>
+        <thead><tr><th>Check</th><th>Bar to clear</th></tr></thead>
+        <tbody>{gates.map(([k, v]) => <tr><td>{k}</td><td class="mono">{v}</td></tr>)}</tbody>
+      </table>
+    </div>
+
+    <h2>Zero-code by default</h2>
+    <p class="muted">Every upload is wrapped in a small runtime, so these work without touching your code:</p>
+    <ul class="feature-list">
+      <li><b>Auto-pause during ads.</b> We freeze <code>requestAnimationFrame</code>, <code>performance.now()</code>, WebAudio and media, then resume without a time jump.</li>
+      <li><b>Saves just work.</b> <code>localStorage</code> is persisted for each player, even inside the security sandbox.</li>
+      <li><b>Health telemetry.</b> First frame, first input, crashes and WebGL context loss are all reported for you.</li>
+    </ul>
+
+    <h2>Unlock rewarded ads with one prompt</h2>
+    <p class="muted">
+      Rewarded video earns several times more than banners. To support it, download
+      <a href="/EXCHANGE_SDK.md" download>EXCHANGE_SDK.md</a>, drop it into your project, and tell Claude Code or Cursor:
+      <em>"Integrate the Exchange SDK for revives and high scores."</em> The result looks like this:
+    </p>
+    <pre><code>{snippet}</code></pre>
+
+    <h2 id="rules">Content rules</h2>
+    <div class="panel rules">
+      <ul>
+        <li>You may use AI tools to build your game. That is the whole point of Meshgrounds.</li>
+        <li>No unlicensed copyrighted characters, sprites, logos or music, and no AI voice clones of real people.</li>
+        <li>No malware, crypto-miners, tracking, redirects, pop-ups or calls to outside networks except approved library CDNs.</li>
+        <li>No fake buttons or anything built to farm ad clicks. Invalid traffic is removed and payouts are clawed back.</li>
+        <li>Pick a license when you upload. MIT and CC-BY-SA games can be forked, and forks carry attribution and a royalty back to you.</li>
+      </ul>
+    </div>
+
+    <div class="row cta">
+      <a class="btn" href="/upload">Upload your game</a>
+      <a class="btn ghost" href="/EXCHANGE_SDK.md" download>Download EXCHANGE_SDK.md</a>
+    </div>
+  </section>
+</Layout>
+
+<style>
+  .narrow { max-width: 880px; }
+  .lede { font-size: 1.1rem; }
+  h2 { margin-top: 2.5rem; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; margin: 2rem 0; }
+  .cards .panel { display: grid; gap: 0.25rem; }
+  .big { font: 800 2rem var(--mono); color: var(--accent); }
+  .flow { padding-left: 1.2rem; display: grid; gap: 0.75rem; margin-bottom: 1.25rem; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+  th, td { text-align: left; padding: 0.55rem 0.4rem; border-bottom: 1px solid var(--line); }
+  tr:last-child td { border-bottom: 0; }
+  th { color: var(--muted); font-weight: 600; }
+  .feature-list, .rules ul { padding-left: 1.2rem; display: grid; gap: 0.6rem; }
+  .rules ul { margin: 0; }
+  .cta { margin-top: 2.5rem; }
+</style>

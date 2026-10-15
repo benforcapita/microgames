@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no" />
+<title>Prism Pop</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0d1020; color: #fff; font-family: system-ui, sans-serif; touch-action: none; user-select: none; cursor: crosshair; }
+  #hud { position: fixed; top: 14px; left: 18px; right: 18px; display: flex; justify-content: space-between; font: 800 22px ui-monospace, monospace; pointer-events: none; }
+  .screen { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; background: #0d1020cc; text-align: center; cursor: default; }
+  .screen h1 { margin: 0; font-size: 46px; }
+  .hidden { display: none; }
+  button { font: 700 18px system-ui; padding: 12px 28px; border-radius: 999px; border: 0; cursor: pointer; background: #c4ff3d; color: #111; }
+</style>
+<script type="importmap">{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js" } }</script>
+</head>
+<body>
+<div id="hud"><span id="score">0</span><span id="lives">♥♥♥♥♥</span></div>
+<div id="start" class="screen"><h1>PRISM POP</h1><p>Pop the prisms before they float away. Miss 5 and it's over.</p><button id="go">Pop!</button></div>
+<div id="over" class="screen hidden"><h1>Out of lives</h1><p id="final"></p><button id="again">Again</button></div>
+<script type="module">
+import * as THREE from 'three';
+
+const $ = (id) => document.getElementById(id);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+document.body.prepend(renderer.domElement);
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(55, 1, 0.1, 100);
+camera.position.z = 14;
+scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+const light = new THREE.PointLight(0xffffff, 300);
+light.position.set(4, 6, 10);
+scene.add(light);
+const geos = [new THREE.IcosahedronGeometry(0.8), new THREE.OctahedronGeometry(0.9), new THREE.TetrahedronGeometry(1)];
+const ray = new THREE.Raycaster(), ptr = new THREE.Vector2();
+let prisms = [], sparks = [], score, lives, state = 'menu', spawnIn;
+
+function resize() {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+}
+addEventListener('resize', resize);
+resize();
+
+function spawn() {
+  const m = new THREE.Mesh(geos[Math.floor(Math.random() * 3)], new THREE.MeshStandardMaterial({
+    color: new THREE.Color().setHSL(Math.random(), 0.8, 0.6), flatShading: true,
+  }));
+  m.position.set((Math.random() - 0.5) * 14, -9, (Math.random() - 0.5) * 4);
+  m.userData = { vy: 2 + Math.random() * 1.5 + score * 0.04, spin: new THREE.Vector3(Math.random(), Math.random(), 0) };
+  scene.add(m);
+  prisms.push(m);
+}
+
+function burst(pos, color) {
+  for (let i = 0; i < 10; i++) {
+    const s = new THREE.Mesh(geos[2], new THREE.MeshBasicMaterial({ color }));
+    s.scale.setScalar(0.15);
+    s.position.copy(pos);
+    s.userData = { v: new THREE.Vector3().randomDirection().multiplyScalar(6), life: 0.6 };
+    scene.add(s);
+    sparks.push(s);
+  }
+}
+
+function start() {
+  [...prisms, ...sparks].forEach((m) => scene.remove(m));
+  prisms = []; sparks = []; score = 0; lives = 5; spawnIn = 0; state = 'play';
+  $('score').textContent = 0;
+  $('lives').textContent = '♥'.repeat(lives);
+  $('start').classList.add('hidden');
+  $('over').classList.add('hidden');
+}
+
+addEventListener('pointerdown', (e) => {
+  if (state !== 'play' || e.target.tagName === 'BUTTON') return;
+  e.preventDefault();
+  ptr.set((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
+  ray.setFromCamera(ptr, camera);
+  const hit = ray.intersectObjects(prisms)[0];
+  if (!hit) return;
+  burst(hit.object.position, hit.object.material.color);
+  scene.remove(hit.object);
+  prisms = prisms.filter((p) => p !== hit.object);
+  $('score').textContent = ++score;
+});
+$('go').onclick = start;
+$('again').onclick = start;
+
+const clock = new THREE.Clock();
+renderer.setAnimationLoop(() => {
+  const dt = Math.min(clock.getDelta(), 0.1);
+  if (state === 'play') {
+    if ((spawnIn -= dt) <= 0) { spawn(); spawnIn = Math.max(0.35, 1.1 - score * 0.015); }
+    for (const p of prisms) {
+      p.position.y += p.userData.vy * dt;
+      p.rotation.x += p.userData.spin.x * dt * 2;
+      p.rotation.y += p.userData.spin.y * dt * 2;
+      if (p.position.y > 9) {
+        scene.remove(p);
+        p.userData.gone = true;
+        $('lives').textContent = '♥'.repeat(Math.max(0, --lives));
+      }
+    }
+    prisms = prisms.filter((p) => !p.userData.gone);
+    if (lives <= 0) {
+      state = 'over';
+      $('final').textContent = `Popped ${score}`;
+      $('over').classList.remove('hidden');
+      window.parent.postMessage({ type: 'GAME_OVER', score }, '*');
+    }
+  }
+  for (const s of sparks) {
+    s.position.addScaledVector(s.userData.v, dt);
+    s.userData.life -= dt;
+  }
+  sparks = sparks.filter((s) => s.userData.life > 0 || (scene.remove(s), false));
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,64 @@
+---
+interface Props {
+  slug: string;
+  avg: number | null;
+  count: number;
+  mine: number | null;
+}
+const { slug, avg, count, mine } = Astro.props;
+---
+
+<div class="rate" data-rate={slug} data-mine={mine ?? ''}>
+  <div class="stars" role="radiogroup" aria-label="Rate this game">
+    {
+      [1, 2, 3, 4, 5].map((n) => (
+        <button type="button" role="radio" data-stars={n} aria-checked={mine === n ? 'true' : 'false'} aria-label={`${n} star${n > 1 ? 's' : ''}`} class:list={{ on: (mine ?? 0) >= n }}>
+          ★
+        </button>
+      ))
+    }
+  </div>
+  <span class="summary mono muted">{avg === null ? 'No ratings yet' : `${avg.toFixed(1)} · ${count} votes`}</span>
+</div>
+
+<style>
+  .rate { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
+  .stars { display: flex; }
+  button {
+    background: none;
+    border: 0;
+    font-size: 1.5rem;
+    line-height: 1;
+    padding: 0 0.1rem;
+    color: #3a3f52;
+    cursor: pointer;
+    transition: color 0.1s, transform 0.1s;
+  }
+  button.on { color: var(--accent); }
+  .stars:hover button { color: var(--accent); }
+  .stars button:hover ~ button { color: #3a3f52; }
+  button:hover { transform: scale(1.15); }
+  .summary { font-size: 0.8rem; }
+</style>
+
+<script>
+  document.addEventListener('click', async (e) => {
+    const btn = (e.target as HTMLElement).closest<HTMLButtonElement>('[data-rate] button[data-stars]');
+    if (!btn) return;
+    const root = btn.closest<HTMLElement>('[data-rate]')!;
+    const stars = Number(btn.dataset.stars);
+    const res = await fetch(`/api/games/${root.dataset.rate}/rate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ stars }),
+    });
+    if (!res.ok) return;
+    const data = (await res.json()) as { avgRating: number; ratingCount: number };
+    root.querySelectorAll<HTMLButtonElement>('button[data-stars]').forEach((b) => {
+      const n = Number(b.dataset.stars);
+      b.classList.toggle('on', n <= stars);
+      b.setAttribute('aria-checked', String(n === stars));
+    });
+    root.querySelector('.summary')!.textContent = `${data.avgRating.toFixed(1)} · ${data.ratingCount} votes · thanks!`;
+  });
+</script>

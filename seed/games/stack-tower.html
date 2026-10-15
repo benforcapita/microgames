@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no" />
+<title>Stack Tower</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0b0c14; color: #fff; font-family: system-ui, sans-serif; touch-action: none; user-select: none; }
+  #hud { position: fixed; top: 18px; width: 100%; text-align: center; font-size: 56px; font-weight: 900; pointer-events: none; text-shadow: 0 6px 30px #000a; }
+  #best { position: fixed; top: 84px; width: 100%; text-align: center; font-size: 14px; opacity: .6; pointer-events: none; }
+  .screen { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; background: #000a; text-align: center; }
+  .screen h1 { margin: 0; font-size: 44px; letter-spacing: -1px; }
+  .hidden { display: none; }
+  button { font: 700 18px system-ui; padding: 12px 28px; border-radius: 999px; border: 0; cursor: pointer; }
+  .primary { background: #c4ff3d; color: #111; }
+  .ghost { background: #ffffff22; color: #fff; }
+</style>
+<script type="importmap">{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js" } }</script>
+</head>
+<body>
+<div id="hud">0</div>
+<div id="best"></div>
+<div id="start" class="screen"><h1>STACK TOWER</h1><p>Tap, click or press Space to drop the block.<br />Line it up perfectly to keep it full size.</p><button class="primary" id="go">Start</button></div>
+<div id="over" class="screen hidden"><h1>The tower fell!</h1><p id="final"></p><button class="primary" id="revive">▶ Revive (watch ad)</button><button class="ghost" id="again">Play again</button></div>
+<script type="module">
+import * as THREE from 'three';
+
+const H = 0.5, RANGE = 5, $ = (id) => document.getElementById(id);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+document.body.prepend(renderer.domElement);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0b0c14);
+scene.add(new THREE.AmbientLight(0xffffff, 0.55));
+const sun = new THREE.DirectionalLight(0xffffff, 1.4);
+sun.position.set(6, 12, 4);
+scene.add(sun);
+const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 100);
+let camY = 0;
+
+function resize() {
+  const a = innerWidth / innerHeight, d = 5.5;
+  Object.assign(camera, { left: -d * a, right: d * a, top: d, bottom: -d });
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+}
+addEventListener('resize', resize);
+resize();
+
+let stack, debris, current, state = 'menu', speed, hue, revived;
+const best = () => Number(localStorage.getItem('stack-best') || 0);
+const showBest = () => ($('best').textContent = best() ? `best ${best()}` : '');
+showBest();
+
+function block(x, z, w, d, level) {
+  const mesh = new THREE.Mesh(
+    new THREE.BoxGeometry(w, H, d),
+    new THREE.MeshLambertMaterial({ color: new THREE.Color().setHSL(((hue + level * 4) % 360) / 360, 0.75, 0.58) }),
+  );
+  mesh.position.set(x, level * H, z);
+  scene.add(mesh);
+  return { mesh, x, z, w, d };
+}
+
+function spawn() {
+  const top = stack[stack.length - 1];
+  const axis = stack.length % 2 ? 'x' : 'z';
+  current = block(top.x, top.z, top.w, top.d, stack.length);
+  current.axis = axis;
+  current[axis] = -RANGE;
+  current.dir = 1;
+}
+
+function reset() {
+  [...(stack || []), ...(debris || []), current].forEach((b) => b && scene.remove(b.mesh));
+  hue = Math.random() * 360;
+  stack = [block(0, 0, 3, 3, 0)];
+  debris = [];
+  speed = 3.2;
+  revived = false;
+  camY = 0;
+  $('hud').textContent = 0;
+  spawn();
+}
+
+function place() {
+  const top = stack[stack.length - 1], a = current.axis, size = a === 'x' ? 'w' : 'd';
+  let delta = current[a] - top[a];
+  if (Math.abs(delta) < 0.08) delta = 0;
+  const overlap = top[size] - Math.abs(delta);
+  if (overlap <= 0) {
+    debris.push({ ...current, vy: 0 });
+    current = null;
+    return gameOver();
+  }
+  scene.remove(current.mesh);
+  const placed = { x: current.x, z: current.z, w: top.w, d: top.d };
+  placed[size] = overlap;
+  placed[a] = top[a] + delta / 2;
+  stack.push(block(placed.x, placed.z, placed.w, placed.d, stack.length));
+  if (delta) {
+    const cut = { x: placed.x, z: placed.z, w: placed.w, d: placed.d };
+    cut[size] = Math.abs(delta);
+    cut[a] = placed[a] + Math.sign(delta) * (overlap + Math.abs(delta)) / 2;
+    debris.push({ ...block(cut.x, cut.z, cut.w, cut.d, stack.length - 1), vy: 0 });
+  }
+  speed = Math.min(9, speed + 0.12);
+  $('hud').textContent = stack.length - 1;
+  spawn();
+}
+
+function gameOver() {
+  state = 'over';
+  const score = stack.length - 1;
+  if (score > best()) localStorage.setItem('stack-best', score);
+  showBest();
+  $('final').textContent = `Height: ${score}`;
+  $('revive').classList.toggle('hidden', revived);
+  $('over').classList.remove('hidden');
+  window.parent.postMessage({ type: 'GAME_OVER', score }, '*');
+}
+
+function start() {
+  reset();
+  state = 'play';
+  $('start').classList.add('hidden');
+  $('over').classList.add('hidden');
+}
+
+window.addEventListener('message', (e) => {
+  if (e.source !== window.parent || state !== 'over') return;
+  if (e.data?.type === 'REWARD_GRANTED') {
+    revived = true;
+    state = 'play';
+    $('over').classList.add('hidden');
+    spawn();
+  }
+});
+
+$('go').onclick = start;
+$('again').onclick = start;
+$('revive').onclick = () => window.parent.postMessage({ type: 'REQUEST_REWARD_AD' }, '*');
+addEventListener('pointerdown', (e) => { if (state === 'play' && e.target.tagName !== 'BUTTON') { e.preventDefault(); place(); } });
+addEventListener('keydown', (e) => {
+  if (e.code !== 'Space' && e.code !== 'Enter') return;
+  e.preventDefault();
+  if (state === 'play') place();
+  else if (state === 'menu') start();
+});
+
+reset();
+const clock = new THREE.Clock();
+renderer.setAnimationLoop(() => {
+  const dt = Math.min(clock.getDelta(), 0.1);
+  if (state === 'play' && current) {
+    const a = current.axis;
+    current[a] += current.dir * speed * dt;
+    if (Math.abs(current[a]) > RANGE) current.dir *= -1;
+    current.mesh.position[a] = current[a];
+  }
+  for (const d of debris) {
+    d.vy -= 18 * dt;
+    d.mesh.position.y += d.vy * dt;
+    d.mesh.rotation.x += dt;
+  }
+  debris = debris.filter((d) => d.mesh.position.y > camY - 20 || (scene.remove(d.mesh), false));
+  camY += (stack.length * H - camY) * Math.min(1, dt * 3);
+  camera.position.set(8, camY + 8, 8);
+  camera.lookAt(0, camY, 0);
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>

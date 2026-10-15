@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no" />
+<title>Neon Lanes</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #05010f; color: #fff; font-family: system-ui, sans-serif; touch-action: none; user-select: none; }
+  #hud { position: fixed; top: 14px; left: 18px; right: 18px; display: flex; justify-content: space-between; font: 800 22px ui-monospace, monospace; pointer-events: none; text-shadow: 0 0 12px #ff4fd8; }
+  #toast { position: fixed; top: 40%; width: 100%; text-align: center; font: 900 42px system-ui; color: #c4ff3d; opacity: 0; transition: opacity .3s; pointer-events: none; }
+  .screen { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; background: #05010fcc; text-align: center; }
+  .screen h1 { margin: 0; font-size: 48px; color: #ff4fd8; text-shadow: 0 0 24px #ff4fd8; }
+  .hidden { display: none; }
+  button { font: 700 18px system-ui; padding: 12px 28px; border-radius: 999px; border: 0; cursor: pointer; }
+  .primary { background: #c4ff3d; color: #111; }
+  .ghost { background: #ffffff22; color: #fff; }
+</style>
+<script type="importmap">{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js" } }</script>
+</head>
+<body>
+<div id="hud"><span id="dist">0m</span><span id="sector">SECTOR 1</span></div>
+<div id="toast"></div>
+<div id="start" class="screen"><h1>NEON LANES</h1><p>← → / A D or tap left / right to switch lanes.<br />Every 400m clears a sector.</p><button class="primary" id="go">Run</button></div>
+<div id="over" class="screen hidden"><h1>CRASHED</h1><p id="final"></p><button class="primary" id="revive">▶ Second chance (watch ad)</button><button class="ghost" id="again">Run again</button></div>
+<script type="module">
+import * as THREE from 'three';
+
+const $ = (id) => document.getElementById(id), LANES = [-2.2, 0, 2.2], SECTOR = 400;
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+document.body.prepend(renderer.domElement);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x05010f);
+scene.fog = new THREE.Fog(0x05010f, 20, 75);
+const camera = new THREE.PerspectiveCamera(65, 1, 0.1, 200);
+camera.position.set(0, 3.2, 6.5);
+camera.lookAt(0, 0.6, -6);
+scene.add(new THREE.HemisphereLight(0xff4fd8, 0x2200ff, 1.2));
+
+const grid = new THREE.GridHelper(200, 100, 0xff4fd8, 0x3a1a6a);
+scene.add(grid);
+const sunMesh = new THREE.Mesh(new THREE.CircleGeometry(14, 48), new THREE.MeshBasicMaterial({ color: 0xff7a3d, fog: false }));
+sunMesh.position.set(0, 9, -90);
+scene.add(sunMesh);
+
+const player = new THREE.Mesh(new THREE.OctahedronGeometry(0.55), new THREE.MeshStandardMaterial({ color: 0xc4ff3d, emissive: 0x5a8a00, flatShading: true }));
+player.position.y = 0.6;
+scene.add(player);
+
+const obsGeo = new THREE.BoxGeometry(1.6, 1.4, 1.2);
+const obsMat = new THREE.MeshStandardMaterial({ color: 0x00e5ff, emissive: 0x006a80 });
+let obstacles = [], lane = 1, speed, dist, nextSpawn, state = 'menu', revived, sector, invuln = 0;
+
+function resize() {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+}
+addEventListener('resize', resize);
+resize();
+
+function toast(msg) {
+  $('toast').textContent = msg;
+  $('toast').style.opacity = 1;
+  setTimeout(() => ($('toast').style.opacity = 0), 1200);
+}
+
+function reset() {
+  obstacles.forEach((o) => scene.remove(o));
+  obstacles = [];
+  lane = 1;
+  speed = 18;
+  dist = 0;
+  nextSpawn = 30;
+  sector = 1;
+  revived = false;
+  player.position.x = 0;
+}
+
+function spawnRow() {
+  const free = Math.floor(Math.random() * 3);
+  LANES.forEach((x, i) => {
+    if (i === free || Math.random() < 0.45) return;
+    const o = new THREE.Mesh(obsGeo, obsMat);
+    o.position.set(x, 0.7, -80);
+    scene.add(o);
+    obstacles.push(o);
+  });
+}
+
+function move(d) { if (state === 'play') lane = Math.max(0, Math.min(2, lane + d)); }
+
+function gameOver() {
+  state = 'over';
+  const score = Math.floor(dist);
+  const best = Math.max(score, Number(localStorage.getItem('lanes-best') || 0));
+  localStorage.setItem('lanes-best', best);
+  $('final').textContent = `${score}m · best ${best}m`;
+  $('revive').classList.toggle('hidden', revived);
+  $('over').classList.remove('hidden');
+  window.parent.postMessage({ type: 'GAME_OVER', score }, '*');
+}
+
+function start() {
+  reset();
+  state = 'play';
+  $('start').classList.add('hidden');
+  $('over').classList.add('hidden');
+}
+
+window.addEventListener('message', (e) => {
+  if (e.source !== window.parent || state !== 'over' || e.data?.type !== 'REWARD_GRANTED') return;
+  revived = true;
+  invuln = 2;
+  state = 'play';
+  $('over').classList.add('hidden');
+});
+
+$('go').onclick = start;
+$('again').onclick = start;
+$('revive').onclick = () => window.parent.postMessage({ type: 'REQUEST_REWARD_AD' }, '*');
+addEventListener('keydown', (e) => {
+  if (['ArrowLeft', 'KeyA'].includes(e.code)) move(-1);
+  if (['ArrowRight', 'KeyD'].includes(e.code)) move(1);
+  if (e.code === 'Space' && state === 'menu') start();
+});
+addEventListener('pointerdown', (e) => {
+  if (e.target.tagName === 'BUTTON') return;
+  e.preventDefault();
+  move(e.clientX < innerWidth / 2 ? -1 : 1);
+});
+
+const clock = new THREE.Clock();
+renderer.setAnimationLoop(() => {
+  const dt = Math.min(clock.getDelta(), 0.1);
+  const t = clock.elapsedTime;
+  if (state === 'play') {
+    speed = Math.min(45, speed + dt * 0.6);
+    dist += speed * dt * 0.5;
+    invuln = Math.max(0, invuln - dt);
+    if ((nextSpawn -= speed * dt) <= 0) { spawnRow(); nextSpawn = 14 + Math.random() * 10; }
+    for (const o of obstacles) {
+      o.position.z += speed * dt;
+      if (!invuln && Math.abs(o.position.z - player.position.z) < 1 && Math.abs(o.position.x - player.position.x) < 1.2) return gameOver();
+    }
+    obstacles = obstacles.filter((o) => o.position.z < 10 || (scene.remove(o), false));
+    if (Math.floor(dist / SECTOR) + 1 > sector) {
+      sector++;
+      toast(`SECTOR ${sector - 1} CLEAR`);
+      window.parent.postMessage({ type: 'LEVEL_COMPLETE', level: sector - 1, score: Math.floor(dist) }, '*');
+    }
+    $('dist').textContent = `${Math.floor(dist)}m`;
+    $('sector').textContent = `SECTOR ${sector}`;
+  }
+  player.position.x += (LANES[lane] - player.position.x) * Math.min(1, dt * 14);
+  player.rotation.y += dt * 4;
+  player.rotation.x = Math.sin(t * 3) * 0.3;
+  player.visible = !invuln || Math.floor(t * 10) % 2 === 0;
+  grid.position.z = (grid.position.z + (state === 'play' ? speed : 6) * dt) % 2;
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>

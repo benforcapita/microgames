@@ -1,0 +1,55 @@
+---
+import Layout from '../layouts/Layout.astro';
+import GameCard from '../components/GameCard.astro';
+import { listGames, listTags, type ListOptions } from '../lib/server/games';
+
+const params = Astro.url.searchParams;
+const sorts = { top: 'Most played', rated: 'Top rated', new: 'Newest' } as const;
+const sort = (params.get('sort') ?? 'top') as NonNullable<ListOptions['sort']>;
+const activeSort = sort in sorts ? sort : 'top';
+const tag = params.get('tag') ?? undefined;
+const games = listGames({ stage: 'live', sort: activeSort, tag });
+const tags = listTags().slice(0, 16);
+
+const href = (next: { sort?: string; tag?: string | null }) => {
+  const q = new URLSearchParams();
+  const s = next.sort ?? activeSort;
+  const t = next.tag === null ? undefined : (next.tag ?? tag);
+  if (s !== 'top') q.set('sort', s);
+  if (t) q.set('tag', t);
+  return `/games${q.size ? `?${q}` : ''}`;
+};
+---
+
+<Layout title="Play" description="Graduated instant-play 3D web games on Meshgrounds.">
+  <section class="section wrap">
+    <div class="spread">
+      <div>
+        <span class="eyebrow">Graduated · community approved</span>
+        <h1>Play</h1>
+      </div>
+      <div class="chips">
+        {Object.entries(sorts).map(([k, label]) => <a class="chip" href={href({ sort: k })} aria-current={k === activeSort ? 'true' : 'false'}>{label}</a>)}
+      </div>
+    </div>
+    <div class="chips tags">
+      <a class="chip" href={href({ tag: null })} aria-current={!tag ? 'true' : 'false'}>all</a>
+      {tags.map((t) => <a class="chip" href={href({ tag: t.tag })} aria-current={t.tag === tag ? 'true' : 'false'}>#{t.tag}</a>)}
+    </div>
+    {
+      games.length ? (
+        <div class="grid">{games.map((g) => <GameCard game={g} />)}</div>
+      ) : (
+        <div class="panel empty">
+          <p>No graduated games {tag ? `tagged #${tag}` : ''} yet.</p>
+          <a class="btn ghost" href="/proving">Help scout the Proving Grounds →</a>
+        </div>
+      )
+    }
+  </section>
+</Layout>
+
+<style>
+  .tags { margin: 1.5rem 0 2rem; }
+  .empty { text-align: center; padding: 3rem; }
+</style>

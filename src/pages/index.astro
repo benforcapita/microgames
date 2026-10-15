@@ -1,0 +1,140 @@
+---
+import Layout from '../layouts/Layout.astro';
+import GameCard from '../components/GameCard.astro';
+import GameThumb from '../components/GameThumb.astro';
+import { listGames, platformStats } from '../lib/server/games';
+import { REVENUE } from '../lib/server/config';
+import { compact } from '../lib/format';
+
+const live = listGames({ stage: 'live', sort: 'top', limit: 8 });
+const fresh = listGames({ stage: 'proving', sort: 'new', limit: 4 });
+const stats = platformStats();
+const hero = live[0];
+---
+
+<Layout>
+  <section class="hero wrap">
+    <div class="copy">
+      <span class="eyebrow">No installs · no engines · just the web</span>
+      <h1>The open ground for <span class="accent">instant 3D</span> web games.</h1>
+      <p class="lede muted">
+        Hundreds of tiny, strange, brilliant browser games, each one a single file that loads in seconds. Play them,
+        rate them, and decide which ones make it out of the Proving Grounds.
+      </p>
+      <div class="row">
+        <a class="btn" href="/games">Start playing</a>
+        <a class="btn ghost" href="/proving">Scout the Proving Grounds →</a>
+      </div>
+      <dl class="stats mono">
+        <div><dt>games</dt><dd>{compact(stats.games)}</dd></div>
+        <div><dt>plays</dt><dd>{compact(stats.plays)}</dd></div>
+        <div><dt>creators</dt><dd>{compact(stats.creators)}</dd></div>
+      </dl>
+    </div>
+    {
+      hero && (
+        <a class="feature" href={`/play/${hero.slug}`}>
+          <GameThumb game={hero} class="feature-art" />
+          <div class="feature-cap">
+            <span class="badge live">Featured</span>
+            <h2>{hero.title}</h2>
+            <p class="muted">{hero.tagline}</p>
+            <span class="btn sm">▶ Play now</span>
+          </div>
+        </a>
+      )
+    }
+  </section>
+
+  <section class="section wrap">
+    <div class="spread head">
+      <h2>Top games</h2>
+      <a href="/games" class="muted">All games →</a>
+    </div>
+    {live.length ? <div class="grid">{live.map((g) => <GameCard game={g} />)}</div> : <p class="muted">No graduated games yet.</p>}
+  </section>
+
+  <section class="section wrap">
+    <div class="spread head">
+      <div>
+        <span class="eyebrow">Fresh uploads · unmonetized</span>
+        <h2>From the Proving Grounds</h2>
+      </div>
+      <a href="/proving" class="muted">Open the feed →</a>
+    </div>
+    {fresh.length ? <div class="grid">{fresh.map((g) => <GameCard game={g} />)}</div> : <p class="muted">Nothing new yet. Be the first to upload.</p>}
+  </section>
+
+  <section class="section wrap">
+    <div class="creators panel">
+      <div>
+        <span class="eyebrow">For creators</span>
+        <h2>Built it with Claude, Cursor or by hand? Ship it here.</h2>
+        <p class="muted">
+          Upload one HTML file and it goes live right away. Pass the Proving Grounds and we switch on ads for you and pay
+          you {Math.round(REVENUE.creatorShare * 100)}% of the net revenue, with a ${REVENUE.minPayoutUsd} minimum payout.
+        </p>
+        <div class="row">
+          <a class="btn" href="/upload">Upload a game</a>
+          <a class="btn ghost" href="/creators">How it works</a>
+        </div>
+      </div>
+      <ol class="steps">
+        <li><b>Build</b><span class="muted">Any tool, any AI. Three.js, Canvas, WebGPU, as long as it's one self-contained file.</span></li>
+        <li><b>Drop</b><span class="muted">Upload the .html. We sandbox it, add telemetry, and handle pause and saves automatically.</span></li>
+        <li><b>Graduate</b><span class="muted">Players and real telemetry decide. Clear the bar and you start earning, and others can fork your game.</span></li>
+      </ol>
+    </div>
+  </section>
+</Layout>
+
+<style>
+  .hero {
+    display: grid;
+    grid-template-columns: 1.1fr 1fr;
+    gap: 3rem;
+    align-items: center;
+    padding-block: 4rem 2rem;
+  }
+  .lede { font-size: 1.12rem; max-width: 36rem; }
+  .stats { display: flex; gap: 2.5rem; margin: 2.5rem 0 0; }
+  .stats dt { color: var(--muted); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.12em; }
+  .stats dd { margin: 0; font-size: 1.8rem; font-weight: 700; }
+  .feature {
+    position: relative;
+    display: block;
+    border-radius: 22px;
+    overflow: hidden;
+    aspect-ratio: 4 / 3;
+    border: 1px solid var(--line);
+    text-decoration: none;
+    box-shadow: 0 40px 120px -40px #c4ff3d44;
+    transform: perspective(1200px) rotateY(-6deg);
+    transition: transform 0.3s;
+  }
+  .feature:hover { transform: perspective(1200px) rotateY(0); }
+  .feature :global(.feature-art) { width: 100%; height: 100%; object-fit: cover; }
+  .feature-cap {
+    position: absolute;
+    inset: auto 0 0 0;
+    padding: 1.5rem;
+    background: linear-gradient(transparent, #000d 40%);
+  }
+  .feature-cap h2 { margin: 0.6rem 0 0.25rem; font-size: 2rem; }
+  .head { margin-bottom: 1.25rem; }
+  .head h2 { margin: 0; }
+  .head a { text-decoration: none; }
+  .creators { display: grid; grid-template-columns: 1fr 1fr; gap: 2.5rem; padding: 2.5rem; }
+  .steps { list-style: none; counter-reset: s; margin: 0; padding: 0; display: grid; gap: 1.25rem; }
+  .steps li { counter-increment: s; display: grid; grid-template-columns: 2.5rem 1fr; column-gap: 0.75rem; }
+  .steps li::before {
+    content: counter(s, decimal-leading-zero);
+    grid-row: span 2;
+    font: 700 1.1rem var(--mono);
+    color: var(--accent);
+  }
+  @media (max-width: 860px) {
+    .hero, .creators { grid-template-columns: 1fr; }
+    .feature { transform: none; }
+  }
+</style>

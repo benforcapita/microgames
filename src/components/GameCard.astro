@@ -1,0 +1,47 @@
+---
+import type { Game } from '../lib/server/games';
+import { compact, stars } from '../lib/format';
+import GameThumb from './GameThumb.astro';
+
+interface Props {
+  game: Game;
+}
+const { game } = Astro.props;
+---
+
+<a class="card" href={`/play/${game.slug}`}>
+  <div class="thumb">
+    <GameThumb game={game} class="art" />
+    {game.stage === 'proving' && <span class="badge proving">Proving Grounds</span>}
+  </div>
+  <div class="body">
+    <h3>{game.title}</h3>
+    <p class="muted tagline">{game.tagline || 'An instant 3D web game.'}</p>
+    <div class="meta mono">
+      <span>@{game.creator}</span>
+      <span>{compact(game.plays)} plays</span>
+      <span>★ {stars(game.avgRating)}</span>
+    </div>
+  </div>
+</a>
+
+<style>
+  .card {
+    display: flex;
+    flex-direction: column;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    overflow: hidden;
+    text-decoration: none;
+    transition: transform 0.15s, border-color 0.15s;
+  }
+  .card:hover { transform: translateY(-3px); border-color: #c4ff3d66; }
+  .thumb { position: relative; aspect-ratio: 16 / 10; background: #000; }
+  .thumb :global(.art) { width: 100%; height: 100%; object-fit: cover; }
+  .thumb .badge { position: absolute; top: 0.6rem; left: 0.6rem; }
+  .body { padding: 0.9rem 1rem 1rem; display: grid; gap: 0.35rem; }
+  h3 { margin: 0; }
+  .tagline { margin: 0; font-size: 0.88rem; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .meta { display: flex; gap: 0.8rem; color: var(--muted); font-size: 0.75rem; flex-wrap: wrap; }
+</style>

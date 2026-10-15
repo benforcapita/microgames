@@ -1,0 +1,37 @@
+---
+// Deterministic low-poly "mesh" artwork used as a fallback thumbnail.
+interface Props {
+  seed: string;
+  hue: number;
+  class?: string;
+}
+const { seed, hue, class: className } = Astro.props;
+
+let h = 2166136261;
+for (const c of seed) h = Math.imul(h ^ c.charCodeAt(0), 16777619);
+const rand = () => ((h = Math.imul(h ^ (h >>> 15), 2246822507) ^ Math.imul(h ^ (h >>> 13), 3266489909)), (h >>> 0) / 4294967296);
+
+const cols = 6, rows = 4, w = 160, hgt = 100;
+const pts = Array.from({ length: (rows + 1) * (cols + 1) }, (_, i) => {
+  const x = (i % (cols + 1)) / cols, y = Math.floor(i / (cols + 1)) / rows;
+  const edgeX = x === 0 || x === 1, edgeY = y === 0 || y === 1;
+  return [x * w + (edgeX ? 0 : (rand() - 0.5) * 18), y * hgt + (edgeY ? 0 : (rand() - 0.5) * 18)];
+});
+const tris: { d: string; fill: string }[] = [];
+for (let r = 0; r < rows; r++)
+  for (let c = 0; c < cols; c++) {
+    const a = r * (cols + 1) + c, b = a + 1, d = a + cols + 1, e = d + 1;
+    const quads = rand() > 0.5 ? [[a, b, e], [a, e, d]] : [[a, b, d], [b, e, d]];
+    for (const t of quads) {
+      const light = 10 + rand() * 38 + (1 - r / rows) * 10;
+      tris.push({
+        d: `M${t.map((i) => pts[i].map((v) => v.toFixed(1)).join(',')).join('L')}Z`,
+        fill: `hsl(${(hue + rand() * 40 - 20 + 360) % 360} 75% ${light.toFixed(0)}%)`,
+      });
+    }
+  }
+---
+
+<svg class={className} viewBox={`0 0 ${w} ${hgt}`} preserveAspectRatio="xMidYMid slice" aria-hidden="true">
+  {tris.map((t) => <path d={t.d} fill={t.fill} stroke={`hsl(${hue} 90% 70% / 0.25)`} stroke-width="0.4" />)}
+</svg>

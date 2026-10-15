@@ -1,0 +1,203 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import Rate from '../../components/Rate.astro';
+import GameCard from '../../components/GameCard.astro';
+import { getGame, getHealth, getUserRating, listGames } from '../../lib/server/games';
+import { CDN_ORIGIN, GRADUATION, REVENUE } from '../../lib/server/config';
+import { ago, compact, formatCheck, kb } from '../../lib/format';
+
+const game = getGame(Astro.params.slug ?? '');
+if (!game) return Astro.rewrite('/404');
+if (Astro.params.slug !== game.slug) return Astro.redirect(`/play/${game.slug}`, 301);
+
+const { checks } = getHealth(game.id);
+const mine = getUserRating(game.id, Astro.locals.uid);
+const parent = game.forkedFrom ? getGame(game.forkedFrom) : null;
+const forks = listGames({ limit: 50 }).filter((g) => g.forkedFrom === game.id);
+const more = listGames({ creator: game.creator, limit: 5 }).filter((g) => g.id !== game.id).slice(0, 4);
+const remixable = game.license !== 'All rights reserved';
+const live = game.stage === 'live';
+const passed = checks.filter((c) => c.pass).length;
+const uploaded = Astro.url.searchParams.has('uploaded');
+---
+
+<Layout title={game.title} description={game.tagline || `Play ${game.title} instantly in your browser.`} ads={live}>
+  <section class="wrap play">
+    {
+      uploaded && (
+        <div class="notice panel">
+          <b>You're live in the Proving Grounds.</b> Share the link: real plays and ratings decide when the game graduates.
+          Ads stay off until then.
+        </div>
+      )
+    }
+    <div class="stage-wrap">
+      <div id="stage" class="stage" data-game-id={game.id} data-game-title={game.title} data-game-stage={game.stage} data-cdn={CDN_ORIGIN}>
+        <button class="launch" type="button" aria-label={`Play ${game.title}`}>
+          <span class="play-icon">▶</span>
+          <span>Play {game.title}</span>
+          <span class="muted mono">{kb(game.sizeBytes)} · loads instantly</span>
+        </button>
+      </div>
+      <div class="toolbar spread">
+        <div class="row">
+          <span class:list={['badge', game.stage]}>{live ? 'Monetized' : 'Proving Grounds · no ads'}</span>
+          <span id="best" class="mono muted"></span>
+        </div>
+        <div class="row">
+          <button class="btn ghost sm" type="button" id="restart">↻ Restart</button>
+          <button class="btn ghost sm" type="button" id="fullscreen">⛶ Fullscreen</button>
+          {remixable && <a class="btn ghost sm" href={`${CDN_ORIGIN}/g/${game.id}/index.html?source`} target="_blank" rel="noopener">{'</>'} Source</a>}
+          {remixable && live && <a class="btn sm" href={`/upload?fork=${game.slug}`}>⑂ Fork</a>}
+        </div>
+      </div>
+    </div>
+
+    <div class="info">
+      <div class="main-col">
+        <h1>{game.title}</h1>
+        <p class="byline muted">
+          by <a href={`/u/${game.creator}`}>@{game.creator}</a> · {ago(game.createdAt)} · {compact(game.plays)} plays · {game.license}
+          {parent && <> · fork of <a href={`/play/${parent.slug}`}>{parent.title}</a></>}
+        </p>
+        {game.tagline && <p class="tagline">{game.tagline}</p>}
+        <div class="chips">{game.tags.map((t) => <a class="tag" href={`/games?tag=${t}`}>#{t}</a>)}</div>
+        <div class="rate-box panel">
+          <span class="eyebrow">Your rating</span>
+          <Rate slug={game.slug} avg={game.avgRating} count={game.ratingCount} mine={mine} />
+        </div>
+        {game.description && <p class="description">{game.description}</p>}
+        {
+          forks.length > 0 && (
+            <>
+              <h3>Forks ({forks.length})</h3>
+              <ul class="forks">{forks.map((f) => <li><a href={`/play/${f.slug}`}>{f.title}</a> <span class="muted">by @{f.creator}</span></li>)}</ul>
+            </>
+          )
+        }
+      </div>
+
+      <aside class="panel health">
+        <span class="eyebrow">{live ? 'Graduated' : `Graduation · ${passed}/${checks.length} checks`}</span>
+        <h3>{live ? 'Game health' : 'Road out of the Proving Grounds'}</h3>
+        <p class="muted small">
+          {
+            live
+              ? `Live and monetized. ${Math.round(REVENUE.creatorShare * 100)}% of net ad revenue goes to @${game.creator}${parent ? `, and ${Math.round(REVENUE.forkRoyalty * 100)}% of that is shared with the original creator` : ''}.`
+              : `Measured automatically from real plays. Once every check passes after ${GRADUATION.minPlays}+ plays, ads switch on and the creator starts earning.`
+          }
+        </p>
+        <ul>
+          {
+            checks.map((c) => (
+              <li class:list={{ pass: c.pass }}>
+                <span>{c.label}</span>
+                <span class="mono">
+                  {formatCheck(c.value, c.format)}
+                  <span class="muted"> / {c.comparator === 'lte' ? '≤' : '≥'}{formatCheck(c.target, c.format)}</span>
+                </span>
+              </li>
+            ))
+          }
+        </ul>
+      </aside>
+    </div>
+
+    {
+      more.length > 0 && (
+        <div class="section">
+          <h2>More from @{game.creator}</h2>
+          <div class="grid">{more.map((g) => <GameCard game={g} />)}</div>
+        </div>
+      )
+    }
+  </section>
+</Layout>
+
+<style>
+  .play { padding-top: 1.5rem; }
+  .notice { margin-bottom: 1rem; border-color: #c4ff3d55; }
+  .stage {
+    position: relative;
+    aspect-ratio: 16 / 9;
+    max-height: 78vh;
+    width: 100%;
+    background: #000;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+  .stage:fullscreen { border-radius: 0; max-height: none; border: 0; }
+  .launch {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-content: center;
+    justify-items: center;
+    gap: 0.6rem;
+    background: radial-gradient(circle at center, #1a2408, #000 70%);
+    border: 0;
+    color: var(--text);
+    font: 800 1.4rem var(--sans);
+    cursor: pointer;
+  }
+  .launch .mono { font-size: 0.8rem; font-weight: 400; }
+  .play-icon {
+    width: 84px;
+    height: 84px;
+    border-radius: 50%;
+    display: grid;
+    place-items: center;
+    background: var(--accent);
+    color: var(--accent-ink);
+    font-size: 2rem;
+    padding-left: 6px;
+    box-shadow: 0 0 60px #c4ff3d66;
+    transition: transform 0.15s;
+  }
+  .launch:hover .play-icon { transform: scale(1.08); }
+  .toolbar { padding: 0.75rem 0; }
+  .info { display: grid; grid-template-columns: 1fr 360px; gap: 2rem; margin-top: 1rem; }
+  .info h1 { font-size: 2.4rem; margin-bottom: 0.25rem; }
+  .byline a { color: var(--text); }
+  .tagline { font-size: 1.1rem; }
+  .rate-box { margin: 1.25rem 0; }
+  .description { white-space: pre-line; color: #c9cdd9; }
+  .forks { padding-left: 1.2rem; }
+  .health ul { list-style: none; padding: 0; margin: 1rem 0 0; display: grid; gap: 0.5rem; }
+  .health li { display: flex; justify-content: space-between; gap: 0.75rem; font-size: 0.85rem; padding-left: 1.4rem; position: relative; }
+  .health li::before { content: '○'; position: absolute; left: 0; color: var(--warn); }
+  .health li.pass::before { content: '●'; color: var(--accent); }
+  .small { font-size: 0.85rem; }
+  @media (max-width: 900px) {
+    .info { grid-template-columns: 1fr; }
+  }
+</style>
+
+<script>
+  import { mountPlayer, type PlayerHandle } from '../../client/player';
+
+  const stage = document.getElementById('stage')!;
+  const { gameId, gameTitle, gameStage, cdn } = stage.dataset;
+  const game = { id: gameId!, title: gameTitle!, stage: gameStage as 'proving' | 'live' };
+  const best = document.getElementById('best')!;
+  const showBest = (n: number) => (best.textContent = Number.isFinite(n) ? `Your best: ${n}` : '');
+  showBest(Number(localStorage.getItem(`mg:best:${game.id}`) ?? NaN));
+
+  let player: PlayerHandle | null = null;
+  const start = () => {
+    player?.destroy();
+    player = mountPlayer(stage, game, {
+      cdnOrigin: cdn!,
+      onEvent: (type, data) => type === 'SCORE' && showBest(Number(data.best)),
+    });
+    player.frame.focus();
+  };
+  stage.querySelector('.launch')!.addEventListener('click', start);
+  document.getElementById('restart')!.addEventListener('click', start);
+  document.getElementById('fullscreen')!.addEventListener('click', () => {
+    if (!player) start();
+    stage.requestFullscreen?.();
+    player?.frame.focus();
+  });
+</script>
