@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { afterEach, describe, it, mock } from 'node:test';
 import {
   applyDeviceHeaders,
   desktopOnlyNotice,
   detectDevice,
   filterForDevice,
+  forkParentLinked,
   isMissingInputSupportColumn,
   playSurface,
   readWithInputSupport,
@@ -92,9 +94,27 @@ describe('desktop-only notice', () => {
   });
 });
 
+describe('fork credit', () => {
+  it('play page renders a link only when the parent is visible on this device', () => {
+    const play = readFileSync(new URL('../../pages/play/[slug].astro', import.meta.url), 'utf8');
+    assert.match(play, /forkParentLinked\(device, parent\.inputSupport\) \? <a href=\{`\/play\/\$\{parent\.slug\}`\}>\{parent\.title\}<\/a> : parent\.title/);
+  });
+
+  it('keeps the parent link on desktop, and on mobile unless the parent is desktop-only', () => {
+    for (const support of ['desktop', 'DESKTOP', ' desktop ']) {
+      assert.equal(forkParentLinked('mobile', support), false, String(support));
+      assert.equal(forkParentLinked('desktop', support), true, String(support));
+    }
+    for (const support of ['unknown', 'mobile', 'both', null, undefined, 'weird']) {
+      assert.equal(forkParentLinked('mobile', support), true, String(support));
+      assert.equal(forkParentLinked('desktop', support), true, String(support));
+    }
+  });
+});
+
 describe('device variance headers', () => {
   it('marks catalog and play responses so device types do not share a cache', () => {
-    for (const path of ['/', '/games', '/games/', '/proving', '/play/stack-tower', '/u/polyprism']) {
+    for (const path of ['/', '/games', '/games/', '/proving', '/play/stack-tower', '/u/polyprism', '/creators', '/creators/']) {
       assert.equal(variesByDevice(path), true, path);
       const headers = new Headers({ Vary: 'Accept-Encoding' });
       applyDeviceHeaders(headers, path);
@@ -105,8 +125,17 @@ describe('device variance headers', () => {
     }
   });
 
+  it('/creators uses the same device variance and private no-store policy', () => {
+    const headers = new Headers();
+    applyDeviceHeaders(headers, '/creators');
+    assert.equal(headers.get('Vary'), 'Sec-CH-UA-Mobile, User-Agent');
+    assert.equal(headers.get('Cache-Control'), 'private, no-store');
+    assert.equal(headers.get('Accept-CH'), 'Sec-CH-UA-Mobile');
+    assert.equal(headers.get('Critical-CH'), 'Sec-CH-UA-Mobile');
+  });
+
   it('does not vary unrelated pages', () => {
-    for (const path of ['/login', '/upload', '/me', '/creators', '/api/telemetry', '/api/games']) {
+    for (const path of ['/login', '/upload', '/me', '/api/telemetry', '/api/games']) {
       assert.equal(variesByDevice(path), false, path);
       const headers = new Headers();
       applyDeviceHeaders(headers, path);
