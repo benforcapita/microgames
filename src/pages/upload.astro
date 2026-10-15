@@ -110,7 +110,7 @@ const forkable = fork && fork.license !== 'All rights reserved' ? fork : null;
 
 <script>
   import boot from '../../cdn/boot.js?raw';
-  import { PREVIEW_TIMEOUT_COPY, createPreviewWatch, withPreviewFlag } from '../client/upload-preview';
+  import { PREVIEW_TIMEOUT_COPY, createPreviewWatch, injectPreview } from '../client/upload-preview';
 
   const form = document.getElementById('upload-form') as HTMLFormElement;
   const errors = document.getElementById('errors')!;
@@ -130,11 +130,7 @@ const forkable = fork && fork.license !== 'All rights reserved' ? fork : null;
   });
 
   function injectBoot(html: string): string {
-    const tag = '<script>' + boot + '<' + '/script>';
-    const head = html.match(/<head[^>]*>/i);
-    if (head) return html.replace(head[0], head[0] + tag);
-    const lead = html.match(/^\s*(<!doctype[^>]*>)?\s*(<html[^>]*>)?/i)?.[0] ?? '';
-    return lead + tag + html.slice(lead.length);
+    return injectPreview(html, boot);
   }
 
   function dataUrlToFile(dataUrl: string, type: string): File {
@@ -180,7 +176,7 @@ const forkable = fork && fork.license !== 'All rights reserved' ? fork : null;
     });
     file.text().then((html) => {
       previewUrl = URL.createObjectURL(new Blob([injectBoot(html)], { type: 'text/html' }));
-      frame.src = withPreviewFlag(previewUrl);
+      frame.src = previewUrl;
     }).catch(() => {
       watch.stop();
       snapMsg.textContent = 'Could not read that file. Upload a PNG, JPEG, or WebP thumbnail.';

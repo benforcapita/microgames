@@ -2,8 +2,8 @@
  * Runs before any game code inside a sandboxed, opaque-origin iframe and gives
  * vibe-coded games zero-code platform features:
  *  - telemetry (first frame, explicit ready, first input, crashes) for the Proving Grounds
- *  - one thumbnail snapshot (__MG_SNAPSHOT) only when the frame URL has ?mg_preview=1
- *    (the upload page). Live plays do not capture and do not change WebGL attributes.
+ *  - one thumbnail snapshot (__MG_SNAPSHOT) only when window.__MG_PREVIEW === true
+ *    (set by the upload page, never by the CDN). Live plays do not capture and do not change WebGL attributes.
  *  - automatic pause (requestAnimationFrame, game clock, WebAudio, media) during ads
  *  - localStorage / sessionStorage / cookie shims (blocked in opaque origins), persisted by the portal
  *  - window.Meshgrounds helper wrapping the postMessage protocol from EXCHANGE_SDK.md
@@ -101,13 +101,10 @@
     if (reason === 'oversize') return 'The preview is over 150 KB. Upload a PNG, JPEG, or WebP thumbnail.';
     return 'The captured frame is blank. Upload a PNG, JPEG, or WebP thumbnail.';
   }
-  function previewCaptureEnabled(search) {
-    return new URLSearchParams(String(search == null ? '' : search)).get('mg_preview') === '1';
-  }
   /* end-snapshot-lib */
 
-  // Upload preview only. A live play URL never carries mg_preview, so getContext stays untouched.
-  var capturePreview = previewCaptureEnabled(location.search);
+  // Upload preview only. The CDN never sets this; a live play leaves getContext untouched.
+  var capturePreview = window.__MG_PREVIEW === true;
   if (capturePreview) {
     var nativeGetContext = HTMLCanvasElement.prototype.getContext;
     HTMLCanvasElement.prototype.getContext = function (type, attrs) {

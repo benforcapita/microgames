@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { describe, test } from 'node:test';
-import { PREVIEW_TIMEOUT_COPY, PREVIEW_WAIT_MS, createPreviewWatch, withPreviewFlag } from './upload-preview.ts';
+import { PREVIEW_TIMEOUT_COPY, PREVIEW_WAIT_MS, createPreviewWatch, injectPreview } from './upload-preview.ts';
 
 function fakeClock() {
   let now = 0;
@@ -31,15 +31,25 @@ function fakeClock() {
 }
 
 describe('upload preview capture', () => {
-  test('adds mg_preview=1 to the upload iframe and nowhere else', () => {
-    assert.equal(
-      withPreviewFlag('blob:http://127.0.0.1:4321/8b3c0c3e-1'),
-      'blob:http://127.0.0.1:4321/8b3c0c3e-1?mg_preview=1',
-    );
+  test('injects window.__MG_PREVIEW before boot and never onto the CDN or the blob URL', () => {
+    const html = injectPreview('<head><title>g</title></head><canvas></canvas>', 'BOOT_MARKER');
+    const flagAt = html.indexOf('<script>window.__MG_PREVIEW=true</script>');
+    const bootAt = html.indexOf('<script>BOOT_MARKER</script>');
+    assert.ok(flagAt >= 0 && bootAt > flagAt);
+    assert.equal(html.includes('mg_preview'), false);
+    const bare = injectPreview('<canvas></canvas>', 'BOOT_MARKER');
+    assert.ok(bare.startsWith('<script>window.__MG_PREVIEW=true</script><script>BOOT_MARKER</script>'));
     const player = fs.readFileSync(new URL('./player.ts', import.meta.url), 'utf8');
     const page = fs.readFileSync(new URL('../pages/upload.astro', import.meta.url), 'utf8');
-    assert.equal(player.includes('mg_preview'), false);
-    assert.match(page, /withPreviewFlag\(previewUrl\)/);
+    const cdn = fs.readFileSync(new URL('../../cdn/handler.mjs', import.meta.url), 'utf8');
+    const boot = fs.readFileSync(new URL('../../cdn/boot.js', import.meta.url), 'utf8');
+    assert.match(player, /case '__MG_SNAPSHOT':/);
+    assert.match(page, /injectPreview\(html, boot\)/);
+    assert.equal(page.includes('mg_preview'), false);
+    assert.equal(page.includes('frame.src = previewUrl'), true);
+    assert.equal(cdn.includes('__MG_PREVIEW'), false);
+    assert.match(boot, /window\.__MG_PREVIEW === true/);
+    assert.equal(boot.includes('mg_preview'), false);
     assert.match(page, /PREVIEW_TIMEOUT_COPY/);
   });
 

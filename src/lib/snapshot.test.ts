@@ -9,7 +9,7 @@ const boot = fs.readFileSync(new URL('../../cdn/boot.js', import.meta.url), 'utf
 const marked = boot.match(/\/\* snapshot-lib \*\/([\s\S]*?)\/\* end-snapshot-lib \*\//);
 if (!marked) throw new Error('snapshot-lib block missing from cdn/boot.js');
 
-const snap = new Function(`${marked[1]}; return { SNAP_MAX_W, SNAP_MAX_H, SNAP_MAX_BYTES, fitSnapshotBox, isBlankSample, captureCanvas, glContextAttrs, snapshotError, previewCaptureEnabled };`)() as {
+const snap = new Function(`${marked[1]}; return { SNAP_MAX_W, SNAP_MAX_H, SNAP_MAX_BYTES, fitSnapshotBox, isBlankSample, captureCanvas, glContextAttrs, snapshotError };`)() as {
   SNAP_MAX_W: number;
   SNAP_MAX_H: number;
   SNAP_MAX_BYTES: number;
@@ -18,10 +18,9 @@ const snap = new Function(`${marked[1]}; return { SNAP_MAX_W, SNAP_MAX_H, SNAP_M
   captureCanvas: (canvas: { width: number; height: number }, createCanvas: (w: number, h: number) => unknown) => { ok: boolean; reason?: string; dataUrl?: string; type?: string };
   glContextAttrs: (type: string, attrs: Record<string, unknown> | undefined) => { type: string; attrs: Record<string, unknown> | undefined };
   snapshotError: (reason: string) => string;
-  previewCaptureEnabled: (search: string) => boolean;
 };
 
-function bootFrame(search: string) {
+function bootFrame(opts: { search?: string; preview?: unknown } = {}) {
   const posts: { type?: string }[] = [];
   const getContextCalls: { type: string; attrs: Record<string, unknown> | undefined }[] = [];
   const timeouts = new Map<number, { fn: () => void; ms: number }>();
@@ -38,8 +37,9 @@ function bootFrame(search: string) {
   };
   function HTMLMediaElement() {}
   HTMLMediaElement.prototype.play = function () { return Promise.resolve(); };
-  const location = { search, hash: '', pathname: '/index.html' };
+  const location = { search: opts.search ?? '', hash: '', pathname: '/index.html' };
   const windowObj: Record<string, unknown> = {
+    __MG_PREVIEW: opts.preview,
     parent,
     location,
     history: { replaceState() {} },
@@ -71,7 +71,7 @@ function bootFrame(search: string) {
       return id;
     },
     clearTimeout(id: number) { timeouts.delete(id); },
-    Map, Set, Object, Array, Math, Promise, String, Number, Error, URLSearchParams,
+    Map, Set, Object, Array, Math, Promise, String, Number, Error,
     ErrorEvent: class ErrorEvent {},
   };
   vm.createContext(context);
@@ -205,17 +205,8 @@ describe('snapshot capture', () => {
     assert.match(snap.snapshotError('oversize'), /150 KB/);
   });
 
-  test('enables capture only for ?mg_preview=1', () => {
-    assert.equal(snap.previewCaptureEnabled('?mg_preview=1'), true);
-    assert.equal(snap.previewCaptureEnabled('?embed=https%3A%2F%2Fportal.example&mg_preview=1'), true);
-    assert.equal(snap.previewCaptureEnabled(''), false);
-    assert.equal(snap.previewCaptureEnabled('?embed=https%3A%2F%2Fportal.example'), false);
-    assert.equal(snap.previewCaptureEnabled('?mg_preview=0'), false);
-    assert.equal(snap.previewCaptureEnabled('?mg_preview=12'), false);
-  });
-
   test('does not capture or set preserveDrawingBuffer without the preview flag', () => {
-    const live = bootFrame('?embed=https%3A%2F%2Fportal.example');
+    const live = bootFrame({ search: '?embed=https%3A%2F%2Fportal.example' });
     const attrs = { alpha: false, preserveDrawingBuffer: false };
     live.canvas().getContext('webgl2', attrs);
     live.canvas().getContext('webgl', { alpha: true });
@@ -231,10 +222,17 @@ describe('snapshot capture', () => {
     assert.equal(live.posts.some((msg) => msg.type === '__MG_FIRST_FRAME'), true);
     assert.equal(live.posts.some((msg) => msg.type === '__MG_SNAPSHOT'), false);
     assert.equal(live.timeouts.size, 0);
+
+    const spoofed = bootFrame({ preview: 'true' });
+    spoofed.canvas().getContext('webgl', {});
+    spoofed.ready();
+    spoofed.flush();
+    assert.equal(spoofed.getContextCalls[0]?.attrs?.preserveDrawingBuffer, undefined);
+    assert.equal(spoofed.posts.some((msg) => msg.type === '__MG_SNAPSHOT'), false);
   });
 
   test('upload preview forces preserveDrawingBuffer and posts a snapshot', () => {
-    const preview = bootFrame('?mg_preview=1');
+    const preview = bootFrame({ preview: true });
     const attrs = { alpha: false, preserveDrawingBuffer: false };
     preview.canvas().getContext('webgl', attrs);
     preview.canvas().getContext('2d', { alpha: true });

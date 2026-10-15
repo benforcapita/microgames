@@ -22,7 +22,10 @@ test('seed game loads in the sandboxed iframe and sends telemetry', async ({ pag
   // Iframe is served from the separate CDN origin with the locked-down sandbox.
   const frameEl = page.locator('iframe.mg-frame');
   await expect(frameEl).toHaveAttribute('sandbox', 'allow-scripts allow-pointer-lock');
-  expect(await frameEl.getAttribute('src')).toContain(`${CDN}/g/${GAME_ID}/index.html`);
+  const frameSrc = await frameEl.getAttribute('src');
+  expect(frameSrc).toContain(`${CDN}/g/${GAME_ID}/index.html`);
+  const cdnHtml = await (await page.request.get(frameSrc.split('#')[0])).text();
+  expect(cdnHtml).not.toContain('__MG_PREVIEW');
 
   // Game booted inside the frame (boot.js runtime injected, canvas rendered).
   const frame = page.frameLocator('iframe.mg-frame');
@@ -64,6 +67,13 @@ test('seed game loads in the sandboxed iframe and sends telemetry', async ({ pag
   expect(types.filter((t) => t === 'ready')).toHaveLength(1);
   expect(types.filter((t) => t === 'first_frame')).toHaveLength(1);
   console.log(`telemetry events: ${types.join(', ')}`);
+
+  // Live play never enables preview capture, and the player drops snapshot messages.
+  expect(await gameFrame.evaluate(() => window.__MG_PREVIEW === true)).toBe(false);
+  const beforeSnapshot = events.length;
+  await gameFrame.evaluate(() => parent.postMessage({ type: '__MG_SNAPSHOT', dataUrl: 'data:image/png;base64,aa', mime: 'image/png' }, '*'));
+  await page.waitForTimeout(300);
+  expect(events.length).toBe(beforeSnapshot);
 
   await page.waitForTimeout(500);
   await page.screenshot({ path: 'docs/pr-assets/mg-7-e2e-stack-tower.png' });

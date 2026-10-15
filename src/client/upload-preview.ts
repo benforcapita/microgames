@@ -1,11 +1,14 @@
-/** Upload-page preview capture. Live play iframes never use this flag. */
+/** Upload-page preview capture. The CDN never injects this flag into live games. */
 export const PREVIEW_WAIT_MS = 8000;
 export const PREVIEW_TIMEOUT_COPY = 'No preview captured, upload one.';
 
-export function withPreviewFlag(blobUrl: string): string {
-  const url = new URL(blobUrl);
-  url.searchParams.set('mg_preview', '1');
-  return url.href;
+/** Flag script, then boot, inserted at the start of the preview document only. */
+export function injectPreview(html: string, bootSource: string): string {
+  const tag = `<script>window.__MG_PREVIEW=true</script><script>${bootSource}</script>`;
+  const head = html.match(/<head[^>]*>/i);
+  if (head) return html.replace(head[0], head[0] + tag);
+  const lead = html.match(/^\s*(<!doctype[^>]*>)?\s*(<html[^>]*>)?/i)?.[0] ?? '';
+  return lead + tag + html.slice(lead.length);
 }
 
 export interface PreviewClock {
