@@ -49,6 +49,12 @@ describe('input support: declared flag wins when consistent', () => {
     const r = cls(page("Meshgrounds.declare({ inputSupport: 'desktop' }); addEventListener('keydown', f); c.ontouchstart = g", '<canvas></canvas>', '<meta name="meshgrounds:input-support" content="mobile">'));
     assert.deepEqual([r.declared, r.class, r.source], ['desktop', 'desktop', 'declared']);
   });
+  it('with several declare() calls the LAST one wins (same as boot.js at runtime)', () => {
+    const r = cls(page("Meshgrounds.declare({ inputSupport: 'mobile' }); Meshgrounds.declare({ inputSupport: 'desktop' }); addEventListener('keydown', f); c.ontouchstart = g"));
+    assert.deepEqual([r.declared, r.class, r.source], ['desktop', 'desktop', 'declared']);
+    const r2 = cls(page("Meshgrounds.declare({ inputSupport: 'desktop' }); Meshgrounds.declare({ inputSupport: 'both' }); addEventListener('keydown', f); c.ontouchstart = g"));
+    assert.equal(r2.declared, 'both');
+  });
   it('the meta tag applies when there is no declare() call', () => {
     const r = cls(page("addEventListener('keydown', f); c.ontouchstart = g", '<canvas></canvas>', '<meta name="meshgrounds:input-support" content="mobile">'));
     assert.deepEqual([r.declared, r.class], ['mobile', 'mobile']);
