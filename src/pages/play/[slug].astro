@@ -2,15 +2,21 @@
 import Layout from '../../layouts/Layout.astro';
 import Rate from '../../components/Rate.astro';
 import GameCard from '../../components/GameCard.astro';
+import GameThumb from '../../components/GameThumb.astro';
+import { ratingLabel } from '../../lib/rating';
 import { getGame, getHealth, getUserRating, listGames } from '../../lib/server/games';
-import { CDN_ORIGIN, GRADUATION, REVENUE } from '../../lib/server/config';
+import { CDN_ORIGIN, CDN_PREVIEW_SECRET, GRADUATION, REVENUE } from '../../lib/server/config';
+import { isPublicStage } from '../../lib/server/game-rules';
+import { mintPreviewToken } from '../../../cdn/preview-token.mjs';
 import { ago, compact, formatCheck, kb } from '../../lib/format';
 
-const game = await getGame(Astro.params.slug ?? '');
+const { user } = Astro.locals;
+
+// Owners can open their own pending/rejected game; everyone else gets a 404 (canViewGame).
+const game = await getGame(Astro.params.slug ?? '', { viewerId: Astro.locals.user?.id });
 if (!game) return Astro.rewrite('/404');
 if (Astro.params.slug !== game.slug) return Astro.redirect(`/play/${game.slug}`, 301);
 
-const { user } = Astro.locals;
 const [{ checks }, mine, parent, forks, byCreator] = await Promise.all([
   getHealth(game.id),
   getUserRating(game.id, user?.id),
@@ -20,6 +26,9 @@ const [{ checks }, mine, parent, forks, byCreator] = await Promise.all([
 ]);
 const more = byCreator.filter((g) => g.id !== game.id).slice(0, 4);
 const isOwner = !!user && user.id === game.ownerId;
+// SP-6: the CDN serves pending/rejected bundles only with a short-lived token, minted only for the owner here.
+const previewToken = isOwner && !isPublicStage(game.stage) ? mintPreviewToken(CDN_PREVIEW_SECRET, game.id) : null;
+const ptQuery = previewToken ? `&pt=${encodeURIComponent(previewToken)}` : '';
 const remixable = game.license !== 'All rights reserved';
 const live = game.stage === 'live';
 const passed = checks.filter((c) => c.pass).length;
@@ -37,11 +46,16 @@ const uploaded = Astro.url.searchParams.has('uploaded');
       )
     }
     <div class="stage-wrap">
-      <div id="stage" class="stage" data-game-id={game.id} data-game-title={game.title} data-game-stage={game.stage} data-cdn={CDN_ORIGIN} data-cloud={user ? '1' : ''}>
+      <div id="stage" class="stage" data-game-id={game.id} data-game-title={game.title} data-game-stage={game.stage} data-cdn={CDN_ORIGIN} data-cloud={user ? '1' : ''} data-preview={previewToken ?? ''}>
         <button class="launch" type="button" aria-label={`Play ${game.title}`}>
-          <span class="play-icon">▶</span>
-          <span>Play {game.title}</span>
-          <span class="muted mono">{kb(game.sizeBytes)} · loads instantly</span>
+          <GameThumb game={game} class="preview-art" eager />
+          <span class="preview-shade" aria-hidden="true"></span>
+          <span class="preview-body">
+            <span class="play-icon" aria-hidden="true">▶</span>
+            <span class="preview-title">{game.title}</span>
+            <span class="preview-meta">by @{game.creator} · {ratingLabel(game.avgRating, game.ratingCount)}</span>
+            <span class="muted mono preview-size">{kb(game.sizeBytes)} · loads instantly</span>
+          </span>
         </button>
       </div>
       <div class="toolbar spread">
@@ -53,7 +67,7 @@ const uploaded = Astro.url.searchParams.has('uploaded');
         <div class="row">
           <button class="btn ghost sm" type="button" id="restart">↻ Restart</button>
           <button class="btn ghost sm" type="button" id="fullscreen">⛶ Fullscreen</button>
-          {remixable && <a class="btn ghost sm" href={`${CDN_ORIGIN}/g/${game.id}/index.html?source`} target="_blank" rel="noopener">{'</>'} Source</a>}
+          {remixable && <a class="btn ghost sm" href={`${CDN_ORIGIN}/g/${game.id}/index.html?source${ptQuery}`} target="_blank" rel="noopener">{'</>'} Source</a>}
           {remixable && live && <a class="btn sm" href={`/upload?fork=${game.slug}`}>⑂ Fork</a>}
           {isOwner && <a class="btn ghost sm" href="/me">Manage</a>}
         </div>
@@ -148,7 +162,19 @@ const uploaded = Astro.url.searchParams.has('uploaded');
     font: 800 1.4rem var(--sans);
     cursor: pointer;
   }
+  .launch { padding: 0; overflow: hidden; }
+  .launch:focus-visible { outline: 3px solid var(--accent); outline-offset: -3px; }
+  .launch :global(.preview-art) { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
+  .preview-shade { position: absolute; inset: 0; background: radial-gradient(circle at center, #0008, #000c 75%); }
+  .preview-body { position: relative; display: grid; justify-items: center; gap: 0.5rem; padding: 1rem; text-align: center; }
+  .preview-title { font: 800 clamp(1.2rem, 3.2vw, 2.2rem) / 1.1 var(--sans); text-shadow: 0 2px 12px #000; }
+  .preview-meta { font-size: 0.95rem; font-weight: 600; color: #e6e9f2; text-shadow: 0 1px 8px #000; }
   .launch .mono { font-size: 0.8rem; font-weight: 400; }
+  @media (max-width: 480px) {
+    .play-icon { width: 64px; height: 64px; font-size: 1.5rem; }
+    .preview-meta { font-size: 0.8rem; }
+    .preview-size { display: none; }
+  }
   .play-icon {
     width: 84px;
     height: 84px;
@@ -185,7 +211,7 @@ const uploaded = Astro.url.searchParams.has('uploaded');
   import { mountPlayer, type PlayerHandle } from '../../client/player';
 
   const stage = document.getElementById('stage')!;
-  const { gameId, gameTitle, gameStage, cdn, cloud } = stage.dataset;
+  const { gameId, gameTitle, gameStage, cdn, cloud, preview } = stage.dataset;
   const game = { id: gameId!, title: gameTitle!, stage: gameStage as 'proving' | 'live' };
   const best = document.getElementById('best')!;
   const showBest = (n: number) => (best.textContent = Number.isFinite(n) ? `Your best: ${n}` : '');
@@ -197,6 +223,7 @@ const uploaded = Astro.url.searchParams.has('uploaded');
     player = mountPlayer(stage, game, {
       cdnOrigin: cdn!,
       cloudSaves: !!cloud,
+      previewToken: preview || null,
       onEvent: (type, data) => type === 'SCORE' && showBest(Number(data.best)),
     });
     player.frame.focus();

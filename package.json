@@ -19,14 +19,17 @@
     "db:start": "npx -y supabase@2.120.0 start -x vector,logflare,edge-runtime,imgproxy,realtime",
     "db:stop": "npx -y supabase@2.120.0 stop",
     "check": "astro check",
+    "check:pg-net": "node scripts/check-pg-net.mjs",
     "e2e": "playwright test",
-    "smoke": "node scripts/smoke.mjs"
+    "smoke": "node scripts/smoke.mjs",
+    "thumbs": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/capture-thumbs.mjs"
   },
   "dependencies": {
     "@astrojs/node": "11.1.6",
     "@astrojs/vercel": "11.0.14",
     "@supabase/ssr": "0.12.7",
     "@supabase/supabase-js": "2.117.3",
+    "acorn": "^8.19.0",
     "astro": "7.3.5",
     "postgres": "3.4.9"
   },
@@ -34,6 +37,7 @@
     "@astrojs/check": "0.9.10",
     "@playwright/test": "^1.64.1",
     "@types/node": "24.19.1",
+    "sharp": "^0.35.5",
     "typescript": "6.0.3"
   }
 }

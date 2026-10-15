@@ -124,3 +124,57 @@ export function compareByBayes(globalMean: number) {
     bayesianRating(b.avgRating, b.ratingCount, globalMean) - bayesianRating(a.avgRating, a.ratingCount, globalMean) ||
     b.ratingCount - a.ratingCount;
 }
+
+/* ---------- Stages (SP-3) ---------- */
+
+/** All game stages. `pending` = submitted, awaiting validation; `rejected` = failed validation. */
+export const STAGES = ['pending', 'proving', 'live', 'rejected'] as const;
+export type Stage = (typeof STAGES)[number];
+/** Stages that may appear in any public list, feed, creator page, tag cloud or stat. */
+export const PUBLIC_STAGES = ['proving', 'live'] as const satisfies readonly Stage[];
+
+export const isPublicStage = (stage: string): boolean => (PUBLIC_STAGES as readonly string[]).includes(stage);
+
+/**
+ * Which stages a list query may return. Public lists never include pending/rejected games; only an
+ * owner-scoped query (the creator's own dashboard) may opt into them with `includeUnpublished`.
+ */
+export function visibleStages(opts: { stage?: Stage; ownerId?: string; includeUnpublished?: boolean } = {}): Stage[] {
+  const unpublishedOk = !!(opts.includeUnpublished && opts.ownerId);
+  if (opts.stage) return unpublishedOk || isPublicStage(opts.stage) ? [opts.stage] : [];
+  return unpublishedOk ? [...STAGES] : [...PUBLIC_STAGES];
+}
+
+export type ValidationStatus = 'queued' | 'running' | 'passed' | 'failed' | 'error';
+
+/**
+ * Stage after a validation run (Ben: auto-publish on pass, no human moderation).
+ * Only moves games out of `pending`; never demotes a published game or resurrects a rejected one
+ * on a stale/duplicate result. queued/running/error leave the stage unchanged.
+ */
+export function stageAfterValidation(current: Stage, status: ValidationStatus): Stage {
+  if (current !== 'pending') return current;
+  if (status === 'passed') return 'proving';
+  if (status === 'failed') return 'rejected';
+  return current;
+}
+
+/**
+ * Who may open a game's page: anyone for published stages; only the owner for their own
+ * pending/rejected game (so they can check it while validation runs). Everyone else gets a 404.
+ */
+export function canViewGame(game: { stage: Stage; ownerId: string | null } | null, viewerId?: string | null): boolean {
+  if (!game) return false;
+  if (isPublicStage(game.stage)) return true;
+  return !!viewerId && !!game.ownerId && game.ownerId === viewerId;
+}
+
+/** createGame reads back the row it just inserted, which may be 'pending' (SP-5 default). */
+export const CREATED_GAME_LOOKUP = { includeUnpublished: true } as const;
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** RT-2 expand step: ratings.user_id mirrors voter when voter is an auth user id, else null. */
+export function ratingUserId(voter: string): string | null {
+  return UUID_RE.test(voter) ? voter.toLowerCase() : null;
+}
