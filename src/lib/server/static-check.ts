@@ -41,6 +41,13 @@ export const STATIC_LIMITS = { maxBytes: 5 * 1024 * 1024, warnBytes: 1024 * 1024
 const MAX_FINDINGS = 10;
 /** Upper bound on per-handler parses when the combined handler parse fails (keeps the worst case linear). */
 const MAX_HANDLER_PARSES = 200;
+/**
+ * Budget for the acorn/AST warning phase (the Edge Function has ~2s of CPU). Parsing can't be interrupted
+ * mid-file, so the budget is enforced before each parse (bytes of JS still allowed) and during the walk
+ * (wall time). acorn does roughly 3 MB/s here, so 1.25 MB keeps the phase near 600 ms with headroom for
+ * slower edge CPUs. Past the budget we stop and emit one 'deep analysis skipped (too large)' warning.
+ */
+export const AST_BUDGET = { ms: 600, maxJsBytes: 1.25 * 1024 * 1024 };
 
 /* ------------------------------------------------------------------ URLs */
 
@@ -160,6 +167,7 @@ function tokenize(html: string): Doc {
           value = html.slice(v0, j);
         }
       }
+      if (value.includes('&')) value = decodeEntities(value);
       if (!attrs.has(an)) attrs.set(an, value);
       if (an.startsWith('on') && value) doc.handlers.push(value);
     }
@@ -177,6 +185,16 @@ function tokenize(html: string): Doc {
     } else i = j;
   }
   return doc;
+}
+
+const ENTITIES: Record<string, string> = { quot: '"', apos: "'", amp: '&', lt: '<', gt: '>', sol: '/', colon: ':', lpar: '(', rpar: ')', period: '.', lsqb: '[', rsqb: ']', grave: '`', bsol: '\\', nbsp: ' ', tab: '\t', newline: '\n' };
+/** Browsers decode character references in attribute values before running a handler or loading a src. */
+function decodeEntities(v: string): string {
+  return v.replace(/&(?:#[xX]([0-9a-fA-F]{1,6})|#([0-9]{1,7})|([a-zA-Z]{2,8}));?/g, (m, hex, dec, name) => {
+    const cp = hex ? parseInt(hex, 16) : dec ? parseInt(dec, 10) : NaN;
+    if (!Number.isNaN(cp)) return cp > 0 && cp <= 0x10ffff ? String.fromCodePoint(cp) : '\uFFFD';
+    return ENTITIES[name.toLowerCase()] ?? m;
+  });
 }
 
 /* ------------------------------------------------------------------ CSS (indexOf scans) */
@@ -259,9 +277,38 @@ function parseJs(code: string, module: boolean, retryAsModule = true): { ast: N 
   }
 }
 
-function walk(root: N, facts: JsFacts) {
+class Budget {
+  private readonly start = now();
+  private readonly opts: { ms: number; maxJsBytes: number };
+  private bytesLeft: number;
+  skipped = false;
+  constructor(opts: { ms: number; maxJsBytes: number }) {
+    this.opts = opts;
+    this.bytesLeft = opts.maxJsBytes;
+  }
+  remaining() {
+    return this.skipped ? 0 : this.bytesLeft;
+  }
+  timeLeft() {
+    return now() - this.start < this.opts.ms;
+  }
+  /** Reserve `len` bytes of parsing; false (and skipped) once the byte or time budget is exhausted. */
+  take(len: number): boolean {
+    if (this.skipped || len > this.bytesLeft || !this.timeLeft()) return !(this.skipped = true);
+    this.bytesLeft -= len;
+    return true;
+  }
+}
+const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+
+function walk(root: N, facts: JsFacts, budget?: Budget) {
   const stack: N[] = [root];
+  let steps = 0;
   while (stack.length) {
+    if ((++steps & 4095) === 0 && budget && !budget.timeLeft()) {
+      budget.skipped = true;
+      return;
+    }
     const node = stack.pop()!;
     switch (node.type) {
       case 'ImportDeclaration':
@@ -297,10 +344,16 @@ function walk(root: N, facts: JsFacts) {
         break;
       }
       case 'MemberExpression': {
+        // parent["location"] / top['document'] = …
+        if (node.computed && node.property?.type === 'Literal' && ['location', 'document', 'window'].includes(String(node.property.value))) {
+          const obj = stripWindow(path(node.object));
+          if (obj === 'top' || obj === 'parent') facts.topNav.push(`${path(node.object)}["${node.property.value}"]`);
+        }
         const p = path(node);
         if (p) {
           const bare = stripWindow(p);
-          if (/^(?:top|parent)\.(?:location|document|window|postMessage)/.test(bare) || bare === 'top' || bare.startsWith('frameElement')) facts.topNav.push(p);
+          // parent.postMessage is how games talk to the portal (boot.js telemetry), not navigation.
+          if (/^(?:top|parent)\.(?:location|document|window)\b/.test(bare) || bare === 'top' || bare.startsWith('frameElement')) facts.topNav.push(p);
           const m = /(?:^|\.)Meshgrounds\.(ready|onPause|onResume)\b/.exec(p);
           if (m) facts.hooks.add(m[1]);
         }
@@ -318,6 +371,297 @@ function walk(root: N, facts: JsFacts) {
       } else if (v && typeof v === 'object' && typeof v.type === 'string') stack.push(v);
     }
   }
+}
+
+/**
+ * Parses all classic scripts as `{\n<code>\n}` blocks in one acorn call. Two blocks with unbalanced braces
+ * could cancel out when concatenated, so the result is only trusted if the program's top level is exactly
+ * one BlockStatement per script at the expected offsets; otherwise (or on a syntax error) the run is split
+ * at the offending script and the rest is parsed again. Every parse draws from the byte budget, which keeps
+ * the total work linear.
+ */
+function parseClassic(blocks: { idx: number; text: string }[], facts: JsFacts, errors: string[], budget: Budget) {
+  let from = 0;
+  while (from < blocks.length && !budget.skipped) {
+    const offsets: number[] = [];
+    let src = '';
+    for (let k = from; k < blocks.length; k++) {
+      offsets.push(src.length);
+      src += `{\n${blocks[k].text}\n}\n`;
+    }
+    if (!budget.take(src.length)) return;
+    const { ast, error, pos } = parseAt(src);
+    if (ast) {
+      const body = ast.body as N[];
+      const aligned = body.length === offsets.length && body.every((b, k) => b.type === 'BlockStatement' && b.start === offsets[k]);
+      if (aligned) {
+        walk(ast, facts, budget);
+        return;
+      }
+    }
+    // Find the first script that is wrong on its own, record it, and continue after it.
+    let bad = from;
+    if (!ast && pos !== null) {
+      let k = 0;
+      while (k + 1 < offsets.length && offsets[k + 1] <= pos) k++;
+      bad = from + k;
+    } else {
+      for (let k = 0; k < offsets.length; k++) {
+        const b = body0(ast)[k];
+        if (!b || b.type !== 'BlockStatement' || b.start !== offsets[k]) { bad = from + k; break; }
+      }
+    }
+    if (bad > from) parseClassic(blocks.slice(from, bad), facts, errors, budget); // prefix parsed fine up to here
+    const one = blocks[bad];
+    if (!budget.take(one.text.length)) return;
+    const single = parseJs(one.text, false);
+    if (single.error) errors.push(`<script> #${one.idx + 1}: ${single.error ?? error}`);
+    else if (single.ast) walk(single.ast, facts, budget);
+    from = bad + 1;
+  }
+}
+const body0 = (ast: N | null): N[] => (ast?.body as N[]) ?? [];
+
+function parseAt(code: string): { ast: N | null; error: string | null; pos: number | null } {
+  try {
+    return { ast: parse(code, { ecmaVersion: 'latest', allowHashBang: true, allowAwaitOutsideFunction: true, sourceType: 'script' }) as N, error: null, pos: null };
+  } catch (e) {
+    const pos = (e as { pos?: number }).pos;
+    return { ast: null, error: (e as Error).message, pos: typeof pos === 'number' ? pos : null };
+  }
+}
+
+/* ------------------------------------------------------------------ lexical fallback (budget skipped) */
+
+/** Cap on specifiers/findings collected by the lexical fallback; more than this is itself a hard fail. */
+export const LEXICAL_CAP = 10_000;
+
+const hexVal = (s: string) => (/^[0-9a-fA-F]+$/.test(s) ? parseInt(s, 16) : NaN);
+
+/** Decodes one JS escape at code[i] === '\\'. Returns [decoded text, next index]. */
+function unescapeAt(code: string, i: number): [string, number] {
+  const c = code[i + 1];
+  if (c === undefined) return ['', i + 1];
+  if (c === 'x') {
+    const v = hexVal(code.slice(i + 2, i + 4));
+    return Number.isNaN(v) ? ['x', i + 2] : [String.fromCharCode(v), i + 4];
+  }
+  if (c === 'u') {
+    if (code[i + 2] === '{') {
+      const e = code.indexOf('}', i + 3);
+      const v = e > 0 && e - i < 12 ? hexVal(code.slice(i + 3, e)) : NaN;
+      return Number.isNaN(v) || v > 0x10ffff ? ['u', i + 2] : [String.fromCodePoint(v), e + 1];
+    }
+    const v = hexVal(code.slice(i + 2, i + 6));
+    return Number.isNaN(v) ? ['u', i + 2] : [String.fromCharCode(v), i + 6];
+  }
+  if (c === '\r' || c === '\n' || c === '\u2028' || c === '\u2029') return ['', i + 2]; // line continuation
+  const simple: Record<string, string> = { n: '\n', t: '\t', r: '\r', b: '\b', f: '\f', v: '\v', '0': '\0' };
+  return [simple[c] ?? c, i + 2];
+}
+
+const REGEX_AFTER = new Set(['(', ',', '=', ':', '[', '!', '&', '|', '?', '{', '}', ';', '+', '-', '*', '%', '<', '>', '~', '^', '']);
+const REGEX_KEYWORDS = new Set(['return', 'typeof', 'instanceof', 'in', 'of', 'new', 'delete', 'void', 'throw', 'case', 'do', 'else', 'yield', 'await']);
+/** Inside string contents: quotes, backslashes, newlines and `(` are neutralised so no code pattern can match there. */
+const QUOTES = /['"`\\\n\r(]/g;
+
+/**
+ * One linear pass that turns JS into a normalised form for the text scans: comments become a space,
+ * string/template contents are escape-decoded (`\/`, `\xNN`, `\uNNNN`) and re-quoted with quotes,
+ * backslashes, newlines and `(` inside neutralised, regex literals become `/r/`, and `\u` escapes in
+ * identifiers are decoded. Plain code is copied in slices, so the cost is one charCodeAt per byte.
+ * Returns two views: `src` keeps string contents (for specifiers/URLs); `bare` empties them (for code-only
+ * patterns, so text inside a string can never look like a call).
+ */
+export function normalizeJsBoth(code: string): { src: string; bare: string } {
+  const out: string[] = [];
+  const bare: string[] = [];
+  const n = code.length;
+  let i = 0;
+  let run = 0;
+  const flush = (to: number) => {
+    if (to > run) {
+      const s = code.slice(run, to);
+      out.push(s);
+      bare.push(s);
+    }
+  };
+  const both = (s: string) => {
+    out.push(s);
+    bare.push(s);
+  };
+  while (i < n) {
+    const c = code.charCodeAt(i);
+    // Fast path: only / " ' ` < \ can start something that needs rewriting.
+    if (c !== 47 && c !== 34 && c !== 39 && c !== 96 && c !== 60 && c !== 92) {
+      i++;
+      continue;
+    }
+    if (c === 60) {
+      if (code.startsWith('<!--', i)) {
+        flush(i);
+        const e = code.indexOf('\n', i + 4);
+        i = e < 0 ? n : e;
+        both(' ');
+        run = i;
+      } else i++;
+      continue;
+    }
+    if (c === 92) {
+      if (code[i + 1] === 'u') {
+        flush(i);
+        const [d, nx] = unescapeAt(code, i);
+        both(d);
+        i = run = nx;
+      } else i += 2;
+      continue;
+    }
+    if (c === 47) {
+      const nx = code[i + 1];
+      if (nx === '/' || nx === '*') {
+        flush(i);
+        const e = nx === '/' ? code.indexOf('\n', i + 2) : code.indexOf('*/', i + 2);
+        i = e < 0 ? n : nx === '/' ? e : e + 2;
+        both(' ');
+        run = i;
+        continue;
+      }
+      if (regexAllowedAt(code, i)) {
+        let j = i + 1;
+        let cls = false;
+        while (j < n && code[j] !== '\n') {
+          const d = code[j];
+          if (d === '\\') j += 2;
+          else if (d === '[') { cls = true; j++; }
+          else if (d === ']') { cls = false; j++; }
+          else if (d === '/' && !cls) break;
+          else j++;
+        }
+        if (code[j] === '/') {
+          flush(i);
+          both('/r/');
+          i = run = j + 1;
+          continue;
+        }
+      }
+      i++;
+      continue;
+    }
+    // String or template literal.
+    flush(i);
+    const q = code[i];
+    let j = i + 1;
+    let s = '';
+    let seg = j;
+    while (j < n) {
+      const d = code[j];
+      if (d === q) break;
+      if (d === '\\') {
+        s += code.slice(seg, j);
+        const [dec, nx] = unescapeAt(code, j);
+        s += dec;
+        j = seg = nx;
+      } else if (q !== '`' && d === '\n') break;
+      else j++;
+    }
+    s += code.slice(seg, Math.min(j, n));
+    out.push(q + s.replace(QUOTES, '\uFFFD') + q);
+    bare.push(q + q);
+    // A dynamic import inside a template substitution is code we didn't tokenise: surface it so it fails closed.
+    if (q === '`' && s.includes('${') && /\bimport\s*\(/.test(s)) both(' import(\uFFFD) ');
+    i = run = j + 1;
+  }
+  flush(n);
+  return { src: out.join(''), bare: bare.join('') };
+}
+export const normalizeJs = (code: string, keepStrings = true) => normalizeJsBoth(code)[keepStrings ? 'src' : 'bare'];
+
+/** Is a `/` at code[at] the start of a regex literal (vs division)? Looks back past whitespace only. */
+function regexAllowedAt(code: string, at: number): boolean {
+  let j = at - 1;
+  while (j >= 0 && isSpace(code.charCodeAt(j))) j--;
+  if (j < 0) return true;
+  const c = code.charCodeAt(j);
+  if (isIdent(c)) {
+    let k = j;
+    while (k >= 0 && j - k < 12 && isIdent(code.charCodeAt(k))) k--;
+    return REGEX_KEYWORDS.has(code.slice(k + 1, j + 1));
+  }
+  return REGEX_AFTER.has(code[j]);
+}
+const isIdent = (c: number) => (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (c >= 48 && c <= 57) || c === 36 || c === 95 || c > 127;
+
+interface LexFacts {
+  imports: string[];
+  unresolved: string[];
+  network: string[];
+  evals: string[];
+  popups: string[];
+  topNav: string[];
+  dialogs: string[];
+  hooks: Set<string>;
+  capped: boolean;
+}
+
+const STR = `(['"\`])([^'"\`]{0,4096})`;
+const LEX = {
+  importCall: new RegExp(`(?<![\\w$.])import\\s*\\(\\s*${STR}\\1`, 'g'),
+  importAny: /(?<![\w$.])import\s*\(/g,
+  importBare: new RegExp(`(?<![\\w$.])import\\s*${STR}\\1`, 'g'),
+  from: new RegExp(`(?<![\\w$.])from\\s*${STR}\\1`, 'g'),
+  network: new RegExp(`(?<![\\w$])(?:fetch|sendBeacon|importScripts|WebSocket|EventSource|Worker|SharedWorker)\\s*\\(\\s*${STR}\\1`, 'g'),
+  xhrOpen: /\.\s*open\s*\(\s*(['"`])[^'"`]{0,64}\1\s*,\s*(['"`])([^'"`]{0,4096})\2/g,
+  evals: /(?<![\w$.])(?:eval\s*\(|(?:new\s+)?Function\s*\(|set(?:Timeout|Interval)\s*\(\s*['"`])/g,
+  popups: /(?<![\w$.])(?:(?:window|self|globalThis)\s*\.\s*)?open\s*\(/g,
+  topNav: /(?<![\w$.])(?:(?:window|self|globalThis)\s*\.\s*)?(?:top|parent)\s*\.\s*(?:location|document|window)(?![\w$])|(?<![\w$.])(?:window|self|globalThis)\s*\.\s*top(?![\w$])|(?<![\w$.])frameElement(?![\w$])/g,
+  topNavIndex: /(?<![\w$.])(?:(?:window|self|globalThis)\s*\.\s*)?(?:top|parent)\s*\[\s*(['"`])(?:location|document|window)\1\s*\]/g,
+  dialogs: /(?<![\w$.])(?:(?:window|self|globalThis)\s*\.\s*)?(?:alert|confirm|prompt)\s*\(/g,
+  hooks: /Meshgrounds\s*\??\.\s*(ready|onPause|onResume)(?![\w$])/g,
+};
+
+/** Text-scan of normalised JS. Every collection is bounded by LEXICAL_CAP and built with loops (no spread). */
+function lexicalScan(codes: string[], into: LexFacts) {
+  // Each script/handler is normalised on its own (an unterminated string or template can't swallow the next
+  // one), then all of them are scanned in one go, so 100k tiny handlers cost one regex pass, not 100k.
+  const srcs: string[] = [];
+  const bares: string[] = [];
+  for (const code of codes) {
+    const v = normalizeJsBoth(code);
+    srcs.push(v.src);
+    bares.push(v.bare);
+  }
+  const src = srcs.join('\n;\n');
+  const bare = bares.join('\n;\n');
+  const each = (re: RegExp, fn: (m: RegExpExecArray) => void, text = src) => {
+    re.lastIndex = 0;
+    for (let m = re.exec(text); m; m = re.exec(text)) {
+      if (m[0].length === 0) re.lastIndex++;
+      fn(m);
+    }
+  };
+  const push = (list: string[], v: string) => {
+    if (list.length < LEXICAL_CAP) list.push(v);
+    else into.capped = true;
+  };
+  const spec = (list: string[], q: string, v: string) => {
+    if (q === '`' && v.includes('${') && !/^(?:https?:|wss?:)?\/\/[^/$]+\//i.test(v)) push(into.unresolved, `\`${v.slice(0, 80)}\``);
+    else push(list, v);
+  };
+  const literalStarts = new Set<number>();
+  each(LEX.importCall, (m) => { literalStarts.add(m.index); spec(into.imports, m[1], m[2]); });
+  each(LEX.importAny, (m) => {
+    if (!literalStarts.has(m.index)) push(into.unresolved, src.slice(m.index, m.index + 60).replace(/\s+/g, ' '));
+  });
+  each(LEX.importBare, (m) => spec(into.imports, m[1], m[2]));
+  each(LEX.from, (m) => spec(into.imports, m[1], m[2]));
+  each(LEX.network, (m) => push(into.network, m[2]));
+  each(LEX.xhrOpen, (m) => push(into.network, m[3]));
+  each(LEX.evals, (m) => push(into.evals, m[0].replace(/\s+/g, '').replace(/\($|\(['"`]$/, '()')), bare);
+  each(LEX.popups, () => push(into.popups, 'window.open()'), bare);
+  each(LEX.topNav, (m) => push(into.topNav, m[0].replace(/\s+/g, '')), bare);
+  each(LEX.topNavIndex, (m) => push(into.topNav, m[0].replace(/\s+/g, '')));
+  each(LEX.dialogs, (m) => push(into.dialogs, m[0].replace(/\s+/g, '').replace(/\($/, '()')), bare);
+  each(LEX.hooks, (m) => into.hooks.add(m[1]), bare);
 }
 
 /* ------------------------------------------------------------------ analyzer */
@@ -363,6 +707,9 @@ export function analyzeGame(input: string | Uint8Array): StaticReport {
   const syntaxErrors: string[] = [];
   const importMapUrls: string[] = [];
   const scriptSrcs: string[] = [];
+  const budget = new Budget(AST_BUDGET);
+  const classic: { idx: number; text: string }[] = [];
+  const modules: { idx: number; text: string }[] = [];
   doc.scripts.forEach((s, idx) => {
     const type = (s.attrs.get('type') ?? '').trim().toLowerCase();
     const src = s.attrs.get('src');
@@ -381,33 +728,78 @@ export function analyzeGame(input: string | Uint8Array): StaticReport {
     }
     const isJs = type === '' || type === 'module' || type.includes('javascript') || type.includes('ecmascript');
     if (!isJs || !s.text.trim()) return; // data blocks (x-shader, json, …) are not executed
-    const { ast, error } = parseJs(s.text, type === 'module');
-    if (error) syntaxErrors.push(`<script> #${idx + 1}: ${error}`);
-    if (ast) walk(ast, facts);
+    (type === 'module' ? modules : classic).push({ idx, text: s.text });
   });
+  // All classic inline scripts go through ONE parse (each wrapped in its own block), so 270k tiny
+  // <script>s cost one acorn call instead of 270k; see parseClassic for the boundary check.
+  // Smallest scripts first, so one huge script can't stop the small ones from being parsed (their syntax
+  // errors, evals, popups… stay exact). Whatever doesn't fit the byte budget is left to the text scan.
+  const bySize = (a: { text: string }, b: { text: string }) => a.text.length - b.text.length;
+  const fit: typeof classic = [];
+  let room = budget.remaining();
+  for (const c of [...classic].sort(bySize)) {
+    if (c.text.length + 4 > room) { budget.skipped = true; break; }
+    room -= c.text.length + 4;
+    fit.push(c);
+  }
+  const over = budget.skipped;
+  budget.skipped = false;
+  parseClassic(fit.sort((a, b) => a.idx - b.idx), facts, syntaxErrors, budget);
+  if (over) budget.skipped = true;
+  for (const m of [...modules].sort(bySize)) {
+    if (!budget.take(m.text.length)) break;
+    const { ast, error } = parseJs(m.text, true);
+    if (error) syntaxErrors.push(`<script> #${m.idx + 1}: ${error}`);
+    if (ast) walk(ast, facts, budget);
+  }
   // Inline event handlers: parse them all in one pass (each wrapped in its own function). If that fails
   // (one malformed handler), fall back to parsing a bounded number individually so cost stays linear.
-  if (doc.handlers.length) {
-    const combined = parseJs(doc.handlers.map((h) => `(function(){${h}\n});`).join('\n'), false, false);
-    if (combined.ast) walk(combined.ast, facts);
+  const handlerSrc = doc.handlers.length ? doc.handlers.map((h) => `(function(){${h}\n});`).join('\n') : '';
+  if (handlerSrc && budget.take(handlerSrc.length)) {
+    const combined = parseJs(handlerSrc, false, false);
+    if (combined.ast) walk(combined.ast, facts, budget);
     else
       for (const h of doc.handlers.slice(0, MAX_HANDLER_PARSES)) {
         const { ast } = parseJs(h, false, false);
-        if (ast) walk(ast, facts);
+        if (ast) walk(ast, facts, budget);
       }
   }
+  const lex: LexFacts = { imports: [], unresolved: [], network: [], evals: [], popups: [], topNav: [], dialogs: [], hooks: new Set(), capped: false };
+  if (budget.skipped) {
+    // Without the full AST every check keeps working from a normalised text scan (comments stripped,
+    // escapes decoded) of every script AND every inline event handler. Findings are merged with whatever
+    // the partial AST walk found; nothing is downgraded. An import that can't be resolved fails closed.
+    const codes: string[] = [];
+    for (const x of classic) codes.push(x.text);
+    for (const x of modules) codes.push(x.text);
+    for (const h of doc.handlers) codes.push(h);
+    lexicalScan(codes, lex);
+    const merge = (into: string[], from: string[]) => { for (let k = 0; k < from.length && into.length < LEXICAL_CAP; k++) into.push(from[k]); };
+    merge(facts.imports, lex.imports);
+    merge(facts.network, lex.network);
+    merge(facts.evals, lex.evals);
+    merge(facts.popups, lex.popups);
+    merge(facts.topNav, lex.topNav);
+    merge(facts.dialogs, lex.dialogs);
+    for (const h of lex.hooks) facts.hooks.add(h);
+    add('deep-analysis', 'Deep analysis', 'warn', 'deep analysis skipped (too large)',
+      [`JavaScript over the ${Math.round(AST_BUDGET.maxJsBytes / 1024)} KB / ${AST_BUDGET.ms} ms analysis budget; checks fell back to a text scan.`]);
+  }
   if (syntaxErrors.length) add('js-syntax', 'JavaScript syntax', 'fail', 'A script does not parse, so the game would break on load.', syntaxErrors);
-  else add('js-syntax', 'JavaScript syntax', 'pass', `${doc.scripts.length} script(s) parse.`);
+  else add('js-syntax', 'JavaScript syntax', 'pass', budget.skipped ? 'Not fully checked; no syntax errors in the part that was parsed.' : `${doc.scripts.length} script(s) parse.`);
 
   // Script hosts: <script src>, ES imports, import maps (hard fail).
   const scriptRefs = [...scriptSrcs, ...facts.imports.filter((u) => isRemote(u) || /^\.{0,2}\//.test(u)), ...importMapUrls];
   const badScripts = scriptRefs.filter((u) => classify(u, SCRIPT_HOSTS) === 'blocked');
   const localScripts = scriptRefs.filter((u) => classify(u, SCRIPT_HOSTS) === 'local');
-  if (badScripts.length || localScripts.length) {
+  // Fail closed: past the budget, an import we can't resolve (dynamic specifier, or too many to verify) is a fail.
+  const unresolved = lex.capped ? [...lex.unresolved.slice(0, MAX_FINDINGS - 1), `more than ${LEXICAL_CAP} imports/URLs (not verifiable)`] : lex.unresolved;
+  if (badScripts.length || localScripts.length || unresolved.length) {
     const parts = [];
+    if (unresolved.length) parts.push('imports that could not be verified without deep analysis');
     if (badScripts.length) parts.push('scripts/imports from hosts outside the allowlist');
     if (localScripts.length) parts.push('references to local files (the game must be one self-contained file)');
-    add('script-hosts', 'Script & import hosts', 'fail', `Found ${parts.join(' and ')}.`, [...badScripts, ...localScripts]);
+    add('script-hosts', 'Script & import hosts', 'fail', `Found ${parts.join(' and ')}.`, [...badScripts, ...localScripts, ...unresolved.map((u) => `unresolved: ${u}`)]);
   } else add('script-hosts', 'Script & import hosts', 'pass', scriptRefs.length ? 'All external scripts are on the allowlist.' : 'No external scripts.');
 
   // Style/font hosts: <link href> + CSS url()/@import (hard fail).
@@ -451,6 +843,15 @@ export function analyzeGame(input: string | Uint8Array): StaticReport {
     missing.length ? `Not calling ${missing.map((h) => `Meshgrounds.${h}`).join(', ')} (runtime contract v1.1; guard with ?.).` : 'Calls ready, onPause and onResume.',
     missing.map((h) => `Meshgrounds.${h}`));
 
+  if (budget.skipped) {
+    // Only the hooks reminder is softened: a text scan can miss a hook call, and it is never a safety signal.
+    // eval, popups, top-navigation, dialogs and syntax keep whatever level they earned.
+    for (const c of checks) {
+      if (c.id === 'contract-hooks' && c.level === 'warn') Object.assign(c, { level: 'pass', message: `Not fully checked (deep analysis skipped). ${c.message}` });
+      else if (c.level === 'pass' && ['js-syntax', 'eval', 'popups', 'top-navigation', 'dialogs', 'network'].includes(c.id) && !c.message.startsWith('Text scan'))
+        c.message = `Text scan only (deep analysis skipped): ${c.message}`;
+    }
+  }
   return finish(checks, bytes);
 }
 
