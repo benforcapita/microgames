@@ -1,15 +1,23 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
+  DEVICE_RATING_MESSAGE,
   MG_UID_COOKIE,
+  RATING_LIMIT_MESSAGE,
+  RATING_WRITES_MAX,
+  RATING_WRITES_WINDOW_MS,
+  SELF_RATING_MESSAGE,
   admitSessionStart,
+  authorizeRating,
   clientIp,
-  secureCookie,
   createLimiter,
   createRatingGuard,
+  createRatingWriteLimiter,
   newUid,
   parseUid,
   ratingGuard,
+  ratingWritesByUser,
+  secureCookie,
   sessionStartByIp,
   sessionStartByUid,
   telemetryByUid,
@@ -164,6 +172,9 @@ describe('singletons', () => {
     assert.equal(typeof sessionStartByIp.hit, 'function');
     assert.equal(typeof telemetryByUid.hit, 'function');
     assert.equal(typeof ratingGuard.allow, 'function');
+    assert.equal(typeof ratingWritesByUser.hit, 'function');
+    assert.equal(RATING_WRITES_MAX, 30);
+    assert.equal(RATING_WRITES_WINDOW_MS, 60 * 60_000);
   });
 });
 
@@ -232,5 +243,102 @@ describe('admitSessionStart', () => {
     assert.equal(admitSessionStart(dev, '1.1.1.1', 'g', byUid, byIp), true);
     for (let i = 0; i < 10; i++) assert.equal(admitSessionStart(dev, '1.1.1.1', 'g', byUid, byIp), false);
     assert.equal(admitSessionStart('00000000-0000-4000-8000-0000000000bb', '1.1.1.1', 'g', byUid, byIp), true);
+  });
+});
+
+describe('authorizeRating', () => {
+  const owner = 'user-owner';
+  const fan = 'user-fan';
+  const other = 'user-other';
+
+  function fresh(now?: () => number) {
+    return { guard: createRatingGuard(), writes: createRatingWriteLimiter(now) };
+  }
+
+  it('refuses the owner with 403 and does not take the device slot or an hourly write', () => {
+    const { guard, writes } = fresh();
+    const denied = authorizeRating(owner, owner, 'device-1', 'game-1', guard, writes);
+    assert.equal(denied.ok, false);
+    if (denied.ok) return;
+    assert.equal(denied.status, 403);
+    assert.equal(denied.message, SELF_RATING_MESSAGE);
+    assert.equal(denied.message, "You can't rate your own game.");
+    assert.equal(guard.size, 0);
+    assert.equal(writes.check(owner), true);
+
+    const fanOnSameDevice = authorizeRating(owner, fan, 'device-1', 'game-1', guard, writes);
+    assert.equal(fanOnSameDevice.ok, true);
+  });
+
+  it('allows a rating when the game has no owner', () => {
+    const { guard, writes } = fresh();
+    assert.deepEqual(authorizeRating(null, fan, 'device-1', 'game-1', guard, writes), { ok: true });
+  });
+
+  it('allows the same voter to update and rejects a second account on that device without spending their hourly writes', () => {
+    const { guard, writes } = fresh();
+    assert.equal(authorizeRating(owner, fan, 'device-1', 'game-1', guard, writes).ok, true);
+    assert.equal(authorizeRating(owner, fan, 'device-1', 'game-1', guard, writes).ok, true);
+
+    const conflict = authorizeRating(owner, other, 'device-1', 'game-1', guard, writes);
+    assert.equal(conflict.ok, false);
+    if (conflict.ok) return;
+    assert.equal(conflict.status, 409);
+    assert.equal(conflict.message, DEVICE_RATING_MESSAGE);
+    assert.equal(conflict.message, 'Already rated from this device');
+    assert.equal(writes.check(other), true);
+
+    assert.equal(authorizeRating(owner, other, 'device-2', 'game-1', guard, writes).ok, true);
+  });
+
+  it('caps rating writes at 30 per user per hour across games, then allows again after the window', () => {
+    let now = 1_000_000;
+    const { guard, writes } = fresh(() => now);
+    for (let i = 0; i < RATING_WRITES_MAX; i++) {
+      const decision = authorizeRating(owner, fan, `device-${i}`, `game-${i}`, guard, writes);
+      assert.equal(decision.ok, true, `write ${i + 1}`);
+    }
+    const blocked = authorizeRating(owner, fan, 'device-extra', 'game-extra', guard, writes);
+    assert.equal(blocked.ok, false);
+    if (blocked.ok) return;
+    assert.equal(blocked.status, 429);
+    assert.equal(blocked.message, RATING_LIMIT_MESSAGE);
+    assert.equal(blocked.message, 'Too many ratings');
+
+    const otherUser = authorizeRating(owner, other, 'device-other', 'game-other', guard, writes);
+    assert.equal(otherUser.ok, true);
+
+    now += RATING_WRITES_WINDOW_MS - 1;
+    const still = authorizeRating(owner, fan, 'device-late', 'game-late', guard, writes);
+    assert.equal(still.ok, false);
+    if (!still.ok) assert.equal(still.status, 429);
+
+    now += 1;
+    assert.equal(authorizeRating(owner, fan, 'device-next', 'game-next', guard, writes).ok, true);
+  });
+
+  it('counts star updates toward the same hourly cap', () => {
+    const { guard, writes } = fresh();
+    for (let i = 0; i < RATING_WRITES_MAX; i++) {
+      assert.equal(authorizeRating(null, fan, 'device-1', 'game-1', guard, writes).ok, true);
+    }
+    const blocked = authorizeRating(null, fan, 'device-1', 'game-1', guard, writes);
+    assert.equal(blocked.ok, false);
+    if (!blocked.ok) assert.equal(blocked.status, 429);
+  });
+
+  it('does not let repeated self-ratings consume the hourly cap', () => {
+    const { guard, writes } = fresh();
+    for (let i = 0; i < RATING_WRITES_MAX + 5; i++) {
+      const denied = authorizeRating(owner, owner, 'device-1', 'game-1', guard, writes);
+      assert.equal(denied.ok, false);
+      if (!denied.ok) assert.equal(denied.status, 403);
+    }
+    for (let i = 0; i < RATING_WRITES_MAX; i++) {
+      assert.equal(authorizeRating('someone-else', owner, `device-${i}`, `game-${i}`, guard, writes).ok, true);
+    }
+    const blocked = authorizeRating('someone-else', owner, 'device-x', 'game-x', guard, writes);
+    assert.equal(blocked.ok, false);
+    if (!blocked.ok) assert.equal(blocked.status, 429);
   });
 });

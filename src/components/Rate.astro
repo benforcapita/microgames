@@ -20,7 +20,7 @@ const loggedIn = !!Astro.locals.user;
       ))
     }
   </div>
-  <span class="summary mono muted">{avg === null ? 'No ratings yet' : `${avg.toFixed(1)} · ${count} votes`}</span>
+  <span class="summary mono muted" aria-live="polite">{avg === null ? 'No ratings yet' : `${avg.toFixed(1)} · ${count} votes`}</span>
 </div>
 
 <style>
@@ -55,13 +55,24 @@ const loggedIn = !!Astro.locals.user;
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ stars }),
     });
-    if (!res.ok) return;
+    const summary = root.querySelector('.summary');
+    if (!res.ok) {
+      if (summary) {
+        summary.textContent =
+          res.status === 403
+            ? "You can't rate your own game."
+            : res.status === 429
+              ? 'Too many ratings, try again later.'
+              : (await res.text()) || 'Could not save your rating.';
+      }
+      return;
+    }
     const data = (await res.json()) as { avgRating: number; ratingCount: number };
     root.querySelectorAll<HTMLButtonElement>('button[data-stars]').forEach((b) => {
       const n = Number(b.dataset.stars);
       b.classList.toggle('on', n <= stars);
       b.setAttribute('aria-checked', String(n === stars));
     });
-    root.querySelector('.summary')!.textContent = `${data.avgRating.toFixed(1)} · ${data.ratingCount} votes · thanks!`;
+    if (summary) summary.textContent = `${data.avgRating.toFixed(1)} · ${data.ratingCount} votes · thanks!`;
   });
 </script>

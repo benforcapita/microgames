@@ -1,5 +1,5 @@
 import type { APIRoute } from 'astro';
-import { MG_UID_COOKIE, secureCookie, newUid, parseUid, ratingGuard } from '../../../../lib/server/abuse';
+import { MG_UID_COOKIE, authorizeRating, newUid, parseUid, secureCookie } from '../../../../lib/server/abuse';
 import { getGame, rateGame } from '../../../../lib/server/games';
 
 export const POST: APIRoute = async ({ params, request, locals, cookies, url }) => {
@@ -23,9 +23,9 @@ export const POST: APIRoute = async ({ params, request, locals, cookies, url }) 
   const { stars } = (await request.json().catch(() => ({}))) as { stars?: unknown };
   const n = Number(stars);
   if (!Number.isInteger(n) || n < 1 || n > 5) return new Response('stars must be 1-5', { status: 400 });
-  if (!ratingGuard.allow(uid, game.id, locals.user.id)) {
-    return new Response('Already rated from this device', { status: 409 });
-  }
+
+  const decision = authorizeRating(game.ownerId, locals.user.id, uid, game.id);
+  if (!decision.ok) return new Response(decision.message, { status: decision.status });
 
   await rateGame(game.id, locals.user.id, n);
   const updated = (await getGame(game.id))!;

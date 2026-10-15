@@ -16,6 +16,7 @@ The game runs in a sandboxed iframe. Talk to the portal ONLY via `window.parent.
 7. `localStorage` works and is persisted by the portal. Use it for high scores and saves.
 8. Show a visible "click / tap to start" state, and support keyboard and touch input. Call `event.preventDefault()` on touch to stop double-tap zoom.
 9. Render the first frame within 3 seconds. Create geometry procedurally and avoid large inline assets.
+10. When the first playable frame is on screen, call `window.Meshgrounds?.ready?.()` once. The portal records `__MG_READY` as ready telemetry. Games that never call it still report the automatic first animation frame. The upload page previews your file and sets `window.__MG_PREVIEW = true` before the Meshgrounds runtime so it can capture a thumbnail from the canvas. Live plays do not set that flag, do not capture, and do not change WebGL context attributes. If you create a WebGL context yourself, pass `{ preserveDrawingBuffer: true }` so that upload preview can read the frame. Meshgrounds sets the same flag itself only when `window.__MG_PREVIEW` is true. A tainted or blank canvas cannot be captured; the creator must upload a thumbnail instead.
 
 ## Listening snippet
 ```js
@@ -25,4 +26,4 @@ window.addEventListener('message', (e) => {
 });
 ```
 
-Optional helper (available when running on Meshgrounds): `await window.Meshgrounds?.requestRewardAd()` resolves `true`/`false`.
+Optional helpers (available when running on Meshgrounds): `window.Meshgrounds?.ready?.()` once the first playable frame is showing, and `await window.Meshgrounds?.requestRewardAd()` which resolves `true`/`false`.

@@ -104,3 +104,23 @@ export function uniqueSlug(title: string, taken: boolean, id: string): string {
   const base = slugify(title);
   return taken ? `${base}-${id.slice(0, 4).toLowerCase()}` : base;
 }
+
+/** Prior weight C for Bayesian rating: a game behaves as if it already had C votes at the global mean. */
+export const BAYES_PRIOR_VOTES = 10;
+
+/**
+ * Bayesian average `(C*m + sum) / (C + n)`: shrinks games with few votes toward the global mean `m`,
+ * so one 5★ vote does not outrank 200 votes at 4.8★. Must stay in sync with the SQL in `listGames`.
+ */
+export function bayesianRating(avg: number | null, count: number, globalMean: number, priorVotes = BAYES_PRIOR_VOTES): number {
+  const n = Math.max(0, count);
+  const sum = avg === null || n === 0 ? 0 : avg * n;
+  return (priorVotes * globalMean + sum) / (priorVotes + n);
+}
+
+/** Orders games for `sort=rated`: Bayesian average desc, then more votes first. */
+export function compareByBayes(globalMean: number) {
+  return (a: { avgRating: number | null; ratingCount: number }, b: { avgRating: number | null; ratingCount: number }) =>
+    bayesianRating(b.avgRating, b.ratingCount, globalMean) - bayesianRating(a.avgRating, a.ratingCount, globalMean) ||
+    b.ratingCount - a.ratingCount;
+}
