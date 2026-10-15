@@ -9,7 +9,7 @@ interface Props {
 }
 const {
   title,
-  description = 'Meshgrounds — the open ground for instant 3D web games. Play free browser games, upload your own single-file Three.js game, and earn ad revenue.',
+  description = 'Meshgrounds — the open ground for instant 3D web games. Play free browser games, and upload your own single-file Three.js game. Revenue sharing for creators is planned.',
   ads = false,
 } = Astro.props;
 const fullTitle = title ? `${title} · Meshgrounds` : 'Meshgrounds — The Open Ground for Instant 3D Web Games';
@@ -28,7 +28,7 @@ const nav = [
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>{fullTitle}</title>
     <meta name="description" content={description} />
