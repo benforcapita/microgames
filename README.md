@@ -123,7 +123,7 @@ You can also run the portal and CDN independently:
 | `PUBLIC_SUPABASE_PUBLISHABLE_KEY` | Required | Supabase publishable API key for client-side and authenticated SSR requests |
 | `SUPABASE_SECRET_KEY` | Required (server-only) | Supabase secret key for server-side administration and private Storage bucket access (never expose to the browser) |
 | `DATABASE_URL` | Required | PostgreSQL connection string used by `postgres.js` for direct database access |
-| `SITE_URL` | Optional | Public URL of the web portal used for authentication email redirects |
+| `SITE_URL` | Optional | Unused by auth email. Sign-up and magic-link redirects come from the request origin (`src/lib/server/email-redirect.ts`) |
 | `MG_WEB_ORIGINS` | Optional | Allowed portal origins permitted to embed game frames (used in CDN `frame-ancestors` CSP directive) |
 | `MG_CDN_ORIGIN` | Optional | Public origin URL of the dedicated cookieless game CDN serving uploaded game bundles |
 | `MG_CDN_PORT` | Optional | Port number for the game CDN HTTP server |
