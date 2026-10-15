@@ -18,7 +18,8 @@
     "test": "node --experimental-strip-types --disable-warning=ExperimentalWarning --import ./scripts/register-ts.mjs --test \"**/*.test.ts\"",
     "db:start": "npx -y supabase@2.120.0 start -x vector,logflare,edge-runtime,imgproxy,realtime",
     "db:stop": "npx -y supabase@2.120.0 stop",
-    "check": "astro check"
+    "check": "astro check",
+    "smoke": "node scripts/smoke.mjs"
   },
   "dependencies": {
     "@astrojs/node": "11.1.6",
