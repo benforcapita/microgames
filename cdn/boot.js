@@ -2,7 +2,8 @@
  * Runs before any game code inside a sandboxed, opaque-origin iframe and gives
  * vibe-coded games zero-code platform features:
  *  - telemetry (first frame, explicit ready, first input, crashes) for the Proving Grounds
- *  - one thumbnail snapshot (__MG_SNAPSHOT) after ready(), or two seconds after the first frame
+ *  - one thumbnail snapshot (__MG_SNAPSHOT) only when the frame URL has ?mg_preview=1
+ *    (the upload page). Live plays do not capture and do not change WebGL attributes.
  *  - automatic pause (requestAnimationFrame, game clock, WebAudio, media) during ads
  *  - localStorage / sessionStorage / cookie shims (blocked in opaque origins), persisted by the portal
  *  - window.Meshgrounds helper wrapping the postMessage protocol from EXCHANGE_SDK.md
@@ -100,13 +101,20 @@
     if (reason === 'oversize') return 'The preview is over 150 KB. Upload a PNG, JPEG, or WebP thumbnail.';
     return 'The captured frame is blank. Upload a PNG, JPEG, or WebP thumbnail.';
   }
+  function previewCaptureEnabled(search) {
+    return new URLSearchParams(String(search == null ? '' : search)).get('mg_preview') === '1';
+  }
   /* end-snapshot-lib */
 
-  var nativeGetContext = HTMLCanvasElement.prototype.getContext;
-  HTMLCanvasElement.prototype.getContext = function (type, attrs) {
-    var next = glContextAttrs(type, attrs);
-    return nativeGetContext.call(this, type, next.attrs);
-  };
+  // Upload preview only. A live play URL never carries mg_preview, so getContext stays untouched.
+  var capturePreview = previewCaptureEnabled(location.search);
+  if (capturePreview) {
+    var nativeGetContext = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = function (type, attrs) {
+      var next = glContextAttrs(type, attrs);
+      return nativeGetContext.call(this, type, next.attrs);
+    };
+  }
 
   var snapped = false, snapTimer = 0;
   function runSnapshot() {
@@ -130,7 +138,7 @@
     else post('__MG_SNAPSHOT', { dataUrl: shot.dataUrl, mime: shot.type });
   }
   function scheduleSnapshot(delay) {
-    if (snapped) return;
+    if (!capturePreview || snapped) return;
     clearTimeout(snapTimer);
     if (delay > 0) snapTimer = setTimeout(runSnapshot, delay);
     else snapTimer = setTimeout(function () { rAF(function () { runSnapshot(); }); }, 0);

@@ -1,6 +1,7 @@
 // Capture helpers live in cdn/boot.js (injected into the game frame). This evaluates that block.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import vm from 'node:vm';
 import { describe, test } from 'node:test';
 import { UPLOAD } from './server/upload.ts';
 
@@ -8,7 +9,7 @@ const boot = fs.readFileSync(new URL('../../cdn/boot.js', import.meta.url), 'utf
 const marked = boot.match(/\/\* snapshot-lib \*\/([\s\S]*?)\/\* end-snapshot-lib \*\//);
 if (!marked) throw new Error('snapshot-lib block missing from cdn/boot.js');
 
-const snap = new Function(`${marked[1]}; return { SNAP_MAX_W, SNAP_MAX_H, SNAP_MAX_BYTES, fitSnapshotBox, isBlankSample, captureCanvas, glContextAttrs, snapshotError };`)() as {
+const snap = new Function(`${marked[1]}; return { SNAP_MAX_W, SNAP_MAX_H, SNAP_MAX_BYTES, fitSnapshotBox, isBlankSample, captureCanvas, glContextAttrs, snapshotError, previewCaptureEnabled };`)() as {
   SNAP_MAX_W: number;
   SNAP_MAX_H: number;
   SNAP_MAX_BYTES: number;
@@ -17,7 +18,82 @@ const snap = new Function(`${marked[1]}; return { SNAP_MAX_W, SNAP_MAX_H, SNAP_M
   captureCanvas: (canvas: { width: number; height: number }, createCanvas: (w: number, h: number) => unknown) => { ok: boolean; reason?: string; dataUrl?: string; type?: string };
   glContextAttrs: (type: string, attrs: Record<string, unknown> | undefined) => { type: string; attrs: Record<string, unknown> | undefined };
   snapshotError: (reason: string) => string;
+  previewCaptureEnabled: (search: string) => boolean;
 };
+
+function bootFrame(search: string) {
+  const posts: { type?: string }[] = [];
+  const getContextCalls: { type: string; attrs: Record<string, unknown> | undefined }[] = [];
+  const timeouts = new Map<number, { fn: () => void; ms: number }>();
+  const rafs: Array<(t: number) => void> = [];
+  let nextTimer = 1;
+  const parent = { postMessage(data: { type?: string }) { posts.push(data); } };
+  function HTMLCanvasElement(this: { width: number; height: number }) {
+    this.width = 0;
+    this.height = 0;
+  }
+  HTMLCanvasElement.prototype.getContext = function (type: string, attrs?: Record<string, unknown>) {
+    getContextCalls.push({ type, attrs });
+    return { type, attrs };
+  };
+  function HTMLMediaElement() {}
+  HTMLMediaElement.prototype.play = function () { return Promise.resolve(); };
+  const location = { search, hash: '', pathname: '/index.html' };
+  const windowObj: Record<string, unknown> = {
+    parent,
+    location,
+    history: { replaceState() {} },
+    performance: { now: () => 42 },
+    document: {
+      cookie: '',
+      getElementsByTagName: () => [],
+      createElement: () => ({}),
+    },
+    HTMLCanvasElement,
+    HTMLMediaElement,
+    requestAnimationFrame(cb: (t: number) => void) { rafs.push(cb); return rafs.length; },
+    cancelAnimationFrame() {},
+    addEventListener() {},
+    dispatchEvent() {},
+  };
+  const context: vm.Context = {
+    window: windowObj,
+    parent,
+    location,
+    history: windowObj.history,
+    performance: windowObj.performance,
+    document: windowObj.document,
+    HTMLCanvasElement,
+    HTMLMediaElement,
+    setTimeout(fn: () => void, ms?: number) {
+      const id = nextTimer++;
+      timeouts.set(id, { fn, ms: ms ?? 0 });
+      return id;
+    },
+    clearTimeout(id: number) { timeouts.delete(id); },
+    Map, Set, Object, Array, Math, Promise, String, Number, Error, URLSearchParams,
+    ErrorEvent: class ErrorEvent {},
+  };
+  vm.createContext(context);
+  vm.runInContext(boot, context);
+  const mg = windowObj.Meshgrounds as { ready: () => void };
+  return {
+    posts,
+    getContextCalls,
+    timeouts,
+    rafs,
+    ready: () => mg.ready(),
+    requestAnimationFrame: windowObj.requestAnimationFrame as (cb: (t: number) => void) => number,
+    canvas: () => new (HTMLCanvasElement as unknown as new () => { getContext: (type: string, attrs?: Record<string, unknown>) => unknown })(),
+    flush() {
+      const queued = [...timeouts.values()];
+      timeouts.clear();
+      queued.forEach((timer) => timer.fn());
+      const frames = rafs.splice(0);
+      frames.forEach((cb) => cb(16));
+    },
+  };
+}
 
 const tiny = 'AAAA';
 const webp = (payload: string) => `data:image/webp;base64,${payload}`;
@@ -127,6 +203,48 @@ describe('snapshot capture', () => {
     assert.equal(shot.ok, false);
     assert.equal(shot.reason, 'oversize');
     assert.match(snap.snapshotError('oversize'), /150 KB/);
+  });
+
+  test('enables capture only for ?mg_preview=1', () => {
+    assert.equal(snap.previewCaptureEnabled('?mg_preview=1'), true);
+    assert.equal(snap.previewCaptureEnabled('?embed=https%3A%2F%2Fportal.example&mg_preview=1'), true);
+    assert.equal(snap.previewCaptureEnabled(''), false);
+    assert.equal(snap.previewCaptureEnabled('?embed=https%3A%2F%2Fportal.example'), false);
+    assert.equal(snap.previewCaptureEnabled('?mg_preview=0'), false);
+    assert.equal(snap.previewCaptureEnabled('?mg_preview=12'), false);
+  });
+
+  test('does not capture or set preserveDrawingBuffer without the preview flag', () => {
+    const live = bootFrame('?embed=https%3A%2F%2Fportal.example');
+    const attrs = { alpha: false, preserveDrawingBuffer: false };
+    live.canvas().getContext('webgl2', attrs);
+    live.canvas().getContext('webgl', { alpha: true });
+    assert.equal(attrs.preserveDrawingBuffer, false);
+    assert.equal(live.getContextCalls[0]?.attrs?.preserveDrawingBuffer, false);
+    assert.equal('preserveDrawingBuffer' in (live.getContextCalls[1]?.attrs ?? {}), false);
+    live.ready();
+    live.ready();
+    live.requestAnimationFrame(() => {});
+    live.flush();
+    live.flush();
+    assert.equal(live.posts.some((msg) => msg.type === '__MG_READY'), true);
+    assert.equal(live.posts.some((msg) => msg.type === '__MG_FIRST_FRAME'), true);
+    assert.equal(live.posts.some((msg) => msg.type === '__MG_SNAPSHOT'), false);
+    assert.equal(live.timeouts.size, 0);
+  });
+
+  test('upload preview forces preserveDrawingBuffer and posts a snapshot', () => {
+    const preview = bootFrame('?mg_preview=1');
+    const attrs = { alpha: false, preserveDrawingBuffer: false };
+    preview.canvas().getContext('webgl', attrs);
+    preview.canvas().getContext('2d', { alpha: true });
+    assert.equal(attrs.preserveDrawingBuffer, false);
+    assert.equal(preview.getContextCalls[0]?.attrs?.preserveDrawingBuffer, true);
+    assert.equal(preview.getContextCalls[0]?.attrs?.alpha, false);
+    assert.deepEqual(preview.getContextCalls[1]?.attrs, { alpha: true });
+    preview.ready();
+    preview.flush();
+    assert.equal(preview.posts.some((msg) => msg.type === '__MG_SNAPSHOT'), true);
   });
 
   test('forces preserveDrawingBuffer on WebGL contexts without changing 2d', () => {
