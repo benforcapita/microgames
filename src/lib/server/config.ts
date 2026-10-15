@@ -1,3 +1,5 @@
+import { GRADUATION_DEFAULTS } from './game-rules';
+
 const env = process.env;
 
 function required(name: string): string {
@@ -17,15 +19,8 @@ export const CDN_ORIGIN = (env.MG_CDN_ORIGIN ?? 'http://localhost:4322').replace
 export const ADSENSE_CLIENT = env.PUBLIC_ADSENSE_CLIENT || import.meta.env.PUBLIC_ADSENSE_CLIENT || '';
 
 export const GRADUATION = {
-  minPlays: Number(env.MG_MIN_PLAYS ?? 100),
-  maxFirstFrameMs: 3000,
-  minFirstFrameOkRate: 0.9,
-  maxCrashRate: 0.05,
-  minStartRate: 0.6,
-  minCompletionRate: 0.25,
-  minMedianSessionSec: 60,
-  minAvgRating: 3,
-  minRatingsForRatingGate: 10,
+  ...GRADUATION_DEFAULTS,
+  minPlays: Number(env.MG_MIN_PLAYS ?? GRADUATION_DEFAULTS.minPlays),
 };
 
 export const REVENUE = { creatorShare: 0.65, forkRoyalty: 0.1, minPayoutUsd: 25 };

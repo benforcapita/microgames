@@ -1,0 +1,98 @@
+/** Graduation, telemetry, tag, and slug rules. No database or environment access. */
+
+export const GRADUATION_DEFAULTS = {
+  minPlays: 100,
+  maxFirstFrameMs: 3000,
+  minFirstFrameOkRate: 0.9,
+  maxCrashRate: 0.05,
+  minStartRate: 0.6,
+  minCompletionRate: 0.25,
+  minMedianSessionSec: 60,
+  minAvgRating: 3,
+  minRatingsForRatingGate: 10,
+};
+
+export type GraduationRules = typeof GRADUATION_DEFAULTS;
+
+export const MAX_SESSION_MS = 4 * 3600_000;
+
+export interface HealthCheck {
+  key: string;
+  label: string;
+  value: number | null;
+  target: number;
+  format: 'count' | 'pct' | 'sec' | 'stars';
+  comparator: 'gte' | 'lte';
+  pass: boolean;
+}
+
+export interface HealthStats {
+  plays: number;
+  ffOk: number | null;
+  crashRate: number | null;
+  startRate: number | null;
+  completionRate: number | null;
+  medianMs: number | null;
+  avgRating: number | null;
+  ratingCount: number;
+}
+
+export function assessHealth(
+  stats: HealthStats,
+  rules: GraduationRules = GRADUATION_DEFAULTS,
+): { checks: HealthCheck[]; eligible: boolean } {
+  const G = rules;
+  const check = (
+    key: string, label: string, value: number | null, target: number, format: HealthCheck['format'],
+    comparator: HealthCheck['comparator'] = 'gte', passOverride?: boolean,
+  ): HealthCheck => ({
+    key, label, value, target, format, comparator,
+    pass: passOverride ?? (value !== null && (comparator === 'gte' ? value >= target : value <= target)),
+  });
+
+  const checks = [
+    check('plays', 'Plays measured', stats.plays, G.minPlays, 'count'),
+    check('first_frame', `First frame under ${G.maxFirstFrameMs / 1000}s`, stats.ffOk, G.minFirstFrameOkRate, 'pct'),
+    check('crash', 'Crash rate', stats.crashRate, G.maxCrashRate, 'pct', 'lte'),
+    check('start', 'Start rate', stats.startRate, G.minStartRate, 'pct'),
+    check('completion', 'Loop completion rate', stats.completionRate, G.minCompletionRate, 'pct'),
+    check('session', 'Median session', stats.medianMs === null ? null : stats.medianMs / 1000, G.minMedianSessionSec, 'sec'),
+    check('rating', `Community rating (${stats.ratingCount} votes)`, stats.avgRating, G.minAvgRating, 'stars', 'gte',
+      stats.ratingCount < G.minRatingsForRatingGate ? true : undefined),
+  ];
+  return { checks, eligible: checks.every((c) => c.pass) };
+}
+
+/**
+ * Coerce a telemetry sample to a millisecond count.
+ * Non-numeric values and -Infinity become 0. +Infinity is left for the duration cap.
+ */
+function toMs(value: unknown): number {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return n === Number.POSITIVE_INFINITY ? Number.POSITIVE_INFINITY : 0;
+  return Math.round(n);
+}
+
+export function clampFirstFrameMs(value: unknown): number {
+  const n = toMs(value);
+  return Number.isFinite(n) ? Math.max(0, n) : 0;
+}
+
+export function clampDurationMs(value: unknown): number {
+  const n = toMs(value);
+  if (n === Number.POSITIVE_INFINITY) return MAX_SESSION_MS;
+  return Math.min(MAX_SESSION_MS, Math.max(0, n));
+}
+
+export const slugify = (s: string) =>
+  s.toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'game';
+
+export function normalizeTags(raw: string): string[] {
+  return [...new Set(raw.split(/[,\s]+/).map((t) => slugify(t)).filter((t) => t && t !== 'game'))].slice(0, 6);
+}
+
+/** When `taken` is set, append a short slice of the new game id so the slug stays unique. */
+export function uniqueSlug(title: string, taken: boolean, id: string): string {
+  const base = slugify(title);
+  return taken ? `${base}-${id.slice(0, 4).toLowerCase()}` : base;
+}
