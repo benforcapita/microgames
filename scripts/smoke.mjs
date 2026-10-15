@@ -164,7 +164,13 @@ try {
   const newPath = new URL(up?.headers.get('location') ?? '/play/none', WEB).pathname;
   const slug = newPath.split('/')[2];
   await check(newPath, WEB + newPath, 200);
-  // Smoke covers upload up to `pending` only (SP-5: owner-only /submissions/<id>); it makes no stage assertions.
+  await check(`/api/submissions/${slug} (stage=pending)`, `${WEB}/api/submissions/${slug}`, 200, {
+    verify: async (r) => {
+      const stage = (await r.json()).game?.stage;
+      return stage === 'pending' ? 'stage=pending' : `! expected stage=pending, got stage=${stage}`;
+    },
+  });
+  // Smoke covers upload up to `pending` only (SP-5: owner-only /submissions/<id>); it asserts the new upload is stage=pending.
   // pending -> proving/rejected is covered by the validate-game edge-function tests
   // (supabase/functions/validate-game/*_test.ts), not here. So the creator page has no public games yet.
   await check(`/u/${handle} (upload still pending)`, `${WEB}/u/${handle}`, 404);
