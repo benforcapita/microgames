@@ -1,0 +1,7 @@
+---
+// /signup is an alias of /login?mode=signup (same form, same /api/auth/login flow, same ?next handling).
+import { safeNext, withParams } from '../lib/server/auth';
+
+const next = safeNext(Astro.url.searchParams.get('next'));
+return Astro.redirect(withParams('/login', { mode: 'signup', next: next === '/' ? undefined : next }), 302);
+---

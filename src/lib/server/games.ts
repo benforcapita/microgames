@@ -1,14 +1,15 @@
 import crypto from 'node:crypto';
 import { GRADUATION } from './config';
 import { sql } from './db';
-import { BAYES_PRIOR_VOTES, assessHealth, clampDurationMs, clampFirstFrameMs, slugify, uniqueSlug, type HealthCheck } from './game-rules';
+import { BAYES_PRIOR_VOTES, CREATED_GAME_LOOKUP, PUBLIC_STAGES, assessHealth, canViewGame, visibleStages, clampDurationMs, clampFirstFrameMs, ratingUserId, slugify, uniqueSlug, type HealthCheck } from './game-rules';
 import { insertSessionStart, postgresSchemaClient } from './schema-rollout';
 import { bucket } from './supabase';
 
 export { normalizeTags } from './game-rules';
 export type { HealthCheck };
 
-export type Stage = 'proving' | 'live';
+import type { Stage } from './game-rules';
+export type { Stage };
 
 export interface Game {
   id: string;
@@ -93,6 +94,8 @@ export interface ListOptions {
   ownerId?: string;
   forkedFrom?: string;
   limit?: number;
+  /** Owner dashboards only (requires ownerId): also return pending/rejected games. */
+  includeUnpublished?: boolean;
 }
 
 const ORDER = {
@@ -102,11 +105,13 @@ const ORDER = {
   rated: `(${BAYES_PRIOR_VOTES} * (select coalesce(avg(stars)::float8, 3) from ratings) + coalesce(avg_rating, 0) * rating_count) / (${BAYES_PRIOR_VOTES} + rating_count) desc, rating_count desc, created_at desc`,
 } as const;
 
-export async function listGames({ stage, sort = 'top', tag, creator, ownerId, forkedFrom, limit = 60 }: ListOptions = {}) {
+export async function listGames({ stage, sort = 'top', tag, creator, ownerId, forkedFrom, limit = 60, includeUnpublished }: ListOptions = {}) {
+  const stages = visibleStages({ stage, ownerId, includeUnpublished });
+  if (!stages.length) return [];
   const rows = await sql<GameRow[]>`
     select * from (${gameSelect()}) g
     where true
-      ${stage ? sql`and stage = ${stage}` : sql``}
+      and stage in ${sql(stages)}
       ${creator ? sql`and lower(creator) = lower(${creator})` : sql``}
       ${ownerId ? sql`and owner_id = ${ownerId}` : sql``}
       ${forkedFrom ? sql`and forked_from = ${forkedFrom}` : sql``}
@@ -116,22 +121,33 @@ export async function listGames({ stage, sort = 'top', tag, creator, ownerId, fo
   return rows.map(toGame);
 }
 
-export async function getGame(slugOrId: string): Promise<Game | null> {
-  const [row] = await sql<GameRow[]>`${gameSelect()} where g.slug = ${slugOrId} or g.id = ${slugOrId}`;
-  return row ? toGame(row) : null;
+/**
+ * Public lookup: pending/rejected games are invisible unless `includeUnpublished` (owner-only
+ * callers such as delete/createGame) or the `viewerId` owns the game (see canViewGame).
+ */
+export async function getGame(
+  slugOrId: string,
+  { includeUnpublished = false, viewerId }: { includeUnpublished?: boolean; viewerId?: string | null } = {},
+): Promise<Game | null> {
+  const unfiltered = includeUnpublished || !!viewerId;
+  const [row] = await sql<GameRow[]>`${gameSelect()} where (g.slug = ${slugOrId} or g.id = ${slugOrId})
+    ${unfiltered ? sql`` : sql`and g.stage in ${sql([...PUBLIC_STAGES])}`}`;
+  if (!row) return null;
+  const game = toGame(row);
+  return includeUnpublished || canViewGame(game, viewerId) ? game : null;
 }
 
 export async function listTags(): Promise<{ tag: string; count: number }[]> {
   return sql<{ tag: string; count: number }[]>`
-    select t as tag, count(*)::int as count from games, unnest(tags) t group by t order by count desc, t limit 30`;
+    select t as tag, count(*)::int as count from games, unnest(tags) t where stage in ${sql([...PUBLIC_STAGES])} group by t order by count desc, t limit 30`;
 }
 
 export async function platformStats() {
   const [row] = await sql<{ games: number; live: number; plays: number; creators: number }[]>`
-    select (select count(*)::int from games) as games,
+    select (select count(*)::int from games where stage in ${sql([...PUBLIC_STAGES])}) as games,
            (select count(*)::int from games where stage = 'live') as live,
-           (select count(*)::int from sessions) as plays,
-           (select count(distinct creator)::int from games) as creators`;
+           (select count(*)::int from sessions s join games g on g.id = s.game_id where g.stage in ${sql([...PUBLIC_STAGES])}) as plays,
+           (select count(distinct creator)::int from games where stage in ${sql([...PUBLIC_STAGES])}) as creators`;
   return row;
 }
 
@@ -166,7 +182,7 @@ export async function createGame(input: NewGame): Promise<Game> {
     insert into games (id, slug, owner_id, creator, title, tagline, description, tags, license, forked_from, size_bytes, hue, thumb)
     values (${id}, ${slug}, ${input.ownerId}, ${input.creator}, ${input.title}, ${input.tagline}, ${input.description},
             ${input.tags}, ${input.license}, ${input.forkedFrom}, ${input.html.byteLength}, ${crypto.randomInt(0, 360)}, ${thumb})`;
-  return (await getGame(id))!;
+  return (await getGame(id, CREATED_GAME_LOOKUP))!;
 }
 
 /** Deletes a game owned by `ownerId`, including its bundle in storage. Returns false if not found / not owned. */
@@ -180,9 +196,18 @@ export async function deleteGame(gameId: string, ownerId: string): Promise<boole
 
 export async function rateGame(gameId: string, voter: string, stars: number) {
   await sql`
-    insert into ratings (game_id, voter, stars) values (${gameId}, ${voter}, ${stars})
-    on conflict (game_id, voter) do update set stars = excluded.stars, created_at = now()`;
+    insert into ratings (game_id, voter, user_id, stars)
+    values (${gameId}, ${voter}, ${ratingUserId(voter)}, ${stars})
+    on conflict (game_id, voter) do update
+      set stars = excluded.stars, user_id = excluded.user_id, updated_at = now()`;
   await evaluateGraduation(gameId);
+}
+
+/** Removes a user's rating (no-op if they never rated). Returns true if a rating was deleted. */
+export async function unrateGame(gameId: string, voter: string): Promise<boolean> {
+  const rows = await sql`delete from ratings where game_id = ${gameId} and voter = ${voter} returning game_id`;
+  if (rows.length) await evaluateGraduation(gameId);
+  return rows.length > 0;
 }
 
 export async function getUserRating(gameId: string, voter: string | undefined): Promise<number | null> {
