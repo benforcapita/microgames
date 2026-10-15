@@ -15,6 +15,7 @@ export const GRADUATION_DEFAULTS = {
 export type GraduationRules = typeof GRADUATION_DEFAULTS;
 
 export const MAX_SESSION_MS = 4 * 3600_000;
+export const MAX_FIRST_FRAME_MS = 60_000;
 
 export interface HealthCheck {
   key: string;
@@ -64,24 +65,31 @@ export function assessHealth(
 }
 
 /**
- * Coerce a telemetry sample to a millisecond count.
- * Non-numeric values and -Infinity become 0. +Infinity is left for the duration cap.
+ * Parse an unknown sample into a millisecond number, Infinity, -Infinity, or null if invalid.
+ * Null, undefined, empty/blank strings, non-numeric values, and NaN return null.
  */
-function toMs(value: unknown): number {
+function parseTelemetryMs(value: unknown): number | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'string' && value.trim() === '') return null;
+  if (typeof value !== 'number' && typeof value !== 'string') return null;
   const n = Number(value);
-  if (!Number.isFinite(n)) return n === Number.POSITIVE_INFINITY ? Number.POSITIVE_INFINITY : 0;
+  if (Number.isNaN(n)) return null;
+  return n;
+}
+
+export function clampFirstFrameMs(value: unknown): number | null {
+  const n = parseTelemetryMs(value);
+  if (n === null || n === Number.NEGATIVE_INFINITY) return null;
+  if (n === Number.POSITIVE_INFINITY || n > MAX_FIRST_FRAME_MS) return MAX_FIRST_FRAME_MS;
+  if (n < 0) return 0;
   return Math.round(n);
 }
 
-export function clampFirstFrameMs(value: unknown): number {
-  const n = toMs(value);
-  return Number.isFinite(n) ? Math.max(0, n) : 0;
-}
-
 export function clampDurationMs(value: unknown): number {
-  const n = toMs(value);
+  const n = parseTelemetryMs(value);
+  if (n === null || n === Number.NEGATIVE_INFINITY) return 0;
   if (n === Number.POSITIVE_INFINITY) return MAX_SESSION_MS;
-  return Math.min(MAX_SESSION_MS, Math.max(0, n));
+  return Math.min(MAX_SESSION_MS, Math.max(0, Math.round(n)));
 }
 
 export const slugify = (s: string) =>
