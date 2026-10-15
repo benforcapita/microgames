@@ -49,6 +49,22 @@ describe('input support: declared flag wins when consistent', () => {
     const r = cls(page("Meshgrounds.declare({ inputSupport: 'desktop' }); addEventListener('keydown', f); c.ontouchstart = g", '<canvas></canvas>', '<meta name="meshgrounds:input-support" content="mobile">'));
     assert.deepEqual([r.declared, r.class, r.source], ['desktop', 'desktop', 'declared']);
   });
+  it('with several declare() calls the LAST one wins (same as boot.js at runtime)', () => {
+    const r = cls(page("Meshgrounds.declare({ inputSupport: 'mobile' }); Meshgrounds.declare({ inputSupport: 'desktop' }); addEventListener('keydown', f); c.ontouchstart = g"));
+    assert.deepEqual([r.declared, r.class, r.source], ['desktop', 'desktop', 'declared']);
+    const r2 = cls(page("Meshgrounds.declare({ inputSupport: 'desktop' }); Meshgrounds.declare({ inputSupport: 'both' }); addEventListener('keydown', f); c.ontouchstart = g"));
+    assert.equal(r2.declared, 'both');
+  });
+  it('a declare() inside a comment is ignored (line and block comments)', () => {
+    const js = "/* Meshgrounds.declare({ inputSupport: 'mobile' }) */ Meshgrounds.declare({ inputSupport: 'desktop' });\n// Meshgrounds.declare({ inputSupport: 'both' })\naddEventListener('keydown', f); c.ontouchstart = g";
+    const r = cls(page(js));
+    assert.deepEqual([r.declared, r.class], ['desktop', 'desktop']);
+    assert.equal(cls(page("// Meshgrounds.declare({ inputSupport: 'mobile' })\naddEventListener('keydown', f)")).declared, null);
+  });
+  it('a // inside a string does not hide a later declare() on the same line', () => {
+    const r = cls(page("const u = 'https://x.example'; Meshgrounds.declare({ inputSupport: 'desktop' }); addEventListener('keydown', f)"));
+    assert.equal(r.declared, 'desktop');
+  });
   it('the meta tag applies when there is no declare() call', () => {
     const r = cls(page("addEventListener('keydown', f); c.ontouchstart = g", '<canvas></canvas>', '<meta name="meshgrounds:input-support" content="mobile">'));
     assert.deepEqual([r.declared, r.class], ['mobile', 'mobile']);
