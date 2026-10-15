@@ -85,9 +85,11 @@ test('mobile requests drop desktop-only games; desktop requests keep them', asyn
   const uaOnly = await request.get('/', { headers: { 'user-agent': MOBILE_UA } });
   expect(await uaOnly.text()).not.toContain('Stack Tower');
 
-  const creator = await request.get('/u/polyprism', { headers: { 'user-agent': MOBILE_UA, 'sec-ch-ua-mobile': '?1' } });
+  // Prism Pop is proving, so PV-1 keeps it off the public profile. Neon Lanes is the live game that stays visible.
+  const creator = await request.get('/u/vhs_vector', { headers: { 'user-agent': MOBILE_UA, 'sec-ch-ua-mobile': '?1' } });
+  expect(creator.status()).toBe(200);
   const creatorHtml = await creator.text();
-  expect(creatorHtml).toContain('Prism Pop');
+  expect(creatorHtml).toContain('Neon Lanes');
   expect(creatorHtml).not.toContain('Stack Tower');
 });
 
@@ -103,8 +105,8 @@ test('fork of a desktop-only parent is plain text on mobile and a link on deskto
   const mobileHtml = await mobile.text();
   const desktopHtml = await desktop.text();
   expect(mobileHtml).toContain('fork of Stack Tower');
-  expect(mobileHtml).not.toContain('href="/play/stack-tower"');
-  expect(desktopHtml).toContain('fork of <a href="/play/stack-tower">Stack Tower</a>');
+  expect(mobileHtml).not.toMatch(/<a [^>]*href="\/play\/stack-tower"/);
+  expect(desktopHtml).toMatch(/fork of <a href="\/play\/stack-tower"[^>]*>Stack Tower<\/a>/);
 });
 
 const pixel = devices['Pixel 5'];
