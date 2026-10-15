@@ -15,6 +15,8 @@ const {
 const fullTitle = title ? `${title} · Meshgrounds` : 'Meshgrounds — The Open Ground for Instant 3D Web Games';
 const path = Astro.url.pathname;
 const { profile } = Astro.locals;
+// Send people back where they were after auth, but never bounce them back onto an auth page.
+const authNext = ['/login', '/signup', '/onboarding'].includes(path) ? (Astro.url.searchParams.get('next') ?? '/') : path;
 const nav = [
   { href: '/games', label: 'Play' },
   { href: '/proving', label: 'Proving Grounds' },
@@ -58,7 +60,10 @@ const nav = [
             profile ? (
               <a href="/me" class="me" aria-current={path === '/me' ? 'page' : undefined}>@{profile.handle}</a>
             ) : (
-              <a href={`/login?next=${encodeURIComponent(path)}`} aria-current={path === '/login' ? 'page' : undefined}>Log in</a>
+              <>
+                <a href={`/login?next=${encodeURIComponent(authNext)}`} aria-current={path === '/login' ? 'page' : undefined}>Log in</a>
+                <a class="btn ghost sm signup" href={`/signup?next=${encodeURIComponent(authNext)}`} aria-current={path === '/signup' ? 'page' : undefined}>Sign up</a>
+              </>
             )
           }
           <a class="btn sm" href="/upload">Upload a game</a>
