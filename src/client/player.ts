@@ -1,4 +1,5 @@
 import { getAdProvider } from './ads';
+import { gameFrameSrc } from './frame-src';
 
 export interface PlayerGame {
   id: string;
@@ -58,9 +59,26 @@ export function mountPlayer(host: HTMLElement, game: PlayerGame, opts: PlayerOpt
   frame.setAttribute('allow', 'autoplay; gamepad; accelerometer; gyroscope');
   frame.setAttribute('referrerpolicy', 'no-referrer');
   host.replaceChildren(frame);
+  frame.focus();
+
   let destroyed = false;
+  let srcSet = false;
+  let sessionStartTracked = false;
+
+  const onLoad = () => {
+    frame.focus();
+    if (!destroyed && srcSet && !sessionStartTracked) {
+      sessionStartTracked = true;
+      track('session_start');
+    }
+  };
+  frame.addEventListener('load', onLoad);
+
   loadSave(game.id, saveKey, !!opts.cloudSaves).then((save) => {
-    if (!destroyed) frame.src = `${opts.cdnOrigin}/g/${game.id}/index.html?embed=${encodeURIComponent(location.origin)}#mgs=${encodeURIComponent(save)}`;
+    if (!destroyed) {
+      srcSet = true;
+      frame.src = gameFrameSrc(opts.cdnOrigin, game.id, location.origin, save);
+    }
   });
 
   let pendingSave: string | null = null;
@@ -170,12 +188,12 @@ export function mountPlayer(host: HTMLElement, game: PlayerGame, opts: PlayerOpt
   window.addEventListener('message', onMessage);
   window.addEventListener('pagehide', flush);
   document.addEventListener('visibilitychange', onVisibility);
-  track('session_start');
 
   return {
     frame,
     destroy() {
       destroyed = true;
+      frame.removeEventListener('load', onLoad);
       flush();
       clearInterval(heartbeat);
       window.removeEventListener('message', onMessage);

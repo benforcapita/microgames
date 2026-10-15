@@ -2,6 +2,8 @@
 import Layout from '../../layouts/Layout.astro';
 import Rate from '../../components/Rate.astro';
 import GameCard from '../../components/GameCard.astro';
+import GameThumb from '../../components/GameThumb.astro';
+import { ratingLabel } from '../../lib/rating';
 import { getGame, getHealth, getUserRating, listGames } from '../../lib/server/games';
 import { CDN_ORIGIN, GRADUATION, REVENUE } from '../../lib/server/config';
 import { ago, compact, formatCheck, kb } from '../../lib/format';
@@ -39,9 +41,14 @@ const uploaded = Astro.url.searchParams.has('uploaded');
     <div class="stage-wrap">
       <div id="stage" class="stage" data-game-id={game.id} data-game-title={game.title} data-game-stage={game.stage} data-cdn={CDN_ORIGIN} data-cloud={user ? '1' : ''}>
         <button class="launch" type="button" aria-label={`Play ${game.title}`}>
-          <span class="play-icon">▶</span>
-          <span>Play {game.title}</span>
-          <span class="muted mono">{kb(game.sizeBytes)} · loads instantly</span>
+          <GameThumb game={game} class="preview-art" eager />
+          <span class="preview-shade" aria-hidden="true"></span>
+          <span class="preview-body">
+            <span class="play-icon" aria-hidden="true">▶</span>
+            <span class="preview-title">{game.title}</span>
+            <span class="preview-meta">by @{game.creator} · {ratingLabel(game.avgRating, game.ratingCount)}</span>
+            <span class="muted mono preview-size">{kb(game.sizeBytes)} · loads instantly</span>
+          </span>
         </button>
       </div>
       <div class="toolbar spread">
@@ -148,7 +155,19 @@ const uploaded = Astro.url.searchParams.has('uploaded');
     font: 800 1.4rem var(--sans);
     cursor: pointer;
   }
+  .launch { padding: 0; overflow: hidden; }
+  .launch:focus-visible { outline: 3px solid var(--accent); outline-offset: -3px; }
+  .launch :global(.preview-art) { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
+  .preview-shade { position: absolute; inset: 0; background: radial-gradient(circle at center, #0008, #000c 75%); }
+  .preview-body { position: relative; display: grid; justify-items: center; gap: 0.5rem; padding: 1rem; text-align: center; }
+  .preview-title { font: 800 clamp(1.2rem, 3.2vw, 2.2rem) / 1.1 var(--sans); text-shadow: 0 2px 12px #000; }
+  .preview-meta { font-size: 0.95rem; font-weight: 600; color: #e6e9f2; text-shadow: 0 1px 8px #000; }
   .launch .mono { font-size: 0.8rem; font-weight: 400; }
+  @media (max-width: 480px) {
+    .play-icon { width: 64px; height: 64px; font-size: 1.5rem; }
+    .preview-meta { font-size: 0.8rem; }
+    .preview-size { display: none; }
+  }
   .play-icon {
     width: 84px;
     height: 84px;
