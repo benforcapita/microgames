@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { PUBLIC_STAGES, STAGES, isPublicStage, stageAfterValidation, visibleStages, type Stage, type ValidationStatus } from './game-rules.ts';
+import { CREATED_GAME_LOOKUP, PUBLIC_STAGES, STAGES, canViewGame, isPublicStage, stageAfterValidation, visibleStages, type Stage, type ValidationStatus } from './game-rules.ts';
 
 describe('visibleStages (every list query goes through this)', () => {
   it('never returns pending or rejected for any public list', () => {
@@ -42,4 +42,38 @@ describe('stageAfterValidation (auto-publish, no moderation)', () => {
     ['rejected', 'passed', 'rejected'],
   ];
   for (const [from, status, to] of cases) it(`${from} + ${status} -> ${to}`, () => assert.equal(stageAfterValidation(from, status), to));
+});
+
+describe('canViewGame (/play for pending games)', () => {
+  const owner = 'owner-uuid';
+  const game = (stage: Stage, ownerId: string | null = owner) => ({ stage, ownerId });
+  it('published games are visible to everyone', () => {
+    for (const s of ['proving', 'live'] as Stage[]) for (const v of [undefined, null, 'someone', owner]) assert.ok(canViewGame(game(s), v));
+  });
+  it('the owner can open their own pending or rejected game', () => {
+    assert.ok(canViewGame(game('pending'), owner));
+    assert.ok(canViewGame(game('rejected'), owner));
+  });
+  it('other users and anonymous visitors get 404 for pending/rejected', () => {
+    for (const s of ['pending', 'rejected'] as Stage[]) {
+      for (const v of [undefined, null, '', 'someone-else']) assert.equal(canViewGame(game(s), v), false, `${s} ${v}`);
+      assert.equal(canViewGame(game(s, null), null), false, 'ownerless game, anonymous');
+      assert.equal(canViewGame(game(s, null), 'x'), false, 'ownerless game, signed in');
+    }
+    assert.equal(canViewGame(null, owner), false);
+  });
+});
+
+describe('createGame reads back unpublished rows', () => {
+  it('CREATED_GAME_LOOKUP includes unpublished games, so a pending upload does not return null', () => {
+    assert.deepEqual(CREATED_GAME_LOOKUP, { includeUnpublished: true });
+    assert.ok(visibleStages({ ownerId: 'u', ...CREATED_GAME_LOOKUP }).includes('pending'));
+  });
+  it('createGame uses it for its final read (no bare getGame(id)!)', async () => {
+    const { readFileSync } = await import('node:fs');
+    const src = readFileSync(new URL('./games.ts', import.meta.url), 'utf8');
+    const body = src.slice(src.indexOf('export async function createGame'), src.indexOf('export async function deleteGame'));
+    assert.match(body, /return \(await getGame\(id, CREATED_GAME_LOOKUP\)\)!;/);
+    assert.doesNotMatch(body, /getGame\(id\)/);
+  });
 });

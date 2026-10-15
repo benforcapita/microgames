@@ -1,4 +1,5 @@
 import { getAdProvider } from './ads';
+import { gameFrameSrc } from './frame-src';
 
 export interface PlayerGame {
   id: string;
@@ -58,9 +59,26 @@ export function mountPlayer(host: HTMLElement, game: PlayerGame, opts: PlayerOpt
   frame.setAttribute('allow', 'autoplay; gamepad; accelerometer; gyroscope');
   frame.setAttribute('referrerpolicy', 'no-referrer');
   host.replaceChildren(frame);
+  frame.focus();
+
   let destroyed = false;
+  let srcSet = false;
+  let sessionStartTracked = false;
+
+  const onLoad = () => {
+    frame.focus();
+    if (!destroyed && srcSet && !sessionStartTracked) {
+      sessionStartTracked = true;
+      track('session_start');
+    }
+  };
+  frame.addEventListener('load', onLoad);
+
   loadSave(game.id, saveKey, !!opts.cloudSaves).then((save) => {
-    if (!destroyed) frame.src = `${opts.cdnOrigin}/g/${game.id}/index.html?embed=${encodeURIComponent(location.origin)}#mgs=${encodeURIComponent(save)}`;
+    if (!destroyed) {
+      srcSet = true;
+      frame.src = gameFrameSrc(opts.cdnOrigin, game.id, location.origin, save);
+    }
   });
 
   let pendingSave: string | null = null;
@@ -81,7 +99,7 @@ export function mountPlayer(host: HTMLElement, game: PlayerGame, opts: PlayerOpt
 
   const post = (type: string, data: Record<string, unknown> = {}) => frame.contentWindow?.postMessage({ type, ...data }, '*');
 
-  let started = false, completed = false, crashed = false, adInFlight = false;
+  let started = false, completed = false, crashed = false, ready = false, adInFlight = false;
   let activeMs = 0, lastTick = performance.now();
 
   const runAd = async <T>(show: () => Promise<T>, fallback: T): Promise<T> => {
@@ -107,6 +125,12 @@ export function mountPlayer(host: HTMLElement, game: PlayerGame, opts: PlayerOpt
       case '__MG_FIRST_FRAME':
         track('first_frame', Number(data.ms) || 0);
         break;
+      case '__MG_READY':
+        if (!ready) (ready = true), track('ready', Number(data.ms) || 0);
+        break;
+      case '__MG_SNAPSHOT':
+        // Canvas snapshots belong to the upload preview. Live play drops them.
+        return;
       case '__MG_INPUT':
         if (!started) (started = true), track('start');
         break;
@@ -170,12 +194,12 @@ export function mountPlayer(host: HTMLElement, game: PlayerGame, opts: PlayerOpt
   window.addEventListener('message', onMessage);
   window.addEventListener('pagehide', flush);
   document.addEventListener('visibilitychange', onVisibility);
-  track('session_start');
 
   return {
     frame,
     destroy() {
       destroyed = true;
+      frame.removeEventListener('load', onLoad);
       flush();
       clearInterval(heartbeat);
       window.removeEventListener('message', onMessage);
