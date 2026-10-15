@@ -283,8 +283,33 @@
   };
 
   var readySent = false;
+  // IS-1 input support: a game declares 'mobile' | 'desktop' | 'both' with
+  //   <meta name="meshgrounds:input-support" content="both">   or   Meshgrounds.declare({ inputSupport: 'both' })
+  // (mirrors src/lib/input-support.ts). Undeclared reads as 'unknown'.
+  var INPUT_SUPPORT = ['mobile', 'desktop', 'both'];
+  var parseInputSupport = function (v) {
+    v = typeof v === 'string' ? v.trim().toLowerCase() : '';
+    return INPUT_SUPPORT.indexOf(v) >= 0 ? v : null;
+  };
+  var declaredInput = null;
+  var metaInput = function () {
+    try {
+      var m = document.querySelector('meta[name="meshgrounds:input-support"]');
+      return m ? parseInputSupport(m.getAttribute('content')) : null;
+    } catch (e) { return null; }
+  };
   window.Meshgrounds = {
     version: 1,
+    // Contract metadata. Unknown keys and invalid values are ignored; returns what is now in effect.
+    declare: function (meta) {
+      var v = meta && typeof meta === 'object' ? parseInputSupport(meta.inputSupport) : null;
+      if (v && v !== declaredInput) {
+        declaredInput = v;
+        post('__MG_META', { inputSupport: v });
+      }
+      return { inputSupport: declaredInput || metaInput() || 'unknown' };
+    },
+    get inputSupport() { return declaredInput || metaInput() || 'unknown'; },
     // Once, when the first playable frame is showing. Games that never call this
     // still report __MG_FIRST_FRAME from the first animation frame.
     ready: function () {
