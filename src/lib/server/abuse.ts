@@ -130,6 +130,24 @@ export const sessionStartByIp = createLimiter({ windowMs: 60 * 60_000, max: 20 }
 export const telemetryByUid = createLimiter({ windowMs: 60_000, max: 120 });
 export const ratingGuard = createRatingGuard();
 
+/** Rating upserts allowed per logged-in user per hour. */
+export const RATING_WRITES_MAX = 30;
+export const RATING_WRITES_WINDOW_MS = 60 * 60_000;
+export const SELF_RATING_MESSAGE = "You can't rate your own game.";
+export const RATING_LIMIT_MESSAGE = 'Too many ratings';
+export const DEVICE_RATING_MESSAGE = 'Already rated from this device';
+
+/** Per-user hourly cap on rating upserts, using the shared sliding-window limiter. */
+export function createRatingWriteLimiter(now?: () => number) {
+  return createLimiter({
+    windowMs: RATING_WRITES_WINDOW_MS,
+    max: RATING_WRITES_MAX,
+    now,
+  });
+}
+
+export const ratingWritesByUser = createRatingWriteLimiter();
+
 /**
  * Client IP used for rate limiting. On Vercel the socket address is the proxy, so use the
  * platform-set `x-vercel-forwarded-for`, then `x-real-ip`. Elsewhere only the socket address
@@ -151,6 +169,36 @@ export function secureCookie(protocol: string, isProd: boolean, isVercel: boolea
 }
 
 type Limiter = ReturnType<typeof createLimiter>;
+type RatingGuardLike = Pick<ReturnType<typeof createRatingGuard>, 'allow'>;
+
+export type RatingDecision =
+  | { ok: true }
+  | { ok: false; status: 403 | 409 | 429; message: string };
+
+/**
+ * Admit one rating write.
+ * Own-game ratings are refused before the device guard or the hourly cap is touched,
+ * and a device conflict does not spend an hourly write.
+ */
+export function authorizeRating(
+  ownerId: string | null,
+  userId: string,
+  uid: string,
+  gameId: string,
+  guard: RatingGuardLike = ratingGuard,
+  writes: Limiter = ratingWritesByUser,
+): RatingDecision {
+  if (ownerId !== null && ownerId === userId) {
+    return { ok: false, status: 403, message: SELF_RATING_MESSAGE };
+  }
+  if (!guard.allow(uid, gameId, userId)) {
+    return { ok: false, status: 409, message: DEVICE_RATING_MESSAGE };
+  }
+  if (!writes.hit(userId)) {
+    return { ok: false, status: 429, message: RATING_LIMIT_MESSAGE };
+  }
+  return { ok: true };
+}
 
 /**
  * Admit a session_start. A device may count once per window per game; the IP cap is a backstop.
