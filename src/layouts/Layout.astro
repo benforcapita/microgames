@@ -70,7 +70,7 @@ const nav = [
               </>
             )
           }
-          <a class="btn sm" href="/upload">Upload a game</a>
+          <a class="btn sm" href="/upload"><span>Upload<span class="xs-hide"> a game</span></span></a>
         </nav>
       </div>
     </header>
@@ -98,10 +98,11 @@ const nav = [
     background: #090a0fcc;
     border-bottom: 1px solid var(--line);
   }
-  .site-header .wrap { height: 62px; }
-  .logo { display: flex; align-items: center; gap: 0.55rem; text-decoration: none; font: 500 1.15rem var(--mono); letter-spacing: -0.02em; }
+  .site-header .wrap { height: 62px; flex-wrap: nowrap; }
+  .logo { flex-shrink: 0; display: flex; align-items: center; gap: 0.55rem; text-decoration: none; font: 500 1.15rem var(--mono); letter-spacing: -0.02em; }
   .logo b { color: var(--accent); }
-  nav { gap: 1.25rem; }
+  nav { gap: 1.25rem; flex-wrap: nowrap; min-width: 0; }
+  nav .btn { white-space: nowrap; }
   nav a:not(.btn) { text-decoration: none; color: var(--muted); font-weight: 600; font-size: 0.92rem; }
   nav a:not(.btn):hover, nav a[aria-current='page'] { color: var(--text); }
   nav a.me { font-family: var(--mono); color: var(--accent); }
@@ -109,5 +110,10 @@ const nav = [
   .site-footer a { text-decoration: none; }
   @media (max-width: 640px) {
     nav a:not(.btn):not(.me) { display: none; }
+    nav { gap: 0.6rem; }
+    nav a.me { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  }
+  @media (max-width: 420px) {
+    .xs-hide { display: none; }
   }
 </style>

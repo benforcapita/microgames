@@ -61,6 +61,8 @@ main { flex: 1; }
   --b: var(--accent);
   display: inline-flex;
   align-items: center;
+  justify-content: center;
+  text-align: center;
   gap: 0.5rem;
   background: var(--b);
   color: var(--accent-ink);
@@ -126,6 +128,19 @@ input, textarea, select {
   font-size: max(16px, 1rem);
 }
 input:focus, textarea:focus, select:focus { outline: 2px solid #c4ff3d66; border-color: var(--accent); }
+input[type='checkbox'], input[type='radio'] { width: auto; accent-color: var(--accent); }
+input[type='file'] { padding: 0.45rem 0.6rem; font-size: 0.9rem; color: var(--muted); cursor: pointer; }
+input[type='file']::file-selector-button {
+  margin-right: 0.75rem;
+  padding: 0.45rem 0.9rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text);
+  font: 700 0.8rem/1 var(--sans);
+  cursor: pointer;
+}
+input[type='file']:hover::file-selector-button { border-color: var(--muted); }
 label { display: grid; gap: 0.4rem; font-weight: 600; font-size: 0.9rem; }
 label small { font-weight: 400; color: var(--muted); }
 

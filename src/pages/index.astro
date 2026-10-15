@@ -197,7 +197,7 @@ const loggedIn = !!Astro.locals.user;
   .signup { display: grid; grid-template-columns: 1fr 1fr; gap: 2.5rem; padding: 2.5rem; border-color: #c4ff3d55; }
   .signup h2 { margin: 0.4rem 0 0.6rem; }
   .perks { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem; }
-  .perks li { display: grid; gap: 0.25rem; }
+  .perks li { display: grid; gap: 0.25rem; align-content: start; }
   @media (max-width: 860px) {
     .perks { grid-template-columns: 1fr; }
     .hero, .creators, .signup { grid-template-columns: 1fr; }
