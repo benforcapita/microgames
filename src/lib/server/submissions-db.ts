@@ -1,11 +1,10 @@
 /**
  * Postgres access for submission status.
  *
- * `game_validations` is not on main. The query uses the columns shared by the
- * Features v2 spec and the SP-3 draft: id, game_id, version, status,
- * static_report, run_report, screenshot_paths, created_at, finished_at.
- * SP-3 also adds `bundle_sha256` and does not add `gh_run_id`; neither is read here.
- * A missing table surfaces as a placeholder from `readSubmission`.
+ * `game_validations` is on main (SP-3). The query uses the shared columns:
+ * id, game_id, version, status, static_report, run_report, screenshot_paths,
+ * created_at, finished_at. `bundle_sha256` is written by the validator, not here,
+ * and `gh_run_id` is not a column. A missing relation is a real error.
  */
 import type { Stage } from './game-rules';
 import { sql } from './db';

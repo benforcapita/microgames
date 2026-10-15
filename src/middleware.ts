@@ -6,6 +6,8 @@ import { isSubmissionPreviewPath } from './lib/server/submissions';
 
 const AD_FRAMES = ADSENSE_CLIENT ? ' https://*.googlesyndication.com https://*.doubleclick.net https://*.google.com' : '';
 const CSP = `frame-src ${CDN_ORIGIN}${AD_FRAMES}; frame-ancestors 'self'; object-src 'none'; base-uri 'self'`;
+// The upload page previews the chosen file in a blob iframe so boot.js can capture a thumbnail.
+const UPLOAD_CSP = `frame-src ${CDN_ORIGIN} blob:${AD_FRAMES}; frame-ancestors 'self'; object-src 'none'; base-uri 'self'`;
 
 // Routes that don't need the visitor's identity (hot path: called every few seconds by every player).
 const ANONYMOUS = new Set(['/api/telemetry']);
@@ -36,7 +38,7 @@ export const onRequest = defineMiddleware(async (ctx, next) => {
 
   const res = await next();
   authHeaders.forEach((v, k) => res.headers.set(k, v));
-  res.headers.set('Content-Security-Policy', CSP);
+  res.headers.set('Content-Security-Policy', pathname === '/upload' ? UPLOAD_CSP : CSP);
   res.headers.set('X-Content-Type-Options', 'nosniff');
   res.headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
   return res;

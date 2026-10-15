@@ -6,13 +6,21 @@ import MeshArt from './MeshArt.astro';
 interface Props {
   game: Game;
   class?: string;
+  eager?: boolean;
 }
-const { game, class: className } = Astro.props;
+const { game, class: className, eager = false } = Astro.props;
 ---
 
 {
   game.thumb ? (
-    <img class={className} src={`${CDN_ORIGIN}/g/${game.id}/${game.thumb}`} alt="" loading="lazy" />
+    <img
+      class={className}
+      src={`${CDN_ORIGIN}/g/${game.id}/${game.thumb}`}
+      alt=""
+      aria-hidden="true"
+      loading={eager ? 'eager' : 'lazy'}
+      fetchpriority={eager ? 'high' : undefined}
+    />
   ) : (
     <MeshArt class={className} seed={game.id} hue={game.hue} />
   )

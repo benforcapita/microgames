@@ -5,9 +5,9 @@
  * Passing validation auto-publishes on the server (EF-1/EF-2). This module never
  * offers a publish action; the page only reflects `games.stage`.
  *
- * The table is defined in Features v2 and drafted in SP-3. It is not on main yet.
- * Reads and writes use the shared columns (`status`, `static_report`, `run_report`,
- * `screenshot_paths`, …). A missing relation becomes a spec-shaped placeholder.
+ * `games.stage` accepts `pending` and `game_validations` is on main (SP-3). Reads
+ * and writes use the shared columns (`status`, `static_report`, `run_report`,
+ * `screenshot_paths`, …). A missing relation or a rejected insert is a real error.
  */
 import { normalizeTags, type Stage } from './game-rules';
 import { validateGameUpload, type ForkParent } from './upload';
@@ -43,8 +43,6 @@ export interface ValidationRow {
   screenshotPaths: string[];
   createdAt: string;
   finishedAt: string | null;
-  /** True when the row was synthesized because `game_validations` is not migrated. */
-  mocked?: boolean;
 }
 
 export interface QueuedStaticReport {
@@ -55,7 +53,6 @@ export interface QueuedStaticReport {
 
 export interface SubmissionStore {
   getGame(id: string): Promise<SubmissionGame | null>;
-  /** Throws a Postgres `42P01` error when `game_validations` does not exist. */
   latestValidation(gameId: string): Promise<ValidationRow | null>;
 }
 
@@ -86,7 +83,6 @@ export interface SubmissionView {
     screenshotPaths: string[];
     createdAt: string;
     finishedAt: string | null;
-    mocked: boolean;
   } | null;
   phase: ValidationStatus | 'waiting';
   /** False while the run is open, and while a pass is still waiting to leave `pending`. */
@@ -110,43 +106,12 @@ const LEVELS = new Set<CheckLevel>(['pass', 'fail', 'warn']);
 const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const AUTO_PUBLISH = 'A pass is published to the Proving Grounds automatically.';
 
-export function dbFailureKind(err: unknown): 'missing_table' | 'stage_rejected' | 'other' {
-  if (!err || typeof err !== 'object') return 'other';
-  const code = 'code' in err && typeof err.code === 'string' ? err.code : '';
-  const message = 'message' in err && typeof err.message === 'string' ? err.message : '';
-  if (code === '42P01') return 'missing_table';
-  if (code === '23514' && /games_stage_check/.test(message)) return 'stage_rejected';
-  return 'other';
-}
-
 export function isSubmissionPreview(id: string): boolean {
   return id === 'preview' && process.env.MG_SUBMISSION_PREVIEW === '1' && process.env.NODE_ENV !== 'production';
 }
 
 export function isSubmissionPreviewPath(pathname: string): boolean {
   return pathname === '/submissions/preview' && process.env.MG_SUBMISSION_PREVIEW === '1' && process.env.NODE_ENV !== 'production';
-}
-
-export function placeholderValidation(gameId: string): ValidationRow {
-  return {
-    id: 'unavailable',
-    gameId,
-    version: 1,
-    status: 'queued',
-    staticReport: {
-      checks: [{
-        id: 'store',
-        name: 'Validation store',
-        level: 'warn',
-        message: 'game_validations is not on this database yet. This status is a placeholder until the SP-3 migration is applied.',
-      }],
-    },
-    runReport: null,
-    screenshotPaths: [],
-    createdAt: 'unpersisted',
-    finishedAt: null,
-    mocked: true,
-  };
 }
 
 export async function planGameUpload(opts: {
@@ -165,37 +130,20 @@ export async function planGameUpload(opts: {
   const { errors, upload } = await validateGameUpload(opts.form, opts.findGame);
   if (!upload) return { type: 'errors', status: 400, errors };
 
-  let game: { id: string };
-  try {
-    game = await opts.createGame({
-      ownerId: opts.user.id,
-      creator: opts.profile.handle,
-      title: upload.title,
-      license: upload.license,
-      html: upload.html,
-      thumb: upload.thumb,
-      tagline: upload.tagline,
-      description: upload.description,
-      tags: normalizeTags(upload.tagsRaw),
-      forkedFrom: upload.forkedFrom,
-      stage: 'pending',
-    });
-  } catch (err) {
-    if (dbFailureKind(err) === 'stage_rejected') {
-      return {
-        type: 'errors',
-        status: 503,
-        errors: ['This database does not accept pending submissions yet. Apply the submissions migration, then upload again.'],
-      };
-    }
-    throw err;
-  }
-
-  try {
-    await opts.enqueueValidation(game.id, { status: 'pass', bytes: upload.html.byteLength, checks: [] });
-  } catch (err) {
-    if (dbFailureKind(err) !== 'missing_table') throw err;
-  }
+  const game = await opts.createGame({
+    ownerId: opts.user.id,
+    creator: opts.profile.handle,
+    title: upload.title,
+    license: upload.license,
+    html: upload.html,
+    thumb: upload.thumb,
+    tagline: upload.tagline,
+    description: upload.description,
+    tags: normalizeTags(upload.tagsRaw),
+    forkedFrom: upload.forkedFrom,
+    stage: 'pending',
+  });
+  await opts.enqueueValidation(game.id, { status: 'pass', bytes: upload.html.byteLength, checks: [] });
 
   return { type: 'redirect', location: `/submissions/${game.id}`, gameId: game.id, stage: 'pending' };
 }
@@ -211,14 +159,7 @@ export async function readSubmission(opts: {
   const game = await opts.store.getGame(opts.gameId);
   if (!game || game.ownerId !== opts.userId) return { status: 404, error: 'Not found' };
 
-  let validation: ValidationRow | null;
-  try {
-    validation = await opts.store.latestValidation(game.id);
-  } catch (err) {
-    if (dbFailureKind(err) !== 'missing_table') throw err;
-    validation = placeholderValidation(game.id);
-  }
-
+  const validation = await opts.store.latestValidation(game.id);
   return { status: 200, view: buildSubmissionView(game, validation) };
 }
 
@@ -239,7 +180,6 @@ export function buildSubmissionView(game: SubmissionGame, validation: Validation
   const status = validation?.status ?? null;
   const phase: SubmissionView['phase'] = status ?? 'waiting';
   const terminal = status === 'failed' || status === 'error' || (status === 'passed' && game.stage !== 'pending');
-  const mocked = validation?.mocked === true;
   const checks = validation ? [...checksFrom(validation.staticReport, 'static'), ...checksFrom(validation.runReport, 'run')] : [];
   const run = reportObject(validation?.runReport);
 
@@ -266,9 +206,6 @@ export function buildSubmissionView(game: SubmissionGame, validation: Validation
     headline = 'Error';
     detail = 'The validation run did not finish. Nothing was published.';
   }
-  if (mocked) {
-    detail += ' game_validations is not on this database yet, so this status is a placeholder.';
-  }
 
   const view: SubmissionView = {
     game: { id: game.id, slug: game.slug, title: game.title, stage: game.stage },
@@ -284,7 +221,6 @@ export function buildSubmissionView(game: SubmissionGame, validation: Validation
           screenshotPaths: validation.screenshotPaths.slice(0, 8),
           createdAt: validation.createdAt,
           finishedAt: validation.finishedAt,
-          mocked,
         }
       : null,
     phase,

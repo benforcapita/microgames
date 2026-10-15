@@ -3,9 +3,7 @@ import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
 import {
   buildSubmissionView,
-  dbFailureKind,
   handleSubmissionStatus,
-  placeholderValidation,
   planGameUpload,
   type PendingGameInput,
   type SubmissionGame,
@@ -15,12 +13,22 @@ import {
 
 const HTML = '<html><body><canvas id="c"></canvas></body></html>';
 
+/** Minimal PNG header: 64×36, under the thumbnail dimension cap. */
+function pngBytes(): Uint8Array {
+  const bytes = new Uint8Array(24);
+  bytes.set([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82]);
+  bytes[19] = 64;
+  bytes[23] = 36;
+  return bytes;
+}
+
 function form(): FormData {
   const fd = new FormData();
   fd.set('title', 'Sky Loop');
   fd.set('license', 'MIT');
   fd.set('agree', 'on');
   fd.set('game', new File([HTML], 'game.html', { type: 'text/html' }));
+  fd.set('thumb', new File([new Uint8Array(pngBytes())], 'shot.png', { type: 'image/png' }));
   fd.set('tags', 'Arcade, Physics');
   return fd;
 }
@@ -61,7 +69,7 @@ function validation(patch: Partial<ValidationRow> = {}): ValidationRow {
   };
 }
 
-function memory(row: SubmissionGame | null, latest: ValidationRow | null | 'missing'): SubmissionStore & { reads: number } {
+function memory(row: SubmissionGame | null, latest: ValidationRow | null): SubmissionStore & { reads: number } {
   return {
     reads: 0,
     async getGame(id) {
@@ -69,11 +77,6 @@ function memory(row: SubmissionGame | null, latest: ValidationRow | null | 'miss
     },
     async latestValidation() {
       this.reads += 1;
-      if (latest === 'missing') {
-        const err = new Error('relation "game_validations" does not exist') as Error & { code: string };
-        err.code = '42P01';
-        throw err;
-      }
       return latest;
     },
   };
@@ -143,40 +146,38 @@ describe('upload creates a pending game', () => {
     assert.equal(created, 0);
   });
 
-  it('still opens the status page when game_validations is missing, and refuses a stage check failure', async () => {
-    const missing = await planGameUpload({
-      user: { id: 'owner-1' },
-      profile: { handle: 'ada' },
-      form: form(),
-      findGame: async () => null,
-      createGame: async () => ({ id: 'game1234' }),
-      enqueueValidation: async () => {
-        const err = new Error('relation "game_validations" does not exist') as Error & { code: string };
-        err.code = '42P01';
-        throw err;
-      },
-    });
-    assert.equal(missing.type, 'redirect');
+  it('propagates a rejected games insert and a failed validation enqueue', async () => {
+    const insertError = Object.assign(new Error('new row for relation "games" violates check constraint "games_stage_check"'), { code: '23514' });
+    await assert.rejects(
+      () => planGameUpload({
+        user: { id: 'owner-1' },
+        profile: { handle: 'ada' },
+        form: form(),
+        findGame: async () => null,
+        createGame: async () => {
+          throw insertError;
+        },
+        enqueueValidation: async () => {
+          throw new Error('should not enqueue');
+        },
+      }),
+      (err) => err === insertError,
+    );
 
-    const rejected = await planGameUpload({
-      user: { id: 'owner-1' },
-      profile: { handle: 'ada' },
-      form: form(),
-      findGame: async () => null,
-      createGame: async () => {
-        const err = new Error('new row for relation "games" violates check constraint "games_stage_check"') as Error & { code: string };
-        err.code = '23514';
-        throw err;
-      },
-      enqueueValidation: async () => {
-        throw new Error('should not enqueue');
-      },
-    });
-    assert.deepEqual(rejected, {
-      type: 'errors',
-      status: 503,
-      errors: ['This database does not accept pending submissions yet. Apply the submissions migration, then upload again.'],
-    });
+    const enqueueError = Object.assign(new Error('relation "game_validations" does not exist'), { code: '42P01' });
+    await assert.rejects(
+      () => planGameUpload({
+        user: { id: 'owner-1' },
+        profile: { handle: 'ada' },
+        form: form(),
+        findGame: async () => null,
+        createGame: async () => ({ id: 'game1234' }),
+        enqueueValidation: async () => {
+          throw enqueueError;
+        },
+      }),
+      (err) => err === enqueueError,
+    );
   });
 
   it('writes stage pending in the games insert', () => {
@@ -239,22 +240,15 @@ describe('submission status endpoint', () => {
     assert.match(failed.detail, /Nothing was published/);
   });
 
-  it('serves a spec-shaped placeholder when game_validations does not exist', async () => {
-    const store = memory(game(), 'missing');
+  it('returns no validation row while the owner is still waiting', async () => {
+    const store = memory(game(), null);
     const res = await handleSubmissionStatus({ userId: 'owner-1', gameId: 'game1234', store });
     const body = await res.json();
     assert.equal(res.status, 200);
-    assert.equal(body.validation.mocked, true);
-    assert.equal(body.validation.status, 'queued');
-    assert.equal(body.validation.checks[0].level, 'warn');
-    assert.match(body.validation.checks[0].message, /game_validations/);
+    assert.equal(body.validation, null);
+    assert.equal(body.phase, 'waiting');
     assert.equal(body.terminal, false);
-
-    const again = await handleSubmissionStatus({ userId: 'owner-1', gameId: 'game1234', store });
-    const second = await again.json();
-    assert.equal(second.stamp, body.stamp);
-    assert.equal(dbFailureKind(Object.assign(new Error('games_stage_check'), { code: '23514' })), 'stage_rejected');
-    assert.equal(placeholderValidation('game1234').mocked, true);
+    assert.equal(body.mocked, undefined);
   });
 });
 
