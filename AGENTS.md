@@ -7,6 +7,7 @@ Open exchange for single-file browser games (Three.js etc.). Astro 7 SSR (`@astr
 - `npm run seed` — demo games + synthetic plays into the configured Supabase (`-- --force` to replace)
 - `npm run dev` — portal on http://localhost:4321 **and** the game CDN on http://localhost:4322 (both required; loads `.env`)
 - `npm run check` — `astro check` (types); `npm run build` — production build; `npm start` runs built portal + CDN
+- `npm run launch:video` — renders the launch film (`launch/video.html` + synthesized soundtrack) to `launch/out/meshgrounds-launch.mp4` (needs ffmpeg + Playwright Chromium); `node launch/render.mjs --stills 3,24` for quick PNG checks; open `launch/video.html` directly to preview
 - Env vars: see `.env.example`. `.env` (gitignored) points at the local stack by default.
 
 ## Architecture
