@@ -151,22 +151,6 @@ async function withRole(appUrl: string, username: string): Promise<postgres.Sql>
   return postgres(url.toString(), { connect_timeout: 3, max: 1, idle_timeout: 1 });
 }
 
-function captureNotices(sql: postgres.Sql): { notices: string[]; stop: () => void } {
-  const notices: string[] = [];
-  const options = (sql as unknown as { options: { onnotice?: (notice: { message?: string }) => void } }).options;
-  const prev = options.onnotice;
-  options.onnotice = (notice) => {
-    if (notice?.message) notices.push(notice.message);
-    prev?.(notice);
-  };
-  return {
-    notices,
-    stop() {
-      options.onnotice = prev;
-    },
-  };
-}
-
 function hookHeader(headers: Record<string, string> | undefined): string | undefined {
   if (!headers) return undefined;
   return Object.fromEntries(
@@ -315,11 +299,24 @@ describe('validate-game hook dispatch', { concurrency: false }, () => {
   });
 
   it('unset URL -> no-op, and does not reject the game', async (t) => {
-    const sql = await connect(t);
-    if (!sql) return;
+    const notices: string[] = [];
+    const sql = postgres(dbUrl, {
+      connect_timeout: 3,
+      max: 1,
+      idle_timeout: 1,
+      onnotice(notice) {
+        if (notice.message) notices.push(notice.message);
+      },
+    });
+    try {
+      await sql`select 1`;
+    } catch {
+      await sql.end({ timeout: 1 }).catch(() => {});
+      t.skip('local supabase is not running');
+      return;
+    }
     const missing = gameId('nourl');
     const empty = gameId('emptyurl');
-    const captured = captureNotices(sql);
     try {
       await rollback(sql, async (tx) => {
         await setSecret(tx, proofSecret);
@@ -329,15 +326,14 @@ describe('validate-game hook dispatch', { concurrency: false }, () => {
         await assertDispatchSkipped(tx, empty);
       });
       assert.ok(
-        captured.notices.some((message) => message.includes('validate_game_url is not set')),
-        captured.notices.join('\n'),
+        notices.some((message) => message.includes('validate_game_url is not set')),
+        notices.join('\n'),
       );
       assert.ok(
-        captured.notices.some((message) => message.includes('validate_game_url is blank (empty or whitespace only)')),
-        captured.notices.join('\n'),
+        notices.some((message) => message.includes('validate_game_url is blank (empty or whitespace only)')),
+        notices.join('\n'),
       );
     } finally {
-      captured.stop();
       await sql.end({ timeout: 1 });
     }
   });
