@@ -21,7 +21,7 @@
     "check": "astro check",
     "e2e": "playwright test",
     "smoke": "node scripts/smoke.mjs",
-    "thumbs": "node scripts/capture-thumbs.mjs"
+    "thumbs": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/capture-thumbs.mjs"
   },
   "dependencies": {
     "@astrojs/node": "11.1.6",
