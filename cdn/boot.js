@@ -2,6 +2,7 @@
  * Runs before any game code inside a sandboxed, opaque-origin iframe and gives
  * vibe-coded games zero-code platform features:
  *  - telemetry (first frame, explicit ready, first input, crashes) for the Proving Grounds
+ *  - one thumbnail snapshot (__MG_SNAPSHOT) after ready(), or two seconds after the first frame
  *  - automatic pause (requestAnimationFrame, game clock, WebAudio, media) during ads
  *  - localStorage / sessionStorage / cookie shims (blocked in opaque origins), persisted by the portal
  *  - window.Meshgrounds helper wrapping the postMessage protocol from EXCHANGE_SDK.md
@@ -14,6 +15,126 @@
   var post = function (type, data) {
     try { P.postMessage(Object.assign({ type: type }, data || {}), '*'); } catch (e) {}
   };
+
+  /* snapshot-lib */
+  var SNAP_MAX_W = 640, SNAP_MAX_H = 360, SNAP_MAX_BYTES = 150 * 1024;
+  function fitSnapshotBox(width, height, maxW, maxH) {
+    if (!(width > 0) || !(height > 0)) return null;
+    var scale = Math.min(1, maxW / width, maxH / height);
+    return { width: Math.max(1, Math.round(width * scale)), height: Math.max(1, Math.round(height * scale)) };
+  }
+  function isBlankSample(data) {
+    if (!data || data.length < 4) return true;
+    var minR = 255, minG = 255, minB = 255, maxR = 0, maxG = 0, maxB = 0, seen = false;
+    for (var i = 0; i < data.length; i += 4) {
+      if (data[i + 3] < 16) continue;
+      var r = data[i], g = data[i + 1], b = data[i + 2];
+      if (!seen) { minR = maxR = r; minG = maxG = g; minB = maxB = b; seen = true; continue; }
+      if (r < minR) minR = r; if (g < minG) minG = g; if (b < minB) minB = b;
+      if (r > maxR) maxR = r; if (g > maxG) maxG = g; if (b > maxB) maxB = b;
+    }
+    if (!seen) return true;
+    return (maxR - minR) < 12 && (maxG - minG) < 12 && (maxB - minB) < 12;
+  }
+  function dataUrlByteLength(url) {
+    if (typeof url !== 'string') return Infinity;
+    var comma = url.indexOf(',');
+    if (comma < 0) return Infinity;
+    var b64 = url.slice(comma + 1);
+    var pad = b64.slice(-2) === '==' ? 2 : b64.slice(-1) === '=' ? 1 : 0;
+    return Math.floor(b64.length * 3 / 4) - pad;
+  }
+  function isWebpUrl(url) { return typeof url === 'string' && url.indexOf('data:image/webp') === 0; }
+  function glContextAttrs(type, attrs) {
+    if (type !== 'webgl' && type !== 'webgl2' && type !== 'experimental-webgl') return { type: type, attrs: attrs };
+    var next = {};
+    if (attrs) {
+      for (var key in attrs) if (Object.prototype.hasOwnProperty.call(attrs, key)) next[key] = attrs[key];
+    }
+    next.preserveDrawingBuffer = true;
+    return { type: type, attrs: next };
+  }
+  function drawSnapshot(canvas, width, height, createCanvas) {
+    var dest = createCanvas(width, height);
+    var ctx = dest.getContext('2d');
+    if (!ctx) throw new Error('2d');
+    ctx.drawImage(canvas, 0, 0, width, height);
+    return { canvas: dest, pixels: ctx.getImageData(0, 0, width, height).data };
+  }
+  function captureCanvas(canvas, createCanvas) {
+    try {
+      var box = fitSnapshotBox(canvas.width, canvas.height, SNAP_MAX_W, SNAP_MAX_H);
+      if (!box) return { ok: false, reason: 'blank' };
+      var painted = drawSnapshot(canvas, box.width, box.height, createCanvas);
+      if (isBlankSample(painted.pixels)) return { ok: false, reason: 'blank' };
+      var quality = 0.82;
+      var dest = painted.canvas;
+      var url = dest.toDataURL('image/webp', quality);
+      if (!isWebpUrl(url)) url = dest.toDataURL('image/png');
+      var guard = 0;
+      while (dataUrlByteLength(url) > SNAP_MAX_BYTES && guard < 8) {
+        guard++;
+        if (isWebpUrl(url) && quality > 0.45) {
+          quality = Math.round((quality - 0.15) * 100) / 100;
+          url = dest.toDataURL('image/webp', quality);
+          continue;
+        }
+        var shrunk = fitSnapshotBox(Math.max(1, Math.round(box.width * 0.75)), Math.max(1, Math.round(box.height * 0.75)), SNAP_MAX_W, SNAP_MAX_H);
+        if (!shrunk) return { ok: false, reason: 'oversize' };
+        box = shrunk;
+        painted = drawSnapshot(canvas, box.width, box.height, createCanvas);
+        if (isBlankSample(painted.pixels)) return { ok: false, reason: 'blank' };
+        dest = painted.canvas;
+        url = dest.toDataURL('image/webp', quality);
+        if (!isWebpUrl(url)) url = dest.toDataURL('image/png');
+      }
+      if (!url || dataUrlByteLength(url) > SNAP_MAX_BYTES) return { ok: false, reason: 'oversize' };
+      return { ok: true, dataUrl: url, type: url.slice(5, url.indexOf(';')) };
+    } catch (err) {
+      return { ok: false, reason: 'tainted' };
+    }
+  }
+  function snapshotError(reason) {
+    if (reason === 'tainted') return 'Could not capture this canvas because it is tainted or the WebGL buffer was cleared. Upload a PNG, JPEG, or WebP thumbnail. WebGL games need { preserveDrawingBuffer: true }.';
+    if (reason === 'missing') return 'No canvas was found to capture. Upload a PNG, JPEG, or WebP thumbnail.';
+    if (reason === 'oversize') return 'The preview is over 150 KB. Upload a PNG, JPEG, or WebP thumbnail.';
+    return 'The captured frame is blank. Upload a PNG, JPEG, or WebP thumbnail.';
+  }
+  /* end-snapshot-lib */
+
+  var nativeGetContext = HTMLCanvasElement.prototype.getContext;
+  HTMLCanvasElement.prototype.getContext = function (type, attrs) {
+    var next = glContextAttrs(type, attrs);
+    return nativeGetContext.call(this, type, next.attrs);
+  };
+
+  var snapped = false, snapTimer = 0;
+  function runSnapshot() {
+    if (snapped) return;
+    snapped = true;
+    clearTimeout(snapTimer);
+    var list = document.getElementsByTagName('canvas');
+    var best = null, bestArea = 0;
+    for (var i = 0; i < list.length; i++) {
+      var area = list[i].width * list[i].height;
+      if (area > bestArea) { best = list[i]; bestArea = area; }
+    }
+    if (!best) { post('__MG_SNAPSHOT', { error: snapshotError('missing') }); return; }
+    var shot = captureCanvas(best, function (w, h) {
+      var el = document.createElement('canvas');
+      el.width = w;
+      el.height = h;
+      return el;
+    });
+    if (!shot.ok) post('__MG_SNAPSHOT', { error: snapshotError(shot.reason) });
+    else post('__MG_SNAPSHOT', { dataUrl: shot.dataUrl, mime: shot.type });
+  }
+  function scheduleSnapshot(delay) {
+    if (snapped) return;
+    clearTimeout(snapTimer);
+    if (delay > 0) snapTimer = setTimeout(runSnapshot, delay);
+    else snapTimer = setTimeout(function () { rAF(function () { runSnapshot(); }); }, 0);
+  }
 
   /* ---------- storage shims ---------- */
   function makeStorage(initial, persist) {
@@ -77,7 +198,11 @@
   window.requestAnimationFrame = function (cb) {
     if (paused) { var id = heldId--; held.set(id, cb); return id; }
     return rAF(function (t) {
-      if (!firstFrame) { firstFrame = true; post('__MG_FIRST_FRAME', { ms: Math.round(nativeNow()) }); }
+      if (!firstFrame) {
+        firstFrame = true;
+        post('__MG_FIRST_FRAME', { ms: Math.round(nativeNow()) });
+        if (!readySent) scheduleSnapshot(2000);
+      }
       cb(t - pausedTotal);
     });
   };
@@ -161,6 +286,7 @@
       if (readySent) return;
       readySent = true;
       post('__MG_READY', { ms: Math.round(nativeNow()) });
+      scheduleSnapshot(0);
     },
     gameOver: function (score) { post('GAME_OVER', { score: score }); },
     levelComplete: function (level, score) { post('LEVEL_COMPLETE', { level: level, score: score }); },

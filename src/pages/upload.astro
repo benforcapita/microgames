@@ -60,9 +60,19 @@ const forkable = fork && fork.license !== 'All rights reserved' ? fork : null;
           </select>
         </label>
       </div>
-      <label>Thumbnail <small>optional · PNG/JPEG/WebP under 512 KB, 16:10 looks best</small>
-        <input type="file" name="thumb" accept="image/png,image/jpeg,image/webp" />
+      <label>Thumbnail <small>required · PNG, JPEG, or WebP, at most {UPLOAD.maxThumbWidth}×{UPLOAD.maxThumbHeight}, under 512 KB</small>
+        <input id="thumb-file" type="file" name="thumb" accept="image/png,image/jpeg,image/webp" />
       </label>
+      <div id="snap" class="snap" hidden>
+        <div class="stage">
+          <iframe id="game-preview" title="Game preview" sandbox="allow-scripts allow-pointer-lock" referrerpolicy="no-referrer"></iframe>
+          <img id="snap-img" alt="Captured preview of your game" hidden />
+        </div>
+        <div class="snap-copy">
+          <p id="snap-msg" class="muted"></p>
+          <button id="use-preview" class="btn ghost sm" type="button" hidden>Use this preview</button>
+        </div>
+      </div>
       <label class="agree">
         <span><input type="checkbox" name="agree" required /> I confirm this game contains no unlicensed copyrighted art, music
         or characters, and no voice clones of real people. <a href="/creators#rules">Content rules</a></span>
@@ -84,22 +94,129 @@ const forkable = fork && fork.license !== 'All rights reserved' ? fork : null;
   .agree input { width: auto; margin-right: 0.4rem; }
   .errors { background: #ff5d5d1a; border: 1px solid #ff5d5d66; color: #ffb3b3; border-radius: 10px; padding: 0.75rem 1rem; }
   .errors ul { margin: 0; padding-left: 1.1rem; }
+  .snap { display: grid; grid-template-columns: 320px 1fr; gap: 1rem; align-items: center; }
+  .snap[hidden], .snap [hidden] { display: none !important; }
+  .stage { position: relative; width: 320px; height: 180px; overflow: hidden; border-radius: 10px; background: #000; border: 1px solid var(--line); }
+  .stage iframe { width: 640px; height: 360px; border: 0; transform: scale(0.5); transform-origin: top left; }
+  .stage img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; background: #000; }
+  .snap-copy { display: grid; gap: 0.6rem; align-content: center; }
+  .snap-copy p { margin: 0; }
+  #use-preview[aria-pressed='true'] { border-color: var(--accent); color: var(--accent); }
   @media (max-width: 860px) {
-    .upload, .two { grid-template-columns: 1fr; }
+    .upload, .two, .snap { grid-template-columns: 1fr; }
     .intro { position: static; }
   }
 </style>
 
 <script>
+  import boot from '../../cdn/boot.js?raw';
+
   const form = document.getElementById('upload-form') as HTMLFormElement;
   const errors = document.getElementById('errors')!;
+  const gameInput = form.querySelector<HTMLInputElement>('input[name="game"]')!;
+  const thumbInput = document.getElementById('thumb-file') as HTMLInputElement;
+  const snap = document.getElementById('snap')!;
+  const frame = document.getElementById('game-preview') as HTMLIFrameElement;
+  const shot = document.getElementById('snap-img') as HTMLImageElement;
+  const snapMsg = document.getElementById('snap-msg')!;
+  const usePreview = document.getElementById('use-preview') as HTMLButtonElement;
+  let previewUrl = '';
+  let snapshot: { dataUrl: string; type: string } | null = null;
+  let usingPreview = false;
+
+  function injectBoot(html: string): string {
+    const tag = '<script>' + boot + '<' + '/script>';
+    const head = html.match(/<head[^>]*>/i);
+    if (head) return html.replace(head[0], head[0] + tag);
+    const lead = html.match(/^\s*(<!doctype[^>]*>)?\s*(<html[^>]*>)?/i)?.[0] ?? '';
+    return lead + tag + html.slice(lead.length);
+  }
+
+  function dataUrlToFile(dataUrl: string, type: string): File {
+    const bin = atob(dataUrl.slice(dataUrl.indexOf(',') + 1));
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const ext = type === 'image/webp' ? 'webp' : type === 'image/jpeg' ? 'jpg' : 'png';
+    return new File([bytes], `preview.${ext}`, { type: type || 'image/png' });
+  }
+
+  function showSnapshotChoice() {
+    const hasFile = (thumbInput.files?.length ?? 0) > 0;
+    if (!snapshot || hasFile) {
+      usePreview.hidden = true;
+      return;
+    }
+    shot.src = snapshot.dataUrl;
+    shot.hidden = false;
+    usePreview.hidden = false;
+    snapMsg.textContent = usingPreview ? 'This preview will be the thumbnail.' : 'No thumbnail file selected.';
+  }
+
+  gameInput.addEventListener('change', () => {
+    const file = gameInput.files?.[0];
+    snapshot = null;
+    usingPreview = false;
+    usePreview.hidden = true;
+    usePreview.setAttribute('aria-pressed', 'false');
+    usePreview.textContent = 'Use this preview';
+    shot.hidden = true;
+    shot.removeAttribute('src');
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    previewUrl = '';
+    if (!file) { snap.hidden = true; return; }
+    snap.hidden = false;
+    snapMsg.textContent = 'Capturing a preview from the first frames…';
+    file.text().then((html) => {
+      previewUrl = URL.createObjectURL(new Blob([injectBoot(html)], { type: 'text/html' }));
+      frame.src = previewUrl;
+    }).catch(() => {
+      snapMsg.textContent = 'Could not read that file. Upload a PNG, JPEG, or WebP thumbnail.';
+    });
+  });
+
+  thumbInput.addEventListener('change', () => {
+    if ((thumbInput.files?.length ?? 0) > 0) {
+      usingPreview = false;
+      usePreview.setAttribute('aria-pressed', 'false');
+      usePreview.textContent = 'Use this preview';
+    }
+    showSnapshotChoice();
+    if ((thumbInput.files?.length ?? 0) > 0) snapMsg.textContent = 'Using the thumbnail file you selected.';
+  });
+
+  usePreview.addEventListener('click', () => {
+    if (!snapshot) return;
+    usingPreview = true;
+    usePreview.setAttribute('aria-pressed', 'true');
+    usePreview.textContent = 'Using this preview';
+    snapMsg.textContent = 'This preview will be the thumbnail.';
+  });
+
+  window.addEventListener('message', (e) => {
+    if (e.source !== frame.contentWindow || !e.data || e.data.type !== '__MG_SNAPSHOT') return;
+    if (typeof e.data.error === 'string') {
+      snapshot = null;
+      usingPreview = false;
+      shot.hidden = true;
+      usePreview.hidden = true;
+      snapMsg.textContent = e.data.error;
+      return;
+    }
+    if (typeof e.data.dataUrl !== 'string') return;
+    snapshot = { dataUrl: e.data.dataUrl, type: String(e.data.mime || 'image/png') };
+    showSnapshotChoice();
+  });
+
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     const btn = form.querySelector<HTMLButtonElement>('button[type="submit"]')!;
     btn.disabled = true;
     btn.textContent = 'Uploading…';
     try {
-      const res = await fetch(form.action, { method: 'POST', body: new FormData(form) });
+      const body = new FormData(form);
+      const hasFile = (thumbInput.files?.length ?? 0) > 0;
+      if (!hasFile && usingPreview && snapshot) body.set('thumb', dataUrlToFile(snapshot.dataUrl, snapshot.type));
+      const res = await fetch(form.action, { method: 'POST', body });
       if (res.redirected) return void location.assign(res.url);
       const data = (await res.json().catch(() => ({ errors: ['Upload failed.'] }))) as { errors: string[] };
       errors.replaceChildren(Object.assign(document.createElement('ul'), {}));
