@@ -21,12 +21,14 @@ test('anonymous visitor: proving game is playable by direct link but listed nowh
     await expect(page.locator('main'), `${path} must not list ${t}`).not.toContainText(t);
   }
   // Live game page is indexable; related "more from polyprism" list omits the proving sibling (checked above).
-  await page.goto('/play/stk7wr01');
+  const liveRes = await page.goto('/play/stk7wr01');
   expect(await robots(page)).toBeNull();
+  expect(liveRes.headers()['x-robots-tag']).toBeUndefined();
 
   // Direct link still works, but is noindex.
   const res = await page.goto(`/play/${SEED_PROVING.id}`);
   expect(res.status()).toBe(200);
+  expect(res.headers()['x-robots-tag']).toBe('noindex, nofollow');
   await expect(page).toHaveURL(/\/play\/prism-pop$/);
   expect(await robots(page)).toBe('noindex, nofollow');
   await page.getByRole('button', { name: `Play ${t}` }).click();
@@ -81,6 +83,7 @@ test('owner sees their own proving game on profile and /proving; others do not',
     }
     const r = await ap.goto(`/play/${id}`);
     expect(r.status()).toBe(200);
+    expect(r.headers()['x-robots-tag']).toBe('noindex, nofollow');
     expect(await robots(ap)).toBe('noindex, nofollow');
     expect((await ap.request.get(`${CDN}/g/${id}/index.html`)).status()).toBe(200);
     await anon.close();

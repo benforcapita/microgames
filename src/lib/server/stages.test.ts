@@ -124,6 +124,7 @@ describe('PV-1: every list surface uses the predicate (no scattered stage filter
     assert.match(profile, /own \? \{ ownerId: user!\.id, includeUnlisted: true \}/);
     const play = read('../../pages/play/[slug].astro');
     assert.match(play, /noindex=\{!live\}/);
+    assert.match(play, /if \(!live\) Astro\.response\.headers\.set\('X-Robots-Tag', 'noindex, nofollow'\)/);
     assert.match(play, /listGames\(\{ forkedFrom: game\.id, limit: 50 \}\)/);
     assert.match(play, /listGames\(\{ creator: game\.creator, limit: 5 \}\)/);
     assert.match(play, /isListable\(parentGame\)/);

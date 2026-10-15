@@ -5,7 +5,7 @@ import GameCard from '../../components/GameCard.astro';
 import GameThumb from '../../components/GameThumb.astro';
 import { ratingLabel } from '../../lib/rating';
 import { getGame, getHealth, getUserRating, listGames } from '../../lib/server/games';
-import { CDN_ORIGIN, CDN_PREVIEW_SECRET, GRADUATION, REVENUE } from '../../lib/server/config';
+import { CDN_ORIGIN, CDN_PREVIEW_SECRET, GRADUATION } from '../../lib/server/config';
 import { isListable, isPublicStage } from '../../lib/server/game-rules';
 import { mintPreviewToken } from '../../../cdn/preview-token.mjs';
 import { ago, compact, formatCheck, kb } from '../../lib/format';
@@ -34,6 +34,8 @@ const previewToken = isOwner && !isPublicStage(game.stage) ? mintPreviewToken(CD
 const ptQuery = previewToken ? `&pt=${encodeURIComponent(previewToken)}` : '';
 const remixable = game.license !== 'All rights reserved';
 const live = game.stage === 'live';
+// PV-1: non-live games stay reachable by direct link (200) but are kept out of search indexes (header + meta).
+if (!live) Astro.response.headers.set('X-Robots-Tag', 'noindex, nofollow');
 const passed = checks.filter((c) => c.pass).length;
 const uploaded = Astro.url.searchParams.has('uploaded');
 ---
@@ -107,8 +109,8 @@ const uploaded = Astro.url.searchParams.has('uploaded');
         <p class="muted small">
           {
             live
-              ? `Live and monetized. ${Math.round(REVENUE.creatorShare * 100)}% of net ad revenue goes to @${game.creator}${parent ? `, and ${Math.round(REVENUE.forkRoyalty * 100)}% of that is shared with the original creator` : ''}.`
-              : `Measured automatically from real plays. Once every check passes after ${GRADUATION.minPlays}+ plays, ads switch on and the creator starts earning.`
+              ? `Live and monetized. Revenue sharing for creators is planned; details to come.`
+              : `Measured automatically from real plays. Once every check passes after ${GRADUATION.minPlays}+ plays, ads switch on. Revenue sharing for creators is planned.`
           }
         </p>
         <ul>

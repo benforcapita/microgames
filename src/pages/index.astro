@@ -3,7 +3,6 @@ import Layout from '../layouts/Layout.astro';
 import GameCard from '../components/GameCard.astro';
 import GameThumb from '../components/GameThumb.astro';
 import { listGames, platformStats } from '../lib/server/games';
-import { REVENUE } from '../lib/server/config';
 import { compact } from '../lib/format';
 import { getContent, getFeatured } from '../lib/server/content';
 
@@ -76,9 +75,9 @@ const loggedIn = !!Astro.locals.user;
           </div>
           <ul class="perks">
             <li><b>Unlimited play</b><span class="muted">Every live and Proving Grounds game, as often as you like.</span></li>
-            <li><b>Ratings</b><span class="muted">Your stars decide which games graduate and start earning.</span></li>
+            <li><b>Ratings</b><span class="muted">Your stars decide which games graduate to the main arcade.</span></li>
             <li><b>Cloud saves</b><span class="muted">Progress follows you across devices.</span></li>
-            <li><b>Uploading</b><span class="muted">Ship your own single-file game and earn ad revenue.</span></li>
+            <li><b>Uploading</b><span class="muted">Ship your own single-file game. Revenue sharing for creators is planned.</span></li>
           </ul>
         </div>
       </section>
@@ -117,8 +116,8 @@ const loggedIn = !!Astro.locals.user;
         <span class="eyebrow">For creators</span>
         <h2>Built it with Claude, Cursor or by hand? Ship it here.</h2>
         <p class="muted">
-          Upload one HTML file and it goes live right away. Pass the Proving Grounds and we switch on ads for you and pay
-          you {Math.round(REVENUE.creatorShare * 100)}% of the net revenue, with a ${REVENUE.minPayoutUsd} minimum payout.
+          Upload one HTML file and it goes live right away. Pass the Proving Grounds and we switch on ads for your game.
+          Revenue sharing for creators is planned; details to come.
         </p>
         <div class="row">
           <a class="btn" href="/upload">Upload a game</a>
@@ -128,7 +127,7 @@ const loggedIn = !!Astro.locals.user;
       <ol class="steps">
         <li><b>Build</b><span class="muted">Any tool, any AI. Three.js, Canvas, WebGPU, as long as it's one self-contained file.</span></li>
         <li><b>Drop</b><span class="muted">Upload the .html. We sandbox it, add telemetry, and handle pause and saves automatically.</span></li>
-        <li><b>Graduate</b><span class="muted">Players and real telemetry decide. Clear the bar and you start earning, and others can fork your game.</span></li>
+        <li><b>Graduate</b><span class="muted">Players and real telemetry decide. Clear the bar and ads switch on, and others can fork your game.</span></li>
       </ol>
     </div>
   </section>
