@@ -5,5 +5,5 @@ let t0 = performance.now();
 function loop(t) { x.clearRect(0, 0, c.width, c.height); x.fillRect((t - t0) / 10 % 300, 50, 10, 10); requestAnimationFrame(loop); }
 requestAnimationFrame(loop);
 try { localStorage.setItem('best', '1'); } catch (e) {}
-window.Meshgrounds?.ready?.();
+window.Meshgrounds?.ready?.(); window.Meshgrounds?.onPause?.(() => {}); window.Meshgrounds?.onResume?.(() => {});
 </script></body></html>
