@@ -1,11 +1,12 @@
 -- SP-5b: one game_validations row per upload attempt.
--- SP-5 inserted a version-1 status=queued placeholder (often with a fake
--- static_report status of 'pass'). EF-1 then inserted version 2. When a queued
--- row with no bundle hash is still open, record the real verdict on that row
--- and drop any other queued placeholder for the game. A bundle that already
--- has a verdict stays idempotent: no second row, and leftover queued
--- placeholders for that game are removed.
+-- Body starts from 20261015150000 (IS-2 stores games.input_support from
+-- report.inputSupport.class) and, when a queued row with no bundle hash is
+-- still open, records the real verdict on that row. Other queued placeholders
+-- for the game are removed. A bundle that already has a verdict stays
+-- idempotent: no second row, no stage change, and leftover queued placeholders
+-- are removed.
 -- Do not apply this file to hosted Supabase from a laptop or an agent.
+-- 20261015140100 sorted before the input_support update and is not used.
 
 create or replace function public.record_game_validation(
   p_game_id text, p_sha256 text, p_status text, p_report jsonb)
@@ -70,6 +71,11 @@ begin
               when cur = 'pending' and p_status = 'failed' then 'rejected'
               else cur end;
   if nxt <> cur then update public.games set stage = nxt where public.games.id = p_game_id; end if;
+
+  -- IS-2: store the static check's input-support class (report-only; ignored unless it is a known value).
+  if p_report->'inputSupport'->>'class' in ('mobile', 'desktop', 'both', 'unknown') then
+    update public.games set input_support = p_report->'inputSupport'->>'class' where public.games.id = p_game_id;
+  end if;
 
   return query select v.id, v.status, v.bundle_sha256, v.version, nxt;
 end;

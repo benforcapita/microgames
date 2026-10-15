@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import postgres from 'postgres';
 
-const cleanupSql = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'ops', 'cleanup_stale_queued_validations.sql'), 'utf8');
+const supabaseDir = join(dirname(fileURLToPath(import.meta.url)), '..');
+const cleanupSql = readFileSync(join(supabaseDir, 'ops', 'cleanup_stale_queued_validations.sql'), 'utf8');
+const migrationsDir = join(supabaseDir, 'migrations');
 
 type Sql = postgres.Sql | postgres.TransactionSql;
 
@@ -75,6 +77,19 @@ async function insertPending(sql: Sql, id: string): Promise<void> {
 }
 
 describe('one game_validations row per attempt', () => {
+  it('the supersede migration sorts after the input_support update and keeps that write', () => {
+    const names = readdirSync(migrationsDir).filter((name) => name.endsWith('.sql'));
+    assert.equal(names.includes('20261015140100_supersede_queued_validation.sql'), false);
+    assert.ok(names.includes('20261015150000_record_input_support.sql'));
+    const supersede = names.filter((name) => name.includes('supersede_queued_validation'));
+    assert.deepEqual(supersede, ['20261015160000_supersede_queued_validation.sql']);
+    assert.ok('20261015160000_supersede_queued_validation.sql' > '20261015150000_record_input_support.sql');
+    const body = readFileSync(join(migrationsDir, '20261015160000_supersede_queued_validation.sql'), 'utf8');
+    assert.match(body, /input_support = p_report->'inputSupport'->>'class'/);
+    assert.match(body, /status = 'queued'/);
+    assert.match(body, /bundle_sha256 is null/);
+  });
+
   it('a pending insert does not write a validation row', async (t) => {
     const sql = await connect(t);
     if (!sql) return;
@@ -158,6 +173,59 @@ describe('one game_validations row per attempt', () => {
         assert.equal(left[0].status, 'failed');
         assert.equal(left[0].report_status, 'fail');
         assert.notEqual(left[0].report_status, 'pass');
+      });
+    } finally {
+      await sql.end({ timeout: 1 });
+    }
+  });
+
+  it('updates input_support and supersedes the queued row in the same call', async (t) => {
+    const sql = await connect(t);
+    if (!sql) return;
+    const id = gameId('both');
+    try {
+      await rollback(sql, async (tx) => {
+        await insertPending(tx, id);
+        const [queued] = await tx<{ id: string }[]>`
+          insert into public.game_validations (game_id, version, status, static_report, created_at)
+          values (${id}, 1, 'queued', ${tx.json({ status: 'pass', bytes: 12, checks: [] })}, now() - interval '2 seconds')
+          returning id
+        `;
+        const [before] = await tx<{ input_support: string }[]>`
+          select input_support from public.games where id = ${id}
+        `;
+        assert.equal(before?.input_support, 'unknown');
+
+        const [row] = await tx<{ id: string; status: string; version: number; stage: string }[]>`
+          select id, status, version, stage
+          from public.record_game_validation(
+            ${id},
+            ${shaA},
+            'passed',
+            ${tx.json({ status: 'pass', checks: [], inputSupport: { class: 'mobile' } })}
+          )
+        `;
+        assert.equal(row?.id, queued?.id);
+        assert.equal(row?.status, 'passed');
+        assert.equal(row?.version, 1);
+        assert.equal(row?.stage, 'proving');
+
+        const left = await tx<{ id: string; status: string; version: number; bundle_sha256: string | null }[]>`
+          select id, status, version, bundle_sha256
+          from public.game_validations
+          where game_id = ${id}
+        `;
+        assert.equal(left.length, 1);
+        assert.equal(left[0].id, queued?.id);
+        assert.equal(left[0].status, 'passed');
+        assert.equal(left[0].version, 1);
+        assert.equal(left[0].bundle_sha256, shaA);
+
+        const [game] = await tx<{ input_support: string; stage: string }[]>`
+          select input_support, stage from public.games where id = ${id}
+        `;
+        assert.equal(game?.input_support, 'mobile');
+        assert.equal(game?.stage, 'proving');
       });
     } finally {
       await sql.end({ timeout: 1 });
