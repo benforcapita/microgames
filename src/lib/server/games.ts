@@ -120,6 +120,14 @@ export async function listGames({ stage, sort = 'top', tag, creator, ownerId, fo
   return rows.map(toGame);
 }
 
+/** Games by id restricted to the given stages (CM-1 featured row). */
+export async function listGamesByIds(ids: string[], stages: string[]): Promise<Game[]> {
+  if (!ids.length || !stages.length) return [];
+  const rows = await sql<GameRow[]>`
+    select * from (${gameSelect()}) g where id in ${sql(ids)} and stage in ${sql(stages)}`;
+  return rows.map(toGame);
+}
+
 /**
  * Public lookup: pending/rejected games are invisible unless `includeUnpublished` (owner-only
  * callers such as delete/createGame) or the `viewerId` owns the game (see canViewGame).
