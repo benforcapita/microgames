@@ -4,10 +4,29 @@ export interface BundleStorage {
   remove(paths: string[]): Promise<{ error: { message: string } | null }>;
 }
 
+/** Thrown after a thumbnail put fails and any earlier bundle objects have been deleted. */
+export class ThumbnailUploadError extends Error {
+  readonly status = 503;
+  constructor() {
+    super('Thumbnail upload failed, please try again');
+    this.name = 'ThumbnailUploadError';
+  }
+}
+
+export function isThumbnailUploadError(err: unknown): err is ThumbnailUploadError {
+  return err instanceof ThumbnailUploadError || (err instanceof Error && err.name === 'ThumbnailUploadError');
+}
+
+function isThumbPath(path: string): boolean {
+  return /\/thumb\.[a-z0-9]+$/i.test(path);
+}
+
 /**
  * Upload every bundle object, then run the games insert.
- * If that insert throws, delete the objects just stored. Cleanup is best-effort:
- * a delete failure is logged, and the original insert error is always rethrown.
+ * index.html is stored before the thumbnail. If a later upload or the insert
+ * fails, delete the objects already stored so a rejected thumbnail cannot leave
+ * an orphaned bundle. Cleanup is best-effort: a delete failure is logged, and
+ * the original error is always rethrown.
  */
 export async function saveUploadedBundle(opts: {
   objects: { path: string; bytes: Uint8Array; contentType: string }[];
@@ -15,16 +34,19 @@ export async function saveUploadedBundle(opts: {
   insert: () => Promise<unknown>;
 }): Promise<void> {
   const stored: string[] = [];
-  for (const object of opts.objects) {
-    const put = await opts.storage.upload(object.path, object.bytes, object.contentType);
-    if (put.error) throw new Error(`Storage upload failed: ${put.error.message}`);
-    stored.push(object.path);
-  }
-
+  let uploading: string | null = null;
   try {
+    for (const object of opts.objects) {
+      uploading = object.path;
+      const put = await opts.storage.upload(object.path, object.bytes, object.contentType);
+      if (put.error) throw new Error(`Storage upload failed: ${put.error.message}`);
+      stored.push(object.path);
+    }
+    uploading = null;
     await opts.insert();
   } catch (err) {
     await discardStoredBundle(opts.storage, stored);
+    if (uploading && isThumbPath(uploading)) throw new ThumbnailUploadError();
     throw err;
   }
 }
@@ -41,7 +63,7 @@ async function discardStoredBundle(storage: BundleStorage, paths: string[]) {
 
 function logCleanupFailure(paths: string[], error: unknown) {
   try {
-    console.error(`Failed to delete stored game bundle (${paths.join(', ')}) after the games insert failed`, error);
+    console.error(`Failed to delete stored game bundle (${paths.join(', ')}) after the upload failed`, error);
   } catch {
     // A broken logger must not replace the insert error.
   }

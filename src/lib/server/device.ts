@@ -67,6 +67,15 @@ export function playSurface(device: DeviceKind, inputSupport: unknown): PlaySurf
   return device === 'mobile' && normalizeInputSupport(inputSupport) === 'desktop' ? 'desktop-only' : 'player';
 }
 
+/**
+ * The "fork of" credit always names the parent. Mobile visitors get plain text when that
+ * parent is desktop-only, because the play link is not a playable page for them.
+ * Desktop visitors always get the link.
+ */
+export function forkParentLinked(device: DeviceKind, inputSupport: unknown): boolean {
+  return visibleOnDevice(inputSupport, device);
+}
+
 export interface DesktopOnlyNotice {
   heading: 'Desktop only';
   title: string;
@@ -82,7 +91,7 @@ export function desktopOnlyNotice(title: string): DesktopOnlyNotice {
   };
 }
 
-const VARIED_PATHS = [/^\/$/, /^\/games(?:\/|$)/, /^\/proving(?:\/|$)/, /^\/play(?:\/|$)/, /^\/u(?:\/|$)/];
+const VARIED_PATHS = [/^\/$/, /^\/games(?:\/|$)/, /^\/proving(?:\/|$)/, /^\/play(?:\/|$)/, /^\/u(?:\/|$)/, /^\/creators(?:\/|$)/];
 
 /** HTML whose game list or player depends on the device. */
 export function variesByDevice(pathname: string): boolean {

@@ -22,7 +22,8 @@
     "check:pg-net": "node scripts/check-pg-net.mjs",
     "e2e": "playwright test",
     "smoke": "node scripts/smoke.mjs",
-    "thumbs": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/capture-thumbs.mjs"
+    "thumbs": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/capture-thumbs.mjs",
+    "backfill:input": "node --experimental-strip-types --disable-warning=ExperimentalWarning --import ./scripts/register-ts.mjs scripts/backfill-input-support.mjs"
   },
   "dependencies": {
     "@astrojs/node": "11.1.6",

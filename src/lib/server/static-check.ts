@@ -47,7 +47,7 @@ const RE_POINTER = /\b(?:on)?pointer(?:down|move|up|cancel)\b|\bPointerEvent\b/i
 const RE_KEYS = /\b(?:on)?key(?:down|up|press)\b/i;
 const RE_MOUSE = /\b(?:on)?(?:mouse(?:down|up|move)|wheel)\b/i;
 const RE_CONTROLS = /(?:^|[^a-z])(?:d-?pad|joystick|touch-?(?:controls?|buttons?|pad)|virtual-?(?:pad|joystick|buttons?|controls?)|on-?screen-?(?:controls?|buttons?)|mobile-?(?:controls?|buttons?))(?:$|[^a-z])/i;
-const RE_DECLARE = /\binputSupport\s*:\s*['"`](mobile|desktop|both)['"`]/i;
+const RE_DECLARE = /\binputSupport\s*:\s*['"`](mobile|desktop|both)['"`]/gi;
 /** Cap on how much text the input scan reads, so huge files stay inside the time budget. */
 export const INPUT_SCAN_CAP = 2 * 1024 * 1024;
 
@@ -88,7 +88,12 @@ export function classifyInputSupport(js: string, tags: { name: string; attrs: Ma
   const desktop = signals.keyboard || signals.mouse;
   const detected: InputClass = mobile && desktop ? 'both' : mobile ? 'mobile' : desktop ? 'desktop' : 'unknown';
   // Same precedence as the runtime (cdn/boot.js, #34): Meshgrounds.declare() beats the meta tag.
-  const declared = asDeclared(RE_DECLARE.exec(code)?.[1]) ?? meta;
+  // boot.js keeps the LAST declare() call, so the static check does too.
+  // Comments are stripped first (string/regex-aware, linear; only when the key appears at all), so a
+  // commented-out declare() is ignored.
+  let lastDeclare: string | undefined;
+  if (code.includes('inputSupport')) for (const m of normalizeJs(code, true).matchAll(RE_DECLARE)) lastDeclare = m[1];
+  const declared = asDeclared(lastDeclare) ?? meta;
   const consistent = declared !== null && (detected === 'unknown'
     || (declared === 'mobile' && mobile) || (declared === 'desktop' && desktop) || (declared === 'both' && mobile && desktop));
   return consistent ? { class: declared!, detected, declared, source: 'declared', signals } : { class: detected, detected, declared, source: 'detected', signals };

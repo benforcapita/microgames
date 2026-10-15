@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { saveUploadedBundle, type BundleStorage } from './bundle-store.ts';
+import { ThumbnailUploadError, saveUploadedBundle, type BundleStorage } from './bundle-store.ts';
 
 const HTML = new Uint8Array([1, 2, 3]);
 const THUMB = new Uint8Array([4, 5]);
@@ -78,5 +78,67 @@ describe('orphaned bundle cleanup', () => {
     assert.equal(logged[0][1], returned);
     assert.match(String(logged[1][0]), /Failed to delete stored game bundle \(abc\/index\.html\)/);
     assert.equal(logged[1][1], thrown);
+  });
+
+  it('deletes index.html when the thumbnail upload fails', async () => {
+    const removed: string[][] = [];
+    let inserted = false;
+    const storage: BundleStorage = {
+      async upload(path) {
+        if (path.endsWith('thumb.png')) return { error: { message: 'thumb rejected' } };
+        return { error: null };
+      },
+      async remove(paths) {
+        removed.push(paths);
+        return { error: null };
+      },
+    };
+
+    await assert.rejects(
+      () => saveUploadedBundle({
+        objects: [
+          { path: 'abc/index.html', bytes: HTML, contentType: 'text/html; charset=utf-8' },
+          { path: 'abc/thumb.png', bytes: THUMB, contentType: 'image/png' },
+        ],
+        storage,
+        insert: async () => {
+          inserted = true;
+        },
+      }),
+      (err) => err instanceof ThumbnailUploadError && err.status === 503,
+    );
+
+    assert.equal(inserted, false);
+    assert.deepEqual(removed, [['abc/index.html']]);
+  });
+
+  it('deletes index.html when the thumbnail upload throws', async () => {
+    const removed: string[][] = [];
+    const storage: BundleStorage = {
+      async upload(path) {
+        if (path.endsWith('thumb.png')) throw new Error('storage down');
+        return { error: null };
+      },
+      async remove(paths) {
+        removed.push(paths);
+        return { error: null };
+      },
+    };
+
+    await assert.rejects(
+      () => saveUploadedBundle({
+        objects: [
+          { path: 'abc/index.html', bytes: HTML, contentType: 'text/html; charset=utf-8' },
+          { path: 'abc/thumb.png', bytes: THUMB, contentType: 'image/png' },
+        ],
+        storage,
+        insert: async () => {
+          throw new Error('insert should not run');
+        },
+      }),
+      (err) => err instanceof ThumbnailUploadError,
+    );
+
+    assert.deepEqual(removed, [['abc/index.html']]);
   });
 });
