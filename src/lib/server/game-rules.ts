@@ -124,3 +124,10 @@ export function compareByBayes(globalMean: number) {
     bayesianRating(b.avgRating, b.ratingCount, globalMean) - bayesianRating(a.avgRating, a.ratingCount, globalMean) ||
     b.ratingCount - a.ratingCount;
 }
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** RT-2 expand step: ratings.user_id mirrors voter when voter is an auth user id, else null. */
+export function ratingUserId(voter: string): string | null {
+  return UUID_RE.test(voter) ? voter.toLowerCase() : null;
+}

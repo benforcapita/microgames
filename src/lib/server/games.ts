@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import { GRADUATION } from './config';
 import { sql } from './db';
-import { BAYES_PRIOR_VOTES, assessHealth, clampDurationMs, clampFirstFrameMs, slugify, uniqueSlug, type HealthCheck } from './game-rules';
+import { BAYES_PRIOR_VOTES, assessHealth, clampDurationMs, clampFirstFrameMs, ratingUserId, slugify, uniqueSlug, type HealthCheck } from './game-rules';
 import { bucket } from './supabase';
 
 export { normalizeTags } from './game-rules';
@@ -179,8 +179,10 @@ export async function deleteGame(gameId: string, ownerId: string): Promise<boole
 
 export async function rateGame(gameId: string, voter: string, stars: number) {
   await sql`
-    insert into ratings (game_id, voter, stars) values (${gameId}, ${voter}, ${stars})
-    on conflict (game_id, voter) do update set stars = excluded.stars, created_at = now()`;
+    insert into ratings (game_id, voter, user_id, stars)
+    values (${gameId}, ${voter}, ${ratingUserId(voter)}, ${stars})
+    on conflict (game_id, voter) do update
+      set stars = excluded.stars, user_id = excluded.user_id, updated_at = now()`;
   await evaluateGraduation(gameId);
 }
 
