@@ -1,5 +1,8 @@
 // Runs the portal and the separate-origin game CDN together.
 import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
+
+if (existsSync('.env')) process.loadEnvFile('.env');
 
 const mode = process.argv[2] === 'start' ? 'start' : 'dev';
 const procs = [

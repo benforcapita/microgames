@@ -5,7 +5,7 @@ import { listGames } from '../../lib/server/games';
 import { compact } from '../../lib/format';
 
 const creator = Astro.params.creator ?? '';
-const games = listGames({ creator, sort: 'new', limit: 100 });
+const games = await listGames({ creator, sort: 'new', limit: 100 });
 if (!games.length) return Astro.rewrite('/404');
 const plays = games.reduce((n, g) => n + g.plays, 0);
 const live = games.filter((g) => g.stage === 'live').length;

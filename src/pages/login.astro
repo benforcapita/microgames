@@ -1,0 +1,72 @@
+---
+import Layout from '../layouts/Layout.astro';
+import { safeNext, withParams } from '../lib/server/auth';
+
+const p = Astro.url.searchParams;
+const next = safeNext(p.get('next'));
+if (Astro.locals.user) return Astro.redirect(next);
+
+const modes = { password: 'Log in', signup: 'Sign up', magic: 'Magic link' } as const;
+type Mode = keyof typeof modes;
+const mode: Mode = (p.get('mode') as Mode) in modes ? (p.get('mode') as Mode) : 'password';
+const error = p.get('error');
+const sent = p.get('sent');
+const email = p.get('email') ?? '';
+---
+
+<Layout title={modes[mode]}>
+  <section class="section wrap auth">
+    <div class="panel card">
+      <span class="eyebrow">Your Meshgrounds account</span>
+      <h1>{mode === 'signup' ? 'Join the grounds' : 'Welcome back'}</h1>
+      <nav class="chips" aria-label="Sign-in method">
+        {
+          (Object.keys(modes) as Mode[]).map((m) => (
+            <a class="chip" href={withParams('/login', { mode: m, next: next === '/' ? undefined : next })} aria-current={m === mode ? 'true' : 'false'}>
+              {modes[m]}
+            </a>
+          ))
+        }
+      </nav>
+
+      {error && <p class="msg bad" role="alert">{error}</p>}
+      {
+        sent ? (
+          <p class="msg good" role="status">
+            {sent === 'magic' ? 'Check your inbox. We sent you a sign-in link.' : 'Almost there. Confirm your email using the link we just sent.'}
+          </p>
+        ) : (
+          <form method="post" action="/api/auth/login" class="form">
+            <input type="hidden" name="mode" value={mode} />
+            <input type="hidden" name="next" value={next} />
+            <label>Email <input type="email" name="email" required autocomplete="email" value={email} /></label>
+            {
+              mode !== 'magic' && (
+                <label>
+                  Password {mode === 'signup' && <small>at least 8 characters</small>}
+                  <input type="password" name="password" required minlength="8" autocomplete={mode === 'signup' ? 'new-password' : 'current-password'} />
+                </label>
+              )
+            }
+            <button class="btn" type="submit">{mode === 'magic' ? 'Email me a link' : modes[mode]}</button>
+          </form>
+        )
+      }
+      <p class="muted small">
+        You need an account to upload games, rate them, and keep your saves across devices. Playing is always free and
+        needs no account.
+      </p>
+    </div>
+  </section>
+</Layout>
+
+<style>
+  .auth { display: grid; place-items: center; }
+  .card { width: min(440px, 100%); display: grid; gap: 1.1rem; padding: 2rem; }
+  .card h1 { font-size: 2.2rem; margin: 0; }
+  .form { display: grid; gap: 1rem; }
+  .msg { margin: 0; padding: 0.75rem 1rem; border-radius: 10px; font-size: 0.9rem; }
+  .bad { background: #ff5d5d1a; border: 1px solid #ff5d5d66; color: #ffb3b3; }
+  .good { background: #c4ff3d14; border: 1px solid #c4ff3d55; }
+  .small { font-size: 0.82rem; margin: 0; }
+</style>

@@ -6,9 +6,11 @@ import { listGames, platformStats } from '../lib/server/games';
 import { REVENUE } from '../lib/server/config';
 import { compact } from '../lib/format';
 
-const live = listGames({ stage: 'live', sort: 'top', limit: 8 });
-const fresh = listGames({ stage: 'proving', sort: 'new', limit: 4 });
-const stats = platformStats();
+const [live, fresh, stats] = await Promise.all([
+  listGames({ stage: 'live', sort: 'top', limit: 8 }),
+  listGames({ stage: 'proving', sort: 'new', limit: 4 }),
+  platformStats(),
+]);
 const hero = live[0];
 ---
 
