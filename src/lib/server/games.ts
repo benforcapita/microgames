@@ -1,16 +1,15 @@
 import crypto from 'node:crypto';
 import { GRADUATION } from './config';
 import { sql } from './db';
-import { BAYES_PRIOR_VOTES, CREATED_GAME_LOOKUP, PUBLIC_STAGES, assessHealth, canViewGame, visibleStages, clampDurationMs, clampFirstFrameMs, ratingUserId, slugify, uniqueSlug, type HealthCheck } from './game-rules';
+import { BAYES_PRIOR_VOTES, CREATED_GAME_LOOKUP, PUBLIC_STAGES, assessHealth, canViewGame, visibleStages, clampDurationMs, clampFirstFrameMs, ratingUserId, slugify, uniqueSlug, type HealthCheck, type Stage } from './game-rules';
+import { saveUploadedBundle } from './bundle-store';
 import { insertSessionStart, postgresSchemaClient } from './schema-rollout';
 import { bucket } from './supabase';
 
-export { normalizeTags } from './game-rules';
-export type { HealthCheck };
-
-import type { Stage } from './game-rules';
 export type { Stage };
 
+export { normalizeTags } from './game-rules';
+export type { HealthCheck };
 export interface Game {
   id: string;
   slug: string;
@@ -162,6 +161,8 @@ export interface NewGame {
   forkedFrom: string | null;
   html: Uint8Array;
   thumb?: { bytes: Uint8Array; ext: string; type: string };
+  /** New uploads stay pending until validation passes. Auto-publish is EF-1/EF-2, not this insert. */
+  stage: 'pending';
 }
 
 export async function createGame(input: NewGame): Promise<Game> {
@@ -170,18 +171,23 @@ export async function createGame(input: NewGame): Promise<Game> {
   const [clash] = await sql`select 1 from games where slug = ${base}`;
   const slug = uniqueSlug(input.title, Boolean(clash), id);
 
-  const upload = async (path: string, bytes: Uint8Array, contentType: string) => {
-    const { error } = await bucket().upload(path, bytes, { contentType, upsert: true });
-    if (error) throw new Error(`Storage upload failed: ${error.message}`);
-  };
-  await upload(`${id}/index.html`, input.html, 'text/html; charset=utf-8');
+  const stage = input.stage ?? 'pending';
   const thumb = input.thumb ? `thumb.${input.thumb.ext}` : null;
-  if (input.thumb && thumb) await upload(`${id}/${thumb}`, input.thumb.bytes, input.thumb.type);
-
-  await sql`
-    insert into games (id, slug, owner_id, creator, title, tagline, description, tags, license, forked_from, size_bytes, hue, thumb)
-    values (${id}, ${slug}, ${input.ownerId}, ${input.creator}, ${input.title}, ${input.tagline}, ${input.description},
-            ${input.tags}, ${input.license}, ${input.forkedFrom}, ${input.html.byteLength}, ${crypto.randomInt(0, 360)}, ${thumb})`;
+  const objects = [
+    { path: `${id}/index.html`, bytes: input.html, contentType: 'text/html; charset=utf-8' },
+    ...(input.thumb && thumb ? [{ path: `${id}/${thumb}`, bytes: input.thumb.bytes, contentType: input.thumb.type }] : []),
+  ];
+  await saveUploadedBundle({
+    objects,
+    storage: {
+      upload: (path, bytes, contentType) => bucket().upload(path, bytes, { contentType, upsert: true }),
+      remove: (paths) => bucket().remove(paths),
+    },
+    insert: () => sql`
+      insert into games (id, slug, owner_id, creator, title, tagline, description, tags, license, forked_from, size_bytes, hue, thumb, stage)
+      values (${id}, ${slug}, ${input.ownerId}, ${input.creator}, ${input.title}, ${input.tagline}, ${input.description},
+              ${input.tags}, ${input.license}, ${input.forkedFrom}, ${input.html.byteLength}, ${crypto.randomInt(0, 360)}, ${thumb}, ${stage})`,
+  });
   return (await getGame(id, CREATED_GAME_LOOKUP))!;
 }
 

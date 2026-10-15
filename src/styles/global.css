@@ -90,8 +90,9 @@ main { flex: 1; }
   color: var(--muted);
   white-space: nowrap;
 }
-.badge.live { color: var(--accent); border-color: #c4ff3d55; }
+.badge.live, .badge.pending { color: var(--accent); border-color: #c4ff3d55; }
 .badge.proving { color: var(--warn); border-color: #ffb34055; }
+.badge.rejected { color: var(--bad); border-color: #ff5d5d55; }
 .tag { color: var(--muted); text-decoration: none; font: 0.8rem var(--mono); }
 .tag:hover { color: var(--text); }
 
