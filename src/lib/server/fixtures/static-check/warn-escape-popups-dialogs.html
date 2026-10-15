@@ -1,0 +1,8 @@
+<!doctype html><html><body><canvas></canvas>
+<button onclick="window.open('https://example.com/shop')">Shop</button>
+<script>
+if (window.top !== window) { try { top.location.href = 'https://example.com'; } catch (e) {} }
+const name = prompt('Your name?');
+alert('Game over!');
+parent.document.title = 'hi';
+</script></body></html>
