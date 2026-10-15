@@ -21,6 +21,7 @@
   },
   "dependencies": {
     "@astrojs/node": "11.1.6",
+    "@astrojs/vercel": "11.0.14",
     "@supabase/ssr": "0.12.7",
     "@supabase/supabase-js": "2.117.3",
     "astro": "7.3.5",
