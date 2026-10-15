@@ -92,14 +92,15 @@ function httpPostRows(rows: PrivilegeRow[], role: string): PrivilegeRow[] {
   );
 }
 
-function assertOpenGap(rows: PrivilegeRow[]): void {
+function watchedGrantRows(rows: PrivilegeRow[]): PrivilegeRow[] {
+  const watched: PrivilegeRow[] = [];
   for (const role of closedRoles) {
     for (const [privilege, objectName] of openPrivileges) {
       const row = rows.find(
         (item) => item.role_name === role && item.privilege === privilege && item.object_name === objectName,
       );
       assert.ok(row, `missing ${role} ${privilege} ${objectName}\n${formatReport(rows)}`);
-      assert.equal(row.status, 'GAP', `${role} ${privilege} ${objectName} should still be granted`);
+      watched.push(row);
     }
   }
   // http_post's default ACL names anon and authenticated. PUBLIC is not on that
@@ -107,10 +108,22 @@ function assertOpenGap(rows: PrivilegeRow[]): void {
   for (const role of ['anon', 'authenticated'] as const) {
     const exec = httpPostRows(rows, role);
     assert.ok(exec.length >= 1, `missing ${role} EXECUTE net.http_post\n${formatReport(rows)}`);
-    for (const row of exec) {
-      assert.equal(row.status, 'GAP', `${role} EXECUTE ${row.object_name} should still be granted`);
-    }
+    watched.push(...exec);
   }
+  return watched;
+}
+
+// A fresh database is GAP on the privileges the migration cannot revoke.
+// A database where supabase_admin already ran the lockdown is PASS on every row.
+// Either state is valid. A mix is not.
+function privilegeState(rows: PrivilegeRow[]): 'gap' | 'pass' {
+  if (rows.every((row) => row.status === 'PASS')) return 'pass';
+  const watched = watchedGrantRows(rows);
+  assert.ok(
+    watched.every((row) => row.status === 'GAP'),
+    `expected post-migration GAP or locked-down PASS\n${formatReport(rows)}`,
+  );
+  return 'gap';
 }
 
 function assertLockdownPass(rows: PrivilegeRow[]): void {
@@ -136,6 +149,22 @@ async function withRole(appUrl: string, username: string): Promise<postgres.Sql>
   const url = new URL(appUrl);
   url.username = username;
   return postgres(url.toString(), { connect_timeout: 3, max: 1, idle_timeout: 1 });
+}
+
+function captureNotices(sql: postgres.Sql): { notices: string[]; stop: () => void } {
+  const notices: string[] = [];
+  const options = (sql as unknown as { options: { onnotice?: (notice: { message?: string }) => void } }).options;
+  const prev = options.onnotice;
+  options.onnotice = (notice) => {
+    if (notice?.message) notices.push(notice.message);
+    prev?.(notice);
+  };
+  return {
+    notices,
+    stop() {
+      options.onnotice = prev;
+    },
+  };
 }
 
 function hookHeader(headers: Record<string, string> | undefined): string | undefined {
@@ -176,7 +205,7 @@ async function assertDispatchSkipped(tx: Sql, id: string): Promise<void> {
 }
 
 describe('validate-game hook dispatch', { concurrency: false }, () => {
-  it('does not seed a url or hook secret, and leaves pg_net grants in place', async (t) => {
+  it('does not seed a url or hook secret, and accepts open or locked-down pg_net grants', async (t) => {
     const sql = await connect(t);
     if (!sql) return;
     try {
@@ -210,16 +239,12 @@ describe('validate-game hook dispatch', { concurrency: false }, () => {
       assert.equal(dispatch?.anon_login, false);
       assert.equal(dispatch?.auth_login, false);
 
-      // Post-migration state, untouched. The migration REVOKEs do not stick.
-      const migrated = await privilegeReport(sql);
-      assertOpenGap(migrated);
-
-      // Same script, current role (postgres). It must not throw, and it must
-      // not be able to clear the gap. Roll back so the assertion stays on the
-      // post-migration grants.
+      // Post-migration grants stay open (GAP). A database already locked down
+      // by supabase_admin is PASS. postgres cannot move either state.
+      const before = privilegeState(await privilegeReport(sql));
       await rollback(sql, async (tx) => {
         await tx.unsafe(lockdownSql);
-        assertOpenGap(await privilegeReport(tx));
+        assert.equal(privilegeState(await privilegeReport(tx)), before);
       });
 
       const admin = await withRole(dbUrl, 'supabase_admin');
@@ -294,6 +319,7 @@ describe('validate-game hook dispatch', { concurrency: false }, () => {
     if (!sql) return;
     const missing = gameId('nourl');
     const empty = gameId('emptyurl');
+    const captured = captureNotices(sql);
     try {
       await rollback(sql, async (tx) => {
         await setSecret(tx, proofSecret);
@@ -302,7 +328,16 @@ describe('validate-game hook dispatch', { concurrency: false }, () => {
         await setUrl(tx, '   ');
         await assertDispatchSkipped(tx, empty);
       });
+      assert.ok(
+        captured.notices.some((message) => message.includes('validate_game_url is not set')),
+        captured.notices.join('\n'),
+      );
+      assert.ok(
+        captured.notices.some((message) => message.includes('validate_game_url is blank (empty or whitespace only)')),
+        captured.notices.join('\n'),
+      );
     } finally {
+      captured.stop();
       await sql.end({ timeout: 1 });
     }
   });
