@@ -1,7 +1,7 @@
 import type { APIRoute } from 'astro';
 import { getGame, recordTelemetry, type TelemetryType } from '../../lib/server/games';
 
-const TYPES = new Set<TelemetryType>(['session_start', 'first_frame', 'start', 'complete', 'crash', 'heartbeat']);
+const TYPES = new Set<TelemetryType>(['session_start', 'first_frame', 'start', 'complete', 'crash', 'heartbeat', 'ready']);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 export const POST: APIRoute = async ({ request }) => {

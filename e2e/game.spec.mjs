@@ -28,9 +28,31 @@ test('seed game loads in the sandboxed iframe and sends telemetry', async ({ pag
   const frame = page.frameLocator('iframe.mg-frame');
   await expect(frame.locator('canvas').first()).toBeVisible({ timeout: 30_000 });
 
-  // Telemetry reached the portal API.
+  // Telemetry reached the portal API. Stack Tower never calls Meshgrounds.ready(),
+  // so the automatic first-frame event still arrives on its own.
   expect((await sessionStart).status()).toBe(204);
   expect((await firstFrame).status()).toBe(204);
+  const typesBeforeReady = events.filter((e) => e.gameId === GAME_ID).map((e) => e.type);
+  expect(typesBeforeReady).toContain('first_frame');
+  expect(typesBeforeReady).not.toContain('ready');
+
+  // Explicit ready() posts __MG_READY, which the portal records as ready telemetry. Once only.
+  const readyEv = waitTelemetry('ready');
+  const gameFrame = page.frames().find((f) => f.url().includes(`/g/${GAME_ID}/index.html`));
+  expect(gameFrame, 'game iframe').toBeTruthy();
+  await gameFrame.evaluate(() => {
+    const mg = window.Meshgrounds;
+    if (typeof mg?.ready !== 'function') throw new Error('Meshgrounds.ready is missing');
+    mg.ready();
+    mg.ready();
+  });
+  const readyRes = await readyEv;
+  expect(readyRes.status()).toBe(204);
+  const readyBody = readyRes.request().postDataJSON();
+  expect(readyBody.type).toBe('ready');
+  expect(readyBody.gameId).toBe(GAME_ID);
+  expect(readyBody.value).toEqual(expect.any(Number));
+  expect(readyBody.value).toBeGreaterThanOrEqual(0);
 
   // Input inside the game -> "start" telemetry.
   const startEv = waitTelemetry('start');
@@ -38,7 +60,9 @@ test('seed game loads in the sandboxed iframe and sends telemetry', async ({ pag
   expect((await startEv).status()).toBe(204);
 
   const types = events.filter((e) => e.gameId === GAME_ID).map((e) => e.type);
-  expect(types).toEqual(expect.arrayContaining(['session_start', 'first_frame', 'start']));
+  expect(types).toEqual(expect.arrayContaining(['session_start', 'first_frame', 'start', 'ready']));
+  expect(types.filter((t) => t === 'ready')).toHaveLength(1);
+  expect(types.filter((t) => t === 'first_frame')).toHaveLength(1);
   console.log(`telemetry events: ${types.join(', ')}`);
 
   await page.waitForTimeout(500);

@@ -189,7 +189,7 @@ export async function getUserRating(gameId: string, voter: string | undefined): 
   return row?.stars ?? null;
 }
 
-export type TelemetryType = 'session_start' | 'first_frame' | 'start' | 'complete' | 'crash' | 'heartbeat';
+export type TelemetryType = 'session_start' | 'first_frame' | 'start' | 'complete' | 'crash' | 'heartbeat' | 'ready';
 
 export async function recordTelemetry(sessionId: string, gameId: string, type: TelemetryType, value = 0) {
   const where = sql`where id = ${sessionId} and game_id = ${gameId}`;
@@ -199,6 +199,10 @@ export async function recordTelemetry(sessionId: string, gameId: string, type: T
       return;
     case 'first_frame':
       await sql`update sessions set first_frame_ms = ${clampFirstFrameMs(value)} ${where} and first_frame_ms is null`;
+      return;
+    case 'ready':
+      // Acknowledged only. sessions has no ready column, and this ticket does not migrate.
+      // first_frame_ms stays the automatic animation-frame metric.
       return;
     case 'start':
       await sql`update sessions set started = true ${where}`;

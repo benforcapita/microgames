@@ -22,7 +22,14 @@ export default defineConfig({
   timeout: 60_000,
   workers: 1,
   reporter: 'list',
-  use: { baseURL: WEB, browserName: 'chromium', headless: true, viewport: { width: 1280, height: 800 } },
+  use: {
+    baseURL: WEB,
+    browserName: 'chromium',
+    headless: true,
+    viewport: { width: 1280, height: 800 },
+    // Opaque-origin game iframes are out-of-process; this lets the test call into the frame.
+    launchOptions: { args: ['--disable-site-isolation-trials'] },
+  },
   // Playwright starts these and kills them (only these) when the run ends.
   webServer: [
     { command: 'node scripts/game-cdn.mjs', port: CDN_PORT, env, reuseExistingServer: false, timeout: 30_000 },
