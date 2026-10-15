@@ -1,7 +1,11 @@
 import crypto from 'node:crypto';
-import { sql } from './db';
-import { bucket } from './supabase';
 import { GRADUATION } from './config';
+import { sql } from './db';
+import { assessHealth, clampDurationMs, clampFirstFrameMs, slugify, uniqueSlug, type HealthCheck } from './game-rules';
+import { bucket } from './supabase';
+
+export { normalizeTags } from './game-rules';
+export type { HealthCheck };
 
 export type Stage = 'proving' | 'live';
 
@@ -129,13 +133,6 @@ export async function platformStats() {
   return row;
 }
 
-const slugify = (s: string) =>
-  s.toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'game';
-
-export function normalizeTags(raw: string): string[] {
-  return [...new Set(raw.split(/[,\s]+/).map((t) => slugify(t)).filter((t) => t && t !== 'game'))].slice(0, 6);
-}
-
 export interface NewGame {
   ownerId: string;
   creator: string;
@@ -151,9 +148,9 @@ export interface NewGame {
 
 export async function createGame(input: NewGame): Promise<Game> {
   const id = crypto.randomBytes(6).toString('base64url');
-  let slug = slugify(input.title);
-  const [clash] = await sql`select 1 from games where slug = ${slug}`;
-  if (clash) slug = `${slug}-${id.slice(0, 4).toLowerCase()}`;
+  const base = slugify(input.title);
+  const [clash] = await sql`select 1 from games where slug = ${base}`;
+  const slug = uniqueSlug(input.title, Boolean(clash), id);
 
   const upload = async (path: string, bytes: Uint8Array, contentType: string) => {
     const { error } = await bucket().upload(path, bytes, { contentType, upsert: true });
@@ -194,8 +191,6 @@ export async function getUserRating(gameId: string, voter: string | undefined): 
 
 export type TelemetryType = 'session_start' | 'first_frame' | 'start' | 'complete' | 'crash' | 'heartbeat';
 
-const MAX_SESSION_MS = 4 * 3600_000;
-
 export async function recordTelemetry(sessionId: string, gameId: string, type: TelemetryType, value = 0) {
   const where = sql`where id = ${sessionId} and game_id = ${gameId}`;
   switch (type) {
@@ -203,7 +198,7 @@ export async function recordTelemetry(sessionId: string, gameId: string, type: T
       await sql`insert into sessions (id, game_id) values (${sessionId}, ${gameId}) on conflict do nothing`;
       return;
     case 'first_frame':
-      await sql`update sessions set first_frame_ms = ${Math.max(0, Math.round(value))} ${where} and first_frame_ms is null`;
+      await sql`update sessions set first_frame_ms = ${clampFirstFrameMs(value)} ${where} and first_frame_ms is null`;
       return;
     case 'start':
       await sql`update sessions set started = true ${where}`;
@@ -215,20 +210,10 @@ export async function recordTelemetry(sessionId: string, gameId: string, type: T
       await sql`update sessions set crashed = true ${where}`;
       break;
     case 'heartbeat':
-      await sql`update sessions set duration_ms = greatest(duration_ms, ${Math.min(MAX_SESSION_MS, Math.max(0, Math.round(value)))}) ${where}`;
+      await sql`update sessions set duration_ms = greatest(duration_ms, ${clampDurationMs(value)}) ${where}`;
       break;
   }
   await evaluateGraduation(gameId);
-}
-
-export interface HealthCheck {
-  key: string;
-  label: string;
-  value: number | null;
-  target: number;
-  format: 'count' | 'pct' | 'sec' | 'stars';
-  comparator: 'gte' | 'lte';
-  pass: boolean;
 }
 
 export async function getHealth(gameId: string): Promise<{ checks: HealthCheck[]; eligible: boolean }> {
@@ -255,25 +240,16 @@ export async function getHealth(gameId: string): Promise<{ checks: HealthCheck[]
       (select count(*)::int from ratings where game_id = ${gameId}) as rating_count
     from sessions where game_id = ${gameId}`;
 
-  const check = (
-    key: string, label: string, value: number | null, target: number, format: HealthCheck['format'],
-    comparator: HealthCheck['comparator'] = 'gte', passOverride?: boolean,
-  ): HealthCheck => ({
-    key, label, value, target, format, comparator,
-    pass: passOverride ?? (value !== null && (comparator === 'gte' ? value >= target : value <= target)),
-  });
-
-  const checks = [
-    check('plays', 'Plays measured', s.plays, G.minPlays, 'count'),
-    check('first_frame', `First frame under ${G.maxFirstFrameMs / 1000}s`, s.ff_ok, G.minFirstFrameOkRate, 'pct'),
-    check('crash', 'Crash rate', s.crash_rate, G.maxCrashRate, 'pct', 'lte'),
-    check('start', 'Start rate', s.start_rate, G.minStartRate, 'pct'),
-    check('completion', 'Loop completion rate', s.completion_rate, G.minCompletionRate, 'pct'),
-    check('session', 'Median session', s.median_ms === null ? null : s.median_ms / 1000, G.minMedianSessionSec, 'sec'),
-    check('rating', `Community rating (${s.rating_count} votes)`, s.avg_rating, G.minAvgRating, 'stars', 'gte',
-      s.rating_count < G.minRatingsForRatingGate ? true : undefined),
-  ];
-  return { checks, eligible: checks.every((c) => c.pass) };
+  return assessHealth({
+    plays: s.plays,
+    ffOk: s.ff_ok,
+    crashRate: s.crash_rate,
+    startRate: s.start_rate,
+    completionRate: s.completion_rate,
+    medianMs: s.median_ms,
+    avgRating: s.avg_rating,
+    ratingCount: s.rating_count,
+  }, G);
 }
 
 export async function evaluateGraduation(gameId: string): Promise<boolean> {
