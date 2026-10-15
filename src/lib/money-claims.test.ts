@@ -37,6 +37,26 @@ describe('findMoneyClaims', () => {
     for (const t of ['Make real money with your games', 'your share of ad revenue', 'Creators get paid for every play', 'weekly payouts', 'Monetise your games today'])
       assert.ok(findMoneyClaims(t).length >= 1, t);
   });
+  it('FINDER-3: flags the new number-free phrases', () => {
+    for (const t of [
+      'Upload games for free money.',
+      'Earnings are paid out every Friday.',
+      'Join our revenue share program.',
+      'We share ad revenue with every creator.',
+      'We pay creators for great games.',
+      'You will be paid when your game graduates.',
+      'Creators earn from every session.',
+      'Cash out your earnings any time.',
+      'Profit from your side project.',
+      'A new income stream for indie devs.',
+      'Forks send royalties back to you.',
+      'Built-in monetization for every game.',
+    ]) assert.ok(findMoneyClaims(t).length + findPaymentPromises(t).length >= 1, t);
+  });
+  it('FINDER-3: negations are not claims', () => {
+    for (const t of ['We will never monetize your data.', 'There is no monetize button.', "We don't take royalties.", 'Not monetization-ready yet.'])
+      assert.equal(findMoneyClaims(t).length + findPaymentPromises(t).length, 0, t);
+  });
   it('keeps the clawback line and monetized status copy unflagged', () => {
     for (const t of [
       'Invalid traffic is removed and payouts are clawed back.',
@@ -65,7 +85,9 @@ describe('findPaymentPromises', () => {
 // The rendered pages need a database, so this scans the page sources (the static copy) plus README/docs.
 // scripts/smoke.mjs runs the same check against the rendered / and /creators on local Supabase.
 describe('no creator revenue numbers in site copy', () => {
-  const files = ['src/pages/index.astro', 'src/pages/creators.astro', 'src/pages/upload.astro', 'src/pages/play/[slug].astro', 'src/layouts/Layout.astro', 'README.md', 'public/EXCHANGE_SDK.md', ...fs.readdirSync('docs', { recursive: true }).map(String).filter((f) => f.endsWith('.md')).map((f) => `docs/${f}`)];
+  const under = (dir: string, ext: string) => fs.readdirSync(dir, { recursive: true }).map(String).filter((f) => f.endsWith(ext)).map((f) => `${dir}/${f}`);
+  // FINDER-3: every page, component and layout, the site_content code defaults (content.ts), README and docs.
+  const files = [...under('src/pages', '.astro'), ...under('src/components', '.astro'), ...under('src/layouts', '.astro'), 'src/lib/server/content.ts', 'README.md', 'public/EXCHANGE_SDK.md', ...under('docs', '.md')];
   for (const f of files) {
     it(f, () => {
       const text = fs.readFileSync(f, 'utf8');

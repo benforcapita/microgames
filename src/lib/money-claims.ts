@@ -20,7 +20,28 @@ const NUMBER_FREE: RegExp[] = [
   /\b(?:(?:daily|weekly|monthly|instant|regular|guaranteed)\s+payouts?(?:\s+(?:to|for)\s+(?:creators|you|developers))?|payouts?\s+(?:to|for)\s+(?:creators|you|developers))\b/gi,
   // monetize as an active verb
   /\b(?:monetize|monetise|monetizes|monetises|monetizing|monetising)\b/gi,
+  // FINDER-3: more number-free money claims
+  /\bfree\s+money\b/gi,
+  /\bpaid\s+out\b/gi,
+  /\brevenue\s+share\b/gi, // not "revenue sharing" (the planned, non-binding wording)
+  /\bwe\s+share\s+(?:the\s+)?(?:ad|advertising)\s+revenue\b/gi,
+  /\bwe\s+pay\s+(?:our\s+)?(?:creators|developers|you)\b/gi,
+  /\byou(?:'ll|\s+will)\s+(?:be|get)\s+paid\b/gi,
+  /\bcreators\s+(?:can\s+|will\s+)?earn\b/gi,
+  /\bcash\s+out\s+(?:your\s+)?(?:earnings|revenue|money)\b/gi,
+  /\bprofit\s+from\b/gi,
+  /\bincome\b/gi,
+  /\broyalt(?:y|ies)\b/gi,
+  /\bmoneti[sz]ation\b/gi,
 ];
+
+// FINDER-3: a number-free claim is not a claim when negated by one of the 3 words before it
+// ("We will never monetize your data", "no monetize button", "we don't take royalties").
+const NEGATION = /\b(?:never|no|not|don'?t|won'?t|without|cannot|can'?t)\b/i;
+const negated = (flat: string, i: number) => {
+  const before = flat.slice(Math.max(0, i - 60), i).split(/\s+/).filter(Boolean).slice(-3).join(' ');
+  return NEGATION.test(before) || /\bnot\s*$/i.test(before);
+};
 
 export function findMoneyClaims(text: string): string[] {
   const flat = text.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ');
@@ -32,7 +53,8 @@ export function findMoneyClaims(text: string): string[] {
     const money = /^\$|usd|dollar/i.test(m[0]);
     if ((money ? MONEY_TOPIC : TOPIC).test(around)) {
       hits.push(around.trim());
-      matchedRanges.push([i, i + m[0].length]);
+      // The whole reported window counts as matched, so a topic word inside it (e.g. '10% royalty') isn't reported twice.
+      matchedRanges.push([Math.max(0, i - WINDOW), i + m[0].length + WINDOW]);
     }
   }
   for (const re of NUMBER_FREE) {
@@ -40,6 +62,7 @@ export function findMoneyClaims(text: string): string[] {
       const i = m.index ?? 0;
       const end = i + m[0].length;
       if (matchedRanges.some(([s, e]) => Math.max(s, i) < Math.min(e, end))) continue;
+      if (negated(flat, i)) continue;
       matchedRanges.push([i, end]);
       const around = flat.slice(Math.max(0, i - WINDOW), end + WINDOW);
       hits.push(around.trim());
