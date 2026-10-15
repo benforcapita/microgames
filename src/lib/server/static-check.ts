@@ -61,7 +61,7 @@ const asDeclared = (v: string | undefined | null): 'mobile' | 'desktop' | 'both'
  * mobile signals: touch events, pointer events, on-screen controls. desktop signals: key events, mouse-only events
  * (mousedown/up/move, wheel). click is neutral: it fires on tap too.
  * Mobile + desktop -> 'both'; keys/mouse only -> 'desktop'; mobile only -> 'mobile'; nothing -> 'unknown'.
- * A declaration (meta tag or Meshgrounds.declare({ inputSupport })) wins when the code is consistent with it
+ * A declaration (Meshgrounds.declare({ inputSupport }), else the meta tag; same order as boot.js) wins when the code is consistent with it
  * (its signals are present, or the code shows no input signals at all).
  */
 export function classifyInputSupport(js: string, tags: { name: string; attrs: Map<string, string> }[]): InputSupportReport {
@@ -87,7 +87,8 @@ export function classifyInputSupport(js: string, tags: { name: string; attrs: Ma
   const mobile = signals.touch || signals.pointer || signals.controls;
   const desktop = signals.keyboard || signals.mouse;
   const detected: InputClass = mobile && desktop ? 'both' : mobile ? 'mobile' : desktop ? 'desktop' : 'unknown';
-  const declared = meta ?? asDeclared(RE_DECLARE.exec(code)?.[1]);
+  // Same precedence as the runtime (cdn/boot.js, #34): Meshgrounds.declare() beats the meta tag.
+  const declared = asDeclared(RE_DECLARE.exec(code)?.[1]) ?? meta;
   const consistent = declared !== null && (detected === 'unknown'
     || (declared === 'mobile' && mobile) || (declared === 'desktop' && desktop) || (declared === 'both' && mobile && desktop));
   return consistent ? { class: declared!, detected, declared, source: 'declared', signals } : { class: detected, detected, declared, source: 'detected', signals };

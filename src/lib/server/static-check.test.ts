@@ -128,7 +128,10 @@ describe('static-check scales linearly on large valid JS (acorn-bound)', () => {
   }
 });
 
-describe('static-check is linear on adversarial input (5 MB, < 500 ms each)', () => {
+// Bound is deliberately loose (4x the ~500 ms target) so slow or busy CI machines don't flake: a quadratic
+// scan over 5 MB takes minutes, so this still catches any non-linear regression.
+const ADVERSARIAL_MS = 2000;
+describe('static-check is linear on adversarial input (5 MB, < ADVERSARIAL_MS each)', () => {
   const FIVE_MB = STATIC_LIMITS.maxBytes;
   const fill = (prefix: string, unit: string, suffix = '') => {
     const body = unit.repeat(Math.floor((FIVE_MB - prefix.length - suffix.length) / unit.length));
@@ -156,7 +159,7 @@ describe('static-check is linear on adversarial input (5 MB, < 500 ms each)', ()
       const t0 = performance.now();
       analyzeGame(input);
       const ms = performance.now() - t0;
-      assert.ok(ms < 500, `${name}: ${ms.toFixed(0)} ms`);
+      assert.ok(ms < ADVERSARIAL_MS, `${name}: ${ms.toFixed(0)} ms (limit ${ADVERSARIAL_MS})`);
     });
   }
 });
