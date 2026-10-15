@@ -5,13 +5,37 @@
 --
 -- pg_net ships as a shared library on the Supabase image. Enable it only when
 -- the extension row is missing. Never drop it and never ALTER EXTENSION.
--- pg_cron is optional. The URL and the stuck timeout live in private.settings
--- (local defaults). The hook secret lives in Vault. Nothing here is a hosted key.
+-- The function URL is private.settings key validate_game_url. This file does
+-- not insert one. The hook secret is Vault name validate_game_hook_secret.
+-- This file does not create that secret and does not store a service-role key.
 -- Do not apply this file to hosted Supabase from a laptop or an agent.
 
 -- Install into extensions, matching the other Supabase extensions. IF NOT EXISTS
 -- leaves an already-installed shared pg_net row where it is.
 create extension if not exists pg_net with schema extensions;
+
+-- The queue is granted to PUBLIC, so anon and authenticated can read it until
+-- that grant is removed. http_post is granted to those roles by name. Revoke
+-- both. Do not drop or alter the extension; postgres and service_role keep
+-- execute on http_post.
+do $$
+declare
+  fn regprocedure;
+begin
+  if to_regclass('net.http_request_queue') is not null then
+    revoke select on table net.http_request_queue from public, anon, authenticated;
+  end if;
+
+  for fn in
+    select p.oid::regprocedure
+    from pg_proc p
+    join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'net'
+      and p.proname = 'http_post'
+  loop
+    execute format('revoke execute on function %s from anon, authenticated', fn);
+  end loop;
+end $$;
 
 -- pg_cron is optional. If the shared library is not preloaded, keep the
 -- re-callable sweeper and skip the schedule below.
@@ -28,8 +52,8 @@ create schema if not exists private;
 revoke all on schema private from public, anon, authenticated;
 grant usage on schema private to postgres, service_role;
 
--- Non-secret local defaults. Operators change these in place; the inserts do
--- not overwrite a value that is already there.
+-- Non-secret sweeper defaults. validate_game_url is not inserted: an empty or
+-- missing URL makes dispatch a no-op. Operators set that key in place.
 create table private.settings (
   key text primary key,
   value text not null
@@ -39,7 +63,6 @@ alter table private.settings enable row level security;
 revoke all on table private.settings from public, anon, authenticated;
 
 insert into private.settings (key, value) values
-  ('validate_game_url', 'http://host.docker.internal:54321/functions/v1/validate-game'),
   ('validate_game_stuck_after', '2 minutes'),
   ('validate_game_max_attempts', '8')
 on conflict (key) do nothing;
@@ -82,27 +105,11 @@ end $$;
 -- (20261015120700). The sweeper inserts the rejection row.
 -- This migration does not create the table.
 
--- Local default hook secret. Stored encrypted in Vault; the request builder
--- reads it back at call time. Replace on a hosted project with
--- vault.update_secret before enabling the hook. Not a project API key.
-do $$
-begin
-  if to_regclass('vault.secrets') is null then
-    raise exception 'vault is not installed; refusing to embed a hook secret in the function body';
-  end if;
-
-  if not exists (select 1 from vault.secrets where name = 'validate_game_hook_secret') then
-    perform vault.create_secret(
-      'local-dev-validate-game',
-      'validate_game_hook_secret',
-      'Local default for the validate-game database hook. Replace via vault.update_secret on hosted projects.'
-    );
-  end if;
-end $$;
-
 -- Posts one game id to validate-game. Returns the pg_net request id, or null
--- when the call could not be queued. Never raises into the caller's transaction:
--- a down function must not block saving the game.
+-- when the call could not be queued. A missing URL, a missing Vault secret, or
+-- the known default secret skips the call and does not reject the game.
+-- Never raises into the caller's transaction: a down function must not block
+-- saving the game.
 create or replace function private.dispatch_validate_game(p_game_id text, p_reason text)
 returns bigint
 language plpgsql
@@ -113,15 +120,26 @@ declare
   v_url text;
   v_secret text;
   v_request_id bigint;
+  v_known_default constant text := 'local-dev-validate-game';
 begin
   select value into v_url from private.settings where key = 'validate_game_url';
+  if v_url is null or length(btrim(v_url)) = 0 then
+    raise warning 'validate-game dispatch skipped for %: validate_game_url is unset', p_game_id;
+    return null;
+  end if;
+
   select decrypted_secret into v_secret
   from vault.decrypted_secrets
   where name = 'validate_game_hook_secret'
   limit 1;
 
-  if v_url is null or length(btrim(v_url)) = 0 or v_secret is null or length(btrim(v_secret)) = 0 then
-    raise warning 'validate-game dispatch skipped for %: missing settings url or vault secret', p_game_id;
+  if v_secret is null or length(btrim(v_secret)) = 0 then
+    raise warning 'validate-game dispatch skipped for %: vault secret validate_game_hook_secret is missing', p_game_id;
+    return null;
+  end if;
+
+  if btrim(v_secret) = v_known_default then
+    raise warning 'validate-game dispatch skipped for %: vault secret validate_game_hook_secret is the known default', p_game_id;
     return null;
   end if;
 
