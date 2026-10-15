@@ -75,6 +75,13 @@ async function revokeNetGrantsAsOwner(appUrl: string): Promise<void> {
   }
 }
 
+function hookHeader(headers: Record<string, string> | undefined): string | undefined {
+  if (!headers) return undefined;
+  return Object.fromEntries(
+    Object.entries(headers).map(([key, value]) => [key.toLowerCase(), value]),
+  )['x-meshgrounds-hook'];
+}
+
 async function queued(tx: Sql, id: string): Promise<number> {
   const [row] = await tx<{ n: number }[]>`
     select count(*)::int as n
@@ -253,6 +260,61 @@ describe('validate-game hook dispatch', { concurrency: false }, () => {
         assert.equal(headers['x-meshgrounds-hook'], proofSecret);
         assert.notEqual(headers['x-meshgrounds-hook'], knownDefault);
         assert.equal(headers['content-type'], 'application/json');
+      });
+    } finally {
+      await sql.end({ timeout: 1 });
+    }
+  });
+
+  it('uses the rotated Vault secret on the next dispatch without a redeploy', async (t) => {
+    const sql = await connect(t);
+    if (!sql) return;
+    const id = gameId('rotate');
+    const before = 'ef2-rotate-before';
+    const after = 'ef2-rotate-after';
+    try {
+      await rollback(sql, async (tx) => {
+        await setUrl(tx, proofUrl);
+        await setSecret(tx, before);
+        await tx`
+          insert into public.games (id, slug, creator, title, stage)
+          values (${id}, ${id}, 'stub', 'Rotate secret', 'pending')
+        `;
+        const [first] = await tx<{ headers: Record<string, string> }[]>`
+          select headers
+          from net.http_request_queue
+          where position(${id} in convert_from(body, 'UTF8')) > 0
+            and position('stage_pending' in convert_from(body, 'UTF8')) > 0
+          order by id desc
+          limit 1
+        `;
+        assert.equal(hookHeader(first?.headers), before);
+
+        const [secret] = await tx<{ id: string }[]>`
+          select id from vault.secrets where name = 'validate_game_hook_secret'
+        `;
+        assert.ok(secret?.id);
+        await tx`select vault.update_secret(${secret.id}::uuid, ${after})`;
+        await tx`select private.dispatch_validate_game(${id}, 'rotate')`;
+
+        const [second] = await tx<{ headers: Record<string, string> }[]>`
+          select headers
+          from net.http_request_queue
+          where position(${id} in convert_from(body, 'UTF8')) > 0
+            and position('rotate' in convert_from(body, 'UTF8')) > 0
+          order by id desc
+          limit 1
+        `;
+        assert.equal(hookHeader(second?.headers), after);
+        const [stillFirst] = await tx<{ headers: Record<string, string> }[]>`
+          select headers
+          from net.http_request_queue
+          where position(${id} in convert_from(body, 'UTF8')) > 0
+            and position('stage_pending' in convert_from(body, 'UTF8')) > 0
+          order by id desc
+          limit 1
+        `;
+        assert.equal(hookHeader(stillFirst?.headers), before);
       });
     } finally {
       await sql.end({ timeout: 1 });

@@ -14,12 +14,13 @@
 -- leaves an already-installed shared pg_net row where it is.
 create extension if not exists pg_net with schema extensions;
 
--- Take anon and authenticated off the queue and off http_post. pg_net is owned
--- by supabase_admin, so a non-superuser postgres role's REVOKE warns and does
--- not change those grants (Supabase platform constraint). Keep the statements:
--- they take effect when the migration role can revoke. Do not drop or alter
--- the extension. Grant postgres and service_role SELECT first so a real revoke
--- of the PUBLIC grant does not remove the only path those roles have.
+-- Take anon and authenticated off the queue and off http_post. On hosted,
+-- REVOKE as postgres may only warn, because supabase_admin owns the pg_net
+-- grants. That risk is accepted: anon and authenticated cannot run raw SQL,
+-- and net is not in the PostgREST exposed schemas. Before and after apply,
+-- confirm net is absent from Settings > API (pgrst.db_schemas). Do not drop
+-- or alter the extension. Grant postgres and service_role SELECT first so a
+-- real revoke of the PUBLIC grant does not remove the only path those roles have.
 do $$
 declare
   fn regprocedure;
@@ -136,6 +137,9 @@ begin
     return null;
   end if;
 
+  -- Read on every dispatch. Rotate without redeploying: vault.update_secret
+  -- on validate_game_hook_secret, and set EF-1's VALIDATE_GAME_HOOK_SECRET to
+  -- the same value. The next call picks up the new secret.
   select decrypted_secret into v_secret
   from vault.decrypted_secrets
   where name = 'validate_game_hook_secret'
