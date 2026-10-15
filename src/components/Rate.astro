@@ -21,7 +21,7 @@ const loggedIn = !!Astro.locals.user;
     }
   </div>
   <button type="button" class="clear" data-clear hidden={!loggedIn || mine === null} aria-label="Clear my rating">Clear</button>
-  <span class="summary mono muted">{avg === null ? 'No ratings yet' : `${avg.toFixed(1)} · ${count} votes`}</span>
+  <span class="summary mono muted" aria-live="polite">{avg === null ? 'No ratings yet' : `${avg.toFixed(1)} · ${count} votes`}</span>
 </div>
 
 <style>
@@ -50,6 +50,7 @@ const loggedIn = !!Astro.locals.user;
 <script>
   const summary = (d: { avgRating: number | null; ratingCount: number }, note: string) =>
     `${d.avgRating === null ? 'No ratings yet' : `${d.avgRating.toFixed(1)} · ${d.ratingCount} votes`} · ${note}`;
+  // Stars only change after the server saved (or cleared) the rating.
   const paint = (root: HTMLElement, stars: number) => {
     root.querySelectorAll<HTMLButtonElement>('button[data-stars]').forEach((b) => {
       const n = Number(b.dataset.stars);
@@ -59,6 +60,12 @@ const loggedIn = !!Astro.locals.user;
     root.dataset.mine = stars ? String(stars) : '';
     root.querySelector<HTMLButtonElement>('[data-clear]')!.hidden = !stars;
   };
+  const errorText = async (res: Response) =>
+    res.status === 403
+      ? "You can't rate your own game."
+      : res.status === 429
+        ? 'Too many ratings, try again later.'
+        : (await res.text()) || 'Could not save your rating.';
 
   document.addEventListener('click', async (e) => {
     const target = e.target as HTMLElement;
@@ -66,18 +73,17 @@ const loggedIn = !!Astro.locals.user;
     const clear = target.closest<HTMLButtonElement>('[data-rate] button[data-clear]');
     if (!btn && !clear) return;
     const root = (btn ?? clear)!.closest<HTMLElement>('[data-rate]')!;
+    const out = root.querySelector('.summary');
     const url = `/api/games/${root.dataset.rate}/rate`;
-    if (clear) {
-      const res = await fetch(url, { method: 'DELETE' });
-      if (!res.ok) return;
-      paint(root, 0);
-      root.querySelector('.summary')!.textContent = summary(await res.json(), 'rating cleared');
+    const res = clear
+      ? await fetch(url, { method: 'DELETE' })
+      : await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ stars: Number(btn!.dataset.stars) }) });
+    if (!res.ok) {
+      if (out) out.textContent = await errorText(res);
       return;
     }
-    const stars = Number(btn!.dataset.stars);
-    const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ stars }) });
-    if (!res.ok) return;
-    paint(root, stars);
-    root.querySelector('.summary')!.textContent = summary(await res.json(), 'thanks!');
+    const data = (await res.json()) as { avgRating: number | null; ratingCount: number; stars: number | null };
+    paint(root, data.stars ?? 0);
+    if (out) out.textContent = summary(data, clear ? 'rating cleared' : 'thanks!');
   });
 </script>

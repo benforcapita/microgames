@@ -1,5 +1,5 @@
 import type { APIRoute } from 'astro';
-import { MG_UID_COOKIE, secureCookie, newUid, parseUid, ratingGuard } from '../../../../lib/server/abuse';
+import { MG_UID_COOKIE, authorizeRating, newUid, parseUid, ratingGuard, secureCookie } from '../../../../lib/server/abuse';
 import { getGame, rateGame, unrateGame } from '../../../../lib/server/games';
 
 export const POST: APIRoute = async ({ params, request, locals, cookies, url }) => {
@@ -23,9 +23,9 @@ export const POST: APIRoute = async ({ params, request, locals, cookies, url }) 
   const { stars } = (await request.json().catch(() => ({}))) as { stars?: unknown };
   const n = Number(stars);
   if (!Number.isInteger(n) || n < 1 || n > 5) return new Response('stars must be 1-5', { status: 400 });
-  if (!ratingGuard.allow(uid, game.id, locals.user.id)) {
-    return new Response('Already rated from this device', { status: 409 });
-  }
+
+  const decision = authorizeRating(game.ownerId, locals.user.id, uid, game.id);
+  if (!decision.ok) return new Response(decision.message, { status: decision.status });
 
   await rateGame(game.id, locals.user.id, n);
   const updated = (await getGame(game.id))!;
@@ -33,7 +33,7 @@ export const POST: APIRoute = async ({ params, request, locals, cookies, url }) 
 };
 
 // Remove my rating. Idempotent: 200 even if I had not rated; `removed` says whether anything changed.
-// Respects the same per-device guard as POST (#9): a device bound to another account for this game gets 409,
+// Respects the same per-device guard as POST (#9/#14): a device bound to another account for this game gets 409,
 // so one browser can't be used to clear ratings across accounts. No cookie is minted here.
 export const DELETE: APIRoute = async ({ params, locals, cookies }) => {
   if (!locals.user) return new Response('Log in to rate games', { status: 401 });

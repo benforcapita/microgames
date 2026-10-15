@@ -12,6 +12,7 @@ const [live, fresh, stats] = await Promise.all([
   platformStats(),
 ]);
 const hero = live[0];
+const loggedIn = !!Astro.locals.user;
 ---
 
 <Layout>
@@ -47,6 +48,30 @@ const hero = live[0];
       )
     }
   </section>
+
+  {
+    !loggedIn && (
+      <section class="section wrap" id="signup" aria-labelledby="signup-title">
+        <div class="signup panel">
+          <div>
+            <span class="eyebrow">Free account</span>
+            <h2 id="signup-title">Sign up free to keep playing.</h2>
+            <p class="muted">Your first game is on us. A free account takes seconds and unlocks the rest of the grounds.</p>
+            <div class="row">
+              <a class="btn" href="/login?mode=signup">Sign up free</a>
+              <a class="btn ghost" href="/login">I have an account</a>
+            </div>
+          </div>
+          <ul class="perks">
+            <li><b>Unlimited play</b><span class="muted">Every live and Proving Grounds game, as often as you like.</span></li>
+            <li><b>Ratings</b><span class="muted">Your stars decide which games graduate and start earning.</span></li>
+            <li><b>Cloud saves</b><span class="muted">Progress follows you across devices.</span></li>
+            <li><b>Uploading</b><span class="muted">Ship your own single-file game and earn ad revenue.</span></li>
+          </ul>
+        </div>
+      </section>
+    )
+  }
 
   <section class="section wrap">
     <div class="spread head">
@@ -135,8 +160,13 @@ const hero = live[0];
     font: 700 1.1rem var(--mono);
     color: var(--accent);
   }
+  .signup { display: grid; grid-template-columns: 1fr 1fr; gap: 2.5rem; padding: 2.5rem; border-color: #c4ff3d55; }
+  .signup h2 { margin: 0.4rem 0 0.6rem; }
+  .perks { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem; }
+  .perks li { display: grid; gap: 0.25rem; }
   @media (max-width: 860px) {
-    .hero, .creators { grid-template-columns: 1fr; }
+    .perks { grid-template-columns: 1fr; }
+    .hero, .creators, .signup { grid-template-columns: 1fr; }
     .feature { transform: none; }
   }
 </style>
