@@ -18,17 +18,44 @@ test('parseArgs reads flags and options', () => {
 });
 
 test('no env -> local stack from supabase status', () => {
-  assert.deepEqual(resolveTarget({}, a()), { mode: 'local' });
+  assert.deepEqual(resolveTarget({}, a()), { mode: 'local', db: 'pg' });
 });
 
 test('partial env is an error, never a silent local fallback', () => {
-  for (const k of Object.keys(remote)) {
+  for (const k of ['PUBLIC_SUPABASE_URL', 'SUPABASE_SECRET_KEY']) {
     const env: Record<string, string> = { ...remote };
     delete env[k];
     const r = resolveTarget(env, a('--allow-remote', '--yes'));
     assert.match(err(r), new RegExp(`missing required env: ${k}`));
   }
   assert.match(err(resolveTarget({ DATABASE_URL: remote.DATABASE_URL }, a())), /PUBLIC_SUPABASE_URL, SUPABASE_SECRET_KEY/);
+  assert.match(err(resolveTarget({ PUBLIC_SUPABASE_URL: remote.PUBLIC_SUPABASE_URL }, a('--allow-remote', '--yes'))), /SUPABASE_SECRET_KEY/);
+});
+
+test('DATABASE_URL absent -> REST mode (default); present -> direct Postgres unless --rest', () => {
+  const { DATABASE_URL: _db, ...restEnv } = remote;
+  const r = resolveTarget(restEnv, a('--allow-remote', '--yes'));
+  assert.equal(r.mode, 'remote');
+  assert.equal(r.db, 'rest');
+  assert.equal(r.env?.DATABASE_URL, undefined);
+  assert.equal(resolveTarget(remote, a('--allow-remote', '--yes')).db, 'pg');
+  const forced = resolveTarget(remote, a('--allow-remote', '--yes', '--rest'));
+  assert.equal(forced.db, 'rest');
+  assert.equal(forced.env?.DATABASE_URL, undefined, 'REST mode never carries a DB URL');
+  const { DATABASE_URL: _l, ...localRest } = local;
+  assert.deepEqual([resolveTarget(localRest, a()).mode, resolveTarget(localRest, a()).db], ['env', 'rest']);
+  assert.deepEqual(resolveTarget({}, a('--rest')), { mode: 'local', db: 'rest' });
+  assert.deepEqual(resolveTarget({}, a()), { mode: 'local', db: 'pg' });
+});
+
+test('REST mode keeps the remote guards', () => {
+  const { DATABASE_URL: _db, ...restEnv } = remote;
+  assert.match(err(resolveTarget(restEnv, a())), /--allow-remote/);
+  assert.equal(resolveTarget(restEnv, a('--allow-remote')).needConfirm, true);
+  assert.equal(resolveTarget(restEnv, a('--allow-remote')).ref, 'abcdefghijklmnop');
+  assert.match(err(resolveTarget(restEnv, a('--force', '--all', '--allow-remote'))), /--yes/);
+  // A remote DATABASE_URL is irrelevant (and ignored) in REST mode; a remote one in pg mode is remote.
+  assert.equal(resolveTarget({ ...local, DATABASE_URL: remote.DATABASE_URL }, a('--rest')).mode, 'env');
 });
 
 test('full loopback env is used as-is', () => {
