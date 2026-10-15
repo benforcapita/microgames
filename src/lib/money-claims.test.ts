@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { describe, it } from 'node:test';
-import { findMoneyClaims } from './money-claims.ts';
+import { findMoneyClaims, findPaymentPromises } from './money-claims.ts';
 
 describe('findMoneyClaims', () => {
   it('flags % and $ amounts near revenue/payout/royalty (the old copy)', () => {
@@ -16,12 +16,27 @@ describe('findMoneyClaims', () => {
   });
 });
 
+describe('findPaymentPromises', () => {
+  it('flags binding payment promises (the old copy)', () => {
+    for (const t of ['Ship one file. Get played. Get paid.', 'Clear the bar and you start earning', 'graduate and start earning', 'the creator starts earning.', 'upload your game and earn ad revenue.', 'and then we pay you your share.', 'Rewarded video earns several times more than banners.'])
+      assert.equal(findPaymentPromises(t).length, 1, t);
+  });
+  it('allows future, non-binding wording and fraud rules', () => {
+    assert.deepEqual(findPaymentPromises('Revenue sharing for creators is planned; details to come.'), []);
+    assert.deepEqual(findPaymentPromises('Invalid traffic is removed and payouts are clawed back.'), []);
+  });
+});
+
 // The rendered pages need a database, so this scans the page sources (the static copy) plus README/docs.
 // scripts/smoke.mjs runs the same check against the rendered / and /creators on local Supabase.
 describe('no creator revenue numbers in site copy', () => {
   const files = ['src/pages/index.astro', 'src/pages/creators.astro', 'src/pages/upload.astro', 'src/pages/play/[slug].astro', 'src/layouts/Layout.astro', 'README.md', 'public/EXCHANGE_SDK.md', ...fs.readdirSync('docs', { recursive: true }).map(String).filter((f) => f.endsWith('.md')).map((f) => `docs/${f}`)];
   for (const f of files) {
-    it(f, () => assert.deepEqual(findMoneyClaims(fs.readFileSync(f, 'utf8')), []));
+    it(f, () => {
+      const text = fs.readFileSync(f, 'utf8');
+      assert.deepEqual(findMoneyClaims(text), []);
+      assert.deepEqual(findPaymentPromises(text), []);
+    });
   }
   it('config no longer exports REVENUE', () => {
     assert.doesNotMatch(fs.readFileSync('src/lib/server/config.ts', 'utf8'), /REVENUE|creatorShare|forkRoyalty|minPayout/);

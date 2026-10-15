@@ -14,3 +14,11 @@ export function findMoneyClaims(text: string): string[] {
   }
   return hits;
 }
+
+// PAY-1: binding payment promises. Future, non-binding wording ("Revenue sharing for creators is planned") is fine.
+const PROMISE = /\b(?:get(?:ting)? paid|(?:start|starts|begin|begins) earning|earn(?:s|ing)? (?:ad )?revenue|we(?:'ll| will)? pay you|pay you your share|your revenue share|earns several times more)\b/gi;
+
+export function findPaymentPromises(text: string): string[] {
+  const flat = text.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ');
+  return [...flat.matchAll(PROMISE)].map((m) => m[0]);
+}
