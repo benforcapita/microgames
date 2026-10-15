@@ -1,7 +1,7 @@
 ---
 import Layout from '../layouts/Layout.astro';
 import { getGame } from '../lib/server/games';
-import { REVENUE, UPLOAD } from '../lib/server/config';
+import { UPLOAD } from '../lib/server/config';
 
 const { profile } = Astro.locals;
 if (!profile) return Astro.redirect(`/login?mode=signup&next=${encodeURIComponent(Astro.url.pathname + Astro.url.search)}`);
@@ -23,7 +23,7 @@ const forkable = fork && fork.license !== 'All rights reserved' ? fork : null;
         forkable && (
           <div class="panel fork">
             Grab the <a href={`/play/${forkable.slug}`}>original</a>'s source, remix it, and upload your version.
-            When your fork earns, {Math.round(REVENUE.forkRoyalty * 100)}% of your share goes to @{forkable.creator}.
+            Your fork credits @{forkable.creator} as the original creator.
           </div>
         )
       }
