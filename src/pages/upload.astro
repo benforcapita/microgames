@@ -17,7 +17,7 @@ const forkable = fork && fork.license !== 'All rights reserved' ? fork : null;
       <h1>{forkable ? `Fork ${forkable.title}` : 'Upload a game'}</h1>
       <p class="muted">
         One self-contained <code>.html</code> file, up to {UPLOAD.maxHtmlBytes / 1024 / 1024} MB. Load Three.js from a CDN
-        such as jsDelivr, unpkg or esm.sh. The game goes live in the Proving Grounds straight away.
+        such as jsDelivr, unpkg or esm.sh. The game stays private while validation runs, then publishes to the Proving Grounds on its own if it passes.
       </p>
       {
         forkable && (
@@ -77,7 +77,7 @@ const forkable = fork && fork.license !== 'All rights reserved' ? fork : null;
         <span><input type="checkbox" name="agree" required /> I confirm this game contains no unlicensed copyrighted art, music
         or characters, and no voice clones of real people. <a href="/creators#rules">Content rules</a></span>
       </label>
-      <button class="btn" type="submit">Publish to the Proving Grounds</button>
+      <button class="btn" type="submit">Submit for validation</button>
     </form>
   </section>
 </Layout>
@@ -235,7 +235,7 @@ const forkable = fork && fork.license !== 'All rights reserved' ? fork : null;
       errors.scrollIntoView({ behavior: 'smooth', block: 'center' });
     } finally {
       btn.disabled = false;
-      btn.textContent = 'Publish to the Proving Grounds';
+      btn.textContent = 'Submit for validation';
     }
   });
 </script>

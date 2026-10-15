@@ -9,25 +9,13 @@
 import fs from 'node:fs';
 import { frameAncestors, matchEmbedder, parseOriginList } from './frame-ancestors.mjs';
 import { verifyPreviewToken } from './preview-token.mjs';
+import { gameCsp } from './csp.mjs';
 
 const BOOT = fs.readFileSync(new URL('./boot.js', import.meta.url), 'utf8');
 export const PUBLIC_STAGES = new Set(['proving', 'live']);
 
-const LIB_HOSTS = 'https://cdn.jsdelivr.net https://unpkg.com https://esm.sh https://cdnjs.cloudflare.com https://ga.jspm.io';
-const gameCsp = (ancestors) => [
-  'sandbox allow-scripts allow-pointer-lock',
-  "default-src 'none'",
-  `script-src 'unsafe-inline' 'unsafe-eval' blob: ${LIB_HOSTS}`,
-  `style-src 'unsafe-inline' ${LIB_HOSTS} https://fonts.googleapis.com`,
-  `font-src data: ${LIB_HOSTS} https://fonts.gstatic.com`,
-  `img-src data: blob: ${LIB_HOSTS}`,
-  'media-src data: blob:',
-  `connect-src data: blob: ${LIB_HOSTS}`,
-  'worker-src blob:',
-  "form-action 'none'",
-  "base-uri 'none'",
-  `frame-ancestors ${ancestors}`,
-].join('; ');
+// CSP sources live in ./csp.mjs (shared with the upload static analyzer).
+
 
 const ID_RE = /^[A-Za-z0-9_-]{6,16}$/;
 const FILE_RE = /^(index\.html|thumb(-[a-z0-9]{4,24})?\.(png|jpg|webp))$/;

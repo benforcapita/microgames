@@ -15,8 +15,13 @@
 // Telemetry: every /api/telemetry request from the capture browser is intercepted and aborted, so captures
 // never create session rows. The first_frame event is read from the intercepted request.
 // Connection: with none of PUBLIC_SUPABASE_URL / DATABASE_URL / SUPABASE_SECRET_KEY set, the LOCAL stack from
-// `supabase status`. If any is set, all three are required (no fallback). A non-loopback target needs
-// --allow-remote AND typing the project ref at the prompt (or --yes).
+// `supabase status`. If any is set, PUBLIC_SUPABASE_URL + SUPABASE_SECRET_KEY are required (no fallback).
+//   DATABASE_URL set      direct Postgres for the games table (needs port 5432/6543)
+//   DATABASE_URL absent   REST mode (also forced with --rest): every read and the conditional update go through
+//                         supabase-js/PostgREST over HTTPS; Storage is HTTPS in both modes. REST mode captures
+//                         through a minimal local player page (same sandboxed CDN iframe) instead of the portal,
+//                         which itself needs Postgres.
+// A non-loopback target needs --allow-remote AND typing the project ref at the prompt (or --yes).
 import { spawn, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -28,6 +33,8 @@ import { chromium } from '@playwright/test';
 import { createClient } from '@supabase/supabase-js';
 import { localSupabaseEnv } from './lib/local-supabase.mjs';
 import { blankVerdict, parseArgs, resolveTarget, thumbKey } from './lib/thumbs.mjs';
+import { pgStore, restStore } from './lib/thumb-store.mjs';
+import http from 'node:http';
 import { validateThumb } from '../src/lib/server/upload.ts';
 
 const log = (...a) => console.log('[thumbs]', ...a);
@@ -39,6 +46,8 @@ if (target.error) die(target.error);
 let sb;
 if (target.mode === 'local') sb = localSupabaseEnv();
 else sb = target.env;
+if (target.db === 'rest') delete sb.DATABASE_URL; // REST mode never opens a Postgres connection
+log(`games table via ${target.db === 'rest' ? `REST (PostgREST over ${new URL(sb.PUBLIC_SUPABASE_URL).protocol.replace(':', '')})` : 'direct Postgres'}`);
 if (target.mode === 'remote') {
   log(`REMOTE target: project ${target.ref}${args.dryRun ? ' (dry run: read-only)' : ''}`);
   if (target.needConfirm) {
@@ -59,35 +68,52 @@ const env = {
   MG_CDN_PORT: String(CDN_PORT), MG_CDN_ORIGIN: CDN, MG_WEB_ORIGINS: `${WEB} http://localhost:${WEB_PORT}`,
 };
 
-const sql = postgres(sb.DATABASE_URL, { prepare: false, onnotice: () => {} });
-const bucket = createClient(sb.PUBLIC_SUPABASE_URL, sb.SUPABASE_SECRET_KEY, { auth: { persistSession: false } }).storage.from('games');
+const client = createClient(sb.PUBLIC_SUPABASE_URL, sb.SUPABASE_SECRET_KEY, { auth: { persistSession: false } });
+const bucket = client.storage.from('games');
+const store = target.db === 'rest' ? restStore(client) : pgStore(postgres(sb.DATABASE_URL, { prepare: false, onnotice: () => {} }));
 
 const ids = args.ids ?? (args.all ? null : JSON.parse(fs.readFileSync('seed/games.json', 'utf8')).map((g) => g.id));
-const games = await sql`
-  select id, slug, title, thumb from games
-  ${ids ? sql`where id in ${sql(ids)} or slug in ${sql(ids)}` : sql``}
-  order by created_at`;
+const games = await store.list(ids);
 const todo = games.filter((g) => args.force || !g.thumb);
 for (const g of games) if (!todo.includes(g)) log(`skip ${g.id} (${g.title}): already has ${g.thumb}`);
 if (ids) for (const id of ids) if (!games.some((g) => g.id === id || g.slug === id)) log(`not found: ${id}`);
 if (!todo.length) {
   log(`nothing to do (${games.length} checked${args.force ? '' : '; use --force to overwrite'})`);
-  await sql.end();
+  await store.end();
   process.exit(0);
 }
 const outDir = args.out ?? (args.dryRun ? fs.mkdtempSync(path.join(os.tmpdir(), 'mg-thumbs-dry-')) : undefined);
 if (outDir) fs.mkdirSync(outDir, { recursive: true });
 if (args.dryRun) log(`DRY RUN: captures go to ${outDir}; no Storage uploads, no DB writes`);
 
-if (!fs.existsSync('dist/server/entry.mjs') || args.build) {
+const usePortal = target.db === 'pg';
+if (usePortal && (!fs.existsSync('dist/server/entry.mjs') || args.build)) {
   log('building portal…');
   execFileSync('npx', ['astro', 'build'], { stdio: ['ignore', 'ignore', 'inherit'], env });
 }
 const procs = [];
-const stop = () => procs.forEach((p) => p.exitCode === null && p.kill('SIGTERM'));
+let harness;
+const stop = () => { procs.forEach((p) => p.exitCode === null && p.kill('SIGTERM')); harness?.close(); };
 process.on('exit', stop);
 for (const s of ['SIGINT', 'SIGTERM']) process.on(s, () => { stop(); process.exit(130); });
-for (const [name, file] of [['game-cdn', 'scripts/game-cdn.mjs'], ['portal', 'dist/server/entry.mjs']]) {
+if (!usePortal) {
+  // Minimal player page on the "portal" origin: the same sandboxed, opaque-origin CDN iframe the portal uses,
+  // pinned to 1280x720. It has no telemetry at all; it only records the game's first-frame message.
+  harness = http.createServer((req, res) => {
+    const u = new URL(req.url, WEB);
+    if (u.pathname === '/login') return res.end('ok');
+    const id = u.pathname.match(/^\/capture\/([A-Za-z0-9_-]{6,16})$/)?.[1];
+    if (!id) { res.statusCode = 404; return res.end(); }
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.end(`<!doctype html><html><body style="margin:0;background:#000">
+<iframe class="mg-frame" sandbox="allow-scripts allow-pointer-lock" allow="autoplay; gamepad" referrerpolicy="no-referrer"
+  style="position:fixed;inset:0 auto auto 0;width:1280px;height:720px;border:0"
+  src="${CDN}/g/${id}/index.html?embed=${encodeURIComponent(WEB)}#mgs=%7B%7D"></iframe>
+<script>addEventListener('message', (e) => { if (e.data && e.data.type === '__MG_FIRST_FRAME') window.__mgFirstFrame = true; });</script>
+</body></html>`);
+  }).listen(WEB_PORT, '127.0.0.1');
+}
+for (const [name, file] of usePortal ? [['game-cdn', 'scripts/game-cdn.mjs'], ['portal', 'dist/server/entry.mjs']] : [['game-cdn', 'scripts/game-cdn.mjs']]) {
   const p = spawn(process.execPath, [file], { env, stdio: ['ignore', 'ignore', 'pipe'] });
   p.stderr.on('data', (d) => !/ExperimentalWarning|trace-warnings/.test(d) && process.stderr.write(`[${name}] ${d}`));
   procs.push(p);
@@ -128,13 +154,18 @@ try {
         if (body?.type === 'first_frame' && body?.gameId === g.id) onFirstFrame();
         return route.abort();
       });
-      await page.goto(`${WEB}/play/${g.slug}`);
-      await page.locator('.launch').click();
-      // Pin the game frame to exactly 1280x720 at the top-left so the screenshot is the game only.
-      await page.locator('iframe.mg-frame').evaluate((f) => {
-        Object.assign(f.style, { position: 'fixed', inset: '0 auto auto 0', width: '1280px', height: '720px', zIndex: '2147483647', border: '0', borderRadius: '0' });
-      });
-      await firstFrame;
+      if (usePortal) {
+        await page.goto(`${WEB}/play/${g.slug}`);
+        await page.locator('.launch').click();
+        // Pin the game frame to exactly 1280x720 at the top-left so the screenshot is the game only.
+        await page.locator('iframe.mg-frame').evaluate((f) => {
+          Object.assign(f.style, { position: 'fixed', inset: '0 auto auto 0', width: '1280px', height: '720px', zIndex: '2147483647', border: '0', borderRadius: '0' });
+        });
+        await firstFrame;
+      } else {
+        await page.goto(`${WEB}/capture/${g.id}`);
+        await page.waitForFunction(() => window.__mgFirstFrame === true, null, { timeout: 20_000 });
+      }
       await page.waitForTimeout(args.settleMs);
       let shot = await shoot(page);
       if (shot.blank) {
@@ -161,11 +192,9 @@ try {
       }
       const { error } = await bucket.upload(`${g.id}/${key}`, shot.webp, { contentType: 'image/webp', upsert: false });
       if (error) throw new Error(`upload failed, DB untouched: ${error.message}`);
-      const [row] = await sql`
-        update games set thumb = ${key}
-        where id = ${g.id} and thumb is not distinct from ${g.thumb}
-        returning id`;
-      if (!row) {
+      // Compare-and-set, only after the upload succeeded (pg: `is not distinct from`; REST: eq/is filter).
+      const won = await store.setThumb(g.id, g.thumb, key);
+      if (!won) {
         await bucket.remove([`${g.id}/${key}`]);
         result.raced.push(g);
         console.error(`[thumbs] RACED ${g.id} (${g.title}): thumb changed during capture; kept the other value, removed ${key}`);
@@ -185,7 +214,7 @@ try {
 } finally {
   await browser.close();
   stop();
-  await sql.end();
+  await store.end();
 }
 const names = (l) => (l.length ? ` [${l.map((g) => g.id).join(', ')}]` : '');
 log(`done${args.dryRun ? ' (dry run, nothing written)' : ''}: ${result.captured.length} ${args.dryRun ? 'would be uploaded' : 'captured'}, ` +
