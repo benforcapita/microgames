@@ -129,5 +129,9 @@ describe('PV-1: every list surface uses the predicate (no scattered stage filter
     assert.match(play, /listGames\(\{ creator: game\.creator, limit: 5, device \}\)/);
     assert.match(play, /isListable\(parentGame\)/);
     assert.match(read('../../layouts/Layout.astro'), /noindex && <meta name="robots" content="noindex, nofollow" \/>/);
+    const me = read('../../pages/me.astro');
+    assert.match(me, /const NO_STORE = 'private, no-store';/);
+    assert.match(me, /Astro\.response\.headers\.set\('Cache-Control', NO_STORE\)/);
+    assert.match(me, /const r = Astro\.redirect\('\/login\?next=\/me'\);\s*r\.headers\.set\('Cache-Control', NO_STORE\);\s*return r;/);
   });
 });

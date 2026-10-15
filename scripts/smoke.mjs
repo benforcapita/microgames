@@ -99,6 +99,7 @@ async function check(label, url, want, { method = 'GET', body, json, form, auth 
   return res;
 }
 const expectLoc = (re) => (r) => (re.test(r.headers.get('location') ?? '') ? '' : `! unexpected location`);
+const expectCacheControl = (val) => (r) => (r.headers.get('cache-control') === val ? '' : `! unexpected cache-control: ${r.headers.get('cache-control')}`);
 
 const seed = JSON.parse(fs.readFileSync('seed/games.json', 'utf8'));
 const game = seed[0];
@@ -122,7 +123,7 @@ try {
   for (const c of new Set(seed.map((g) => g.creator))) await check(`/u/${c}`, `${WEB}/u/${c}`, 200, { auth: false });
 
   console.log('--- signed-out guards');
-  await check('/me', `${WEB}/me`, 302, { auth: false, verify: expectLoc(/^\/login/) });
+  await check('/me (signed out)', `${WEB}/me`, 302, { auth: false, verify: async (r) => (await expectLoc(/^\/login/)(r)) || expectCacheControl('private, no-store')(r) });
   await check('/onboarding', `${WEB}/onboarding`, 302, { auth: false, verify: expectLoc(/^\/login/) });
   await check('/upload', `${WEB}/upload`, 302, { auth: false, verify: expectLoc(/^\/login/) });
   await check(`/api/saves/${game.id}`, `${WEB}/api/saves/${game.id}`, 401, { auth: false });
@@ -133,7 +134,7 @@ try {
   await check('/onboarding (signed in, no handle)', `${WEB}/onboarding`, 200);
   await check('/me (no handle -> onboarding)', `${WEB}/me`, 302, { verify: expectLoc(/^\/onboarding/) });
   await check('/api/profile (pick handle)', `${WEB}/api/profile`, 303, { method: 'POST', form: { handle, next: '/me' }, verify: expectLoc(/^\/me$/) });
-  await check('/me', `${WEB}/me`, 200);
+  await check('/me', `${WEB}/me`, 200, { verify: expectCacheControl('private, no-store') });
   await check('/upload', `${WEB}/upload`, 200);
   await check(`/u/${handle} (no games yet)`, `${WEB}/u/${handle}`, 404);
   await check('/api/auth/logout', `${WEB}/api/auth/logout`, 303, { method: 'POST', verify: expectLoc(/^\/$/) });
@@ -142,7 +143,7 @@ try {
   await check('/api/auth/login (magic link)', `${WEB}/api/auth/login`, 303, { method: 'POST', auth: false, form: { mode: 'magic', email, next: '/' }, verify: expectLoc(/sent=magic/) });
   await check('/auth/callback (no code)', `${WEB}/auth/callback`, 303, { auth: false, verify: expectLoc(/^\/login\?.*error=/) });
   await check('/api/auth/login (sign in)', `${WEB}/api/auth/login`, 303, { method: 'POST', form: { mode: 'password', email, password, next: '/me' }, verify: expectLoc(/^\/me$/) });
-  await check('/me (signed in)', `${WEB}/me`, 200);
+  await check('/me (signed in)', `${WEB}/me`, 200, { verify: expectCacheControl('private, no-store') });
 
   console.log('--- saves');
   const items = { best: '42', smoke: email };
