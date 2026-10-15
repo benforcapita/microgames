@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import { GRADUATION } from './config';
 import { sql } from './db';
 import { assessHealth, clampDurationMs, clampFirstFrameMs, slugify, uniqueSlug, type HealthCheck } from './game-rules';
+import { insertSessionStart, postgresSchemaClient } from './schema-rollout';
 import { bucket } from './supabase';
 
 export { normalizeTags } from './game-rules';
@@ -201,11 +202,7 @@ export async function recordTelemetry(
   const where = sql`where id = ${sessionId} and game_id = ${gameId}`;
   switch (type) {
     case 'session_start':
-      // Subquery drops an unknown id (deleted account, stale JWT) to null so the play still records.
-      await sql`
-        insert into sessions (id, game_id, user_id)
-        values (${sessionId}, ${gameId}, (select id from auth.users where id = ${userId}))
-        on conflict do nothing`;
+      await insertSessionStart(postgresSchemaClient(sql), { sessionId, gameId, userId });
       return;
     case 'first_frame': {
       const ms = clampFirstFrameMs(value);
