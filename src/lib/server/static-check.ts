@@ -455,6 +455,13 @@ function unescapeAt(code: string, i: number): [string, number] {
     const v = hexVal(code.slice(i + 2, i + 6));
     return Number.isNaN(v) ? ['u', i + 2] : [String.fromCharCode(v), i + 6];
   }
+  if (c >= '0' && c <= '7') {
+    // Legacy octal escape (sloppy-mode strings): \150 = 'h'. Up to 3 digits from 0-3, up to 2 from 4-7.
+    const max = c <= '3' ? 3 : 2;
+    let j = i + 1;
+    while (j < i + 1 + max && code[j] >= '0' && code[j] <= '7') j++;
+    return [String.fromCharCode(parseInt(code.slice(i + 1, j), 8)), j];
+  }
   if (c === '\r' || c === '\n' || c === '\u2028' || c === '\u2029') return ['', i + 2]; // line continuation
   const simple: Record<string, string> = { n: '\n', t: '\t', r: '\r', b: '\b', f: '\f', v: '\v', '0': '\0' };
   return [simple[c] ?? c, i + 2];
