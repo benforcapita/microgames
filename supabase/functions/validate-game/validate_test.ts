@@ -1,7 +1,7 @@
 // deno test --config supabase/functions/validate-game/deno.json --allow-read supabase/functions/validate-game/
 import { assertEquals } from 'jsr:@std/assert@1';
 import { stageAfterValidation, type Stage } from '../../../src/lib/server/game-rules.ts';
-import { validateGame, type Store, type ValidationRow } from './validate.ts';
+import { GAME_ID_RE, validateGame, type Store, type ValidationRow } from './validate.ts';
 
 const FIX = new URL('../../../src/lib/server/fixtures/static-check/', import.meta.url);
 const fixture = (name: string) => Deno.readFile(new URL(name, FIX));
@@ -91,4 +91,27 @@ Deno.test('reused verdict on a non-pending game still never flips the stage', as
   m.games.g1.stage = 'proving'; // e.g. manually restored
   const r = await validateGame(m.store, 'g1');
   assertEquals([r.body.reused, r.body.stage, r.body.moved, m.games.g1.stage], [true, 'proving', undefined, 'proving']);
+});
+
+for (const id of ['pe-nd_01', 'ab-cd-ef', 'ab_cd_ef']) {
+  Deno.test(`base64url id ${id} is accepted and validated`, async () => {
+    const m = memStore({ [id]: { stage: 'pending', bundle: await fixture('good-minimal-canvas.html') } });
+    const r = await validateGame(m.store, id);
+    assertEquals([r.httpStatus, r.body.stage, r.body.gameId], [200, 'proving', id]);
+  });
+}
+
+Deno.test('ids with "-" pass the id check', () => {
+  for (const id of ['-', 'a-b', '-abc', 'abc-', 'pe-nd01']) assertEquals(GAME_ID_RE.test(id), true, id);
+});
+
+Deno.test('ids with "_" pass the id check', () => {
+  for (const id of ['_', 'a_b', '_abc', 'abc_', 'pend_01']) assertEquals(GAME_ID_RE.test(id), true, id);
+});
+
+Deno.test('malformed ids are still a 400', async () => {
+  const m = memStore({});
+  for (const id of ['', 'a/b', 'a.b', 'a b', '../x', 'a%2Fb', 'x'.repeat(33), 'ünï']) {
+    assertEquals((await validateGame(m.store, id)).httpStatus, 400, JSON.stringify(id));
+  }
 });

@@ -49,8 +49,11 @@ export function statusFromReport(report: StaticReport): ValidationStatus {
   return report.status === 'fail' ? 'failed' : 'passed'; // warnings still publish
 }
 
+/** Game ids are base64url (createGame uses randomBytes(6).toString('base64url')), so - and _ are valid. */
+export const GAME_ID_RE = /^[A-Za-z0-9_-]{1,32}$/;
+
 export async function validateGame(store: Store, gameId: string): Promise<ValidateResult> {
-  if (!/^[a-z0-9]{1,32}$/i.test(gameId)) return { httpStatus: 400, body: { error: 'invalid gameId' } };
+  if (!GAME_ID_RE.test(gameId)) return { httpStatus: 400, body: { error: 'invalid gameId' } };
   const stage = await store.gameStage(gameId);
   if (!stage) return { httpStatus: 404, body: { error: 'game not found' } };
   const bytes = await store.bundle(gameId);
