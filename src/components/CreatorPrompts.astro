@@ -1,0 +1,199 @@
+---
+import { CREATOR_PROMPTS } from '../lib/creator-prompts';
+---
+
+<div class="panel prompts">
+  <span class="eyebrow">Creator prompts</span>
+  <p class="muted">
+    Prepare or QA your game against the Meshgrounds runtime contract v1 (<code>docs/RUNTIME-CONTRACT.md</code>).
+  </p>
+
+  <div class="prompts-list">
+    {
+      CREATOR_PROMPTS.map((prompt) => (
+        <div class="prompt-item" data-prompt={prompt.id}>
+          <h3>{prompt.title}</h3>
+          <details>
+            <summary>Show prompt</summary>
+            <pre><code>{prompt.text}</code></pre>
+          </details>
+          <div class="prompt-actions">
+            <button
+              type="button"
+              class="btn sm"
+              data-copy={prompt.id}
+              aria-label={`Copy Prompt ${prompt.id.toUpperCase()} to clipboard`}
+            >
+              Copy prompt
+            </button>
+            <span role="status" aria-live="polite" class="copy-status muted"></span>
+          </div>
+        </div>
+      ))
+    }
+  </div>
+</div>
+
+<style>
+  .prompts {
+    display: grid;
+    gap: 1rem;
+  }
+  .prompts p {
+    margin: 0;
+  }
+  .prompts-list {
+    display: grid;
+    gap: 1.25rem;
+  }
+  .prompt-item {
+    display: grid;
+    gap: 0.6rem;
+  }
+  .prompt-item h3 {
+    margin: 0;
+    font-size: 1rem;
+  }
+  details {
+    display: grid;
+    gap: 0.5rem;
+  }
+  summary {
+    cursor: pointer;
+    font-weight: 600;
+    color: var(--accent);
+    font-size: 0.85rem;
+  }
+  summary:hover {
+    text-decoration: underline;
+  }
+  pre {
+    max-height: 16rem;
+    overflow: auto;
+    white-space: pre-wrap;
+    font-size: small;
+    margin: 0;
+    padding: 0.75rem;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    word-break: break-word;
+  }
+  pre code {
+    background: none;
+    border: 0;
+    padding: 0;
+    white-space: pre-wrap;
+    font-size: small;
+  }
+  .prompt-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+  }
+  .copy-status {
+    font-size: 0.82rem;
+  }
+</style>
+
+<script>
+  const timeouts = new WeakMap<HTMLButtonElement, ReturnType<typeof setTimeout>>();
+
+  document.querySelectorAll<HTMLButtonElement>('button[data-copy]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      try {
+        const promptId = btn.getAttribute('data-copy');
+        const item = btn.closest('.prompt-item') || btn.closest('[data-prompt]');
+        const code = item?.querySelector('code') || document.querySelector(`[data-prompt="${promptId}"] code`);
+        const text = code?.textContent ?? '';
+        const details = item?.querySelector('details') || document.querySelector<HTMLDetailsElement>(`[data-prompt="${promptId}"] details`);
+        const pre = item?.querySelector('pre') || document.querySelector<HTMLPreElement>(`[data-prompt="${promptId}"] pre`);
+        const liveRegion = item?.querySelector<HTMLElement>('[role="status"]')
+          || (btn.nextElementSibling as HTMLElement | null)
+          || btn.parentElement?.querySelector<HTMLElement>('[role="status"]');
+
+        let copied = false;
+
+        if (typeof window !== 'undefined' && window.isSecureContext && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+          try {
+            await navigator.clipboard.writeText(text);
+            copied = true;
+          } catch {
+            copied = false;
+          }
+        }
+
+        if (!copied) {
+          try {
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.setAttribute('readonly', '');
+            ta.style.position = 'fixed';
+            ta.style.top = '0';
+            ta.style.left = '-9999px';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.focus();
+            ta.select();
+            copied = document.execCommand('copy');
+            document.body.removeChild(ta);
+          } catch {
+            copied = false;
+          }
+        }
+
+        const existingTimer = timeouts.get(btn);
+        if (existingTimer) {
+          clearTimeout(existingTimer);
+          timeouts.delete(btn);
+        }
+
+        if (copied) {
+          const promptLabel = promptId ? `Prompt ${promptId.toUpperCase()}` : 'Prompt';
+          btn.textContent = 'Copied';
+          if (liveRegion) {
+            liveRegion.textContent = `${promptLabel} copied to clipboard`;
+          }
+          const t = setTimeout(() => {
+            btn.textContent = 'Copy prompt';
+            if (liveRegion) {
+              liveRegion.textContent = '';
+            }
+            timeouts.delete(btn);
+          }, 2000);
+          timeouts.set(btn, t);
+        } else {
+          if (details) {
+            details.open = true;
+          }
+          if (pre) {
+            try {
+              const selection = window.getSelection();
+              if (selection) {
+                const range = document.createRange();
+                range.selectNodeContents(pre);
+                selection.removeAllRanges();
+                selection.addRange(range);
+              }
+            } catch {}
+          }
+          btn.textContent = 'Press Ctrl+C / ⌘C to copy';
+          if (liveRegion) {
+            liveRegion.textContent = 'Press Ctrl+C / ⌘C to copy';
+          }
+          const t = setTimeout(() => {
+            btn.textContent = 'Copy prompt';
+            if (liveRegion) {
+              liveRegion.textContent = '';
+            }
+            timeouts.delete(btn);
+          }, 3000);
+          timeouts.set(btn, t);
+        }
+      } catch {
+        // Never throw
+      }
+    });
+  });
+</script>

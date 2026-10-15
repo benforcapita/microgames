@@ -115,3 +115,15 @@ Deno.test('malformed ids are still a 400', async () => {
     assertEquals((await validateGame(m.store, id)).httpStatus, 400, JSON.stringify(id));
   }
 });
+
+Deno.test('IS-2: the recorded report carries inputSupport (seed games) and the result echoes the class', async () => {
+  const seed = (f: string) => Deno.readFile(new URL(`../../../seed/games/${f}`, import.meta.url));
+  for (const [file, want] of [['neon-lanes.html', 'both'], ['stack-tower.html', 'both'], ['prism-pop.html', 'mobile']] as const) {
+    const { store } = memStore({ g1: { stage: 'pending', bundle: await seed(file) } });
+    let reported: unknown;
+    const rec = store.recordValidation;
+    store.recordValidation = (input) => { reported = input.report.inputSupport?.class; return rec(input); };
+    const r = await validateGame(store, 'g1');
+    assertEquals([file, reported, r.body.inputSupport, r.body.stage], [file, want, want, 'proving']);
+  }
+});

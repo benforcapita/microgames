@@ -3,11 +3,12 @@ import { GRADUATION } from './config';
 import { sql } from './db';
 import { BAYES_PRIOR_VOTES, CREATED_GAME_LOOKUP, PUBLIC_STAGES, assessHealth, canViewGame, visibleStages, clampDurationMs, clampFirstFrameMs, ratingUserId, slugify, uniqueSlug, type HealthCheck, type Stage } from './game-rules';
 import { saveUploadedBundle } from './bundle-store';
-import { filterForDevice, normalizeInputSupport, readWithInputSupport, type DeviceKind, type InputSupport } from './device';
+import { filterForDevice, readWithInputSupport, type DeviceKind } from './device';
 import { insertSessionStart, postgresSchemaClient } from './schema-rollout';
 import { bucket } from './supabase';
+import { toInputSupport, type InputSupport } from '../input-support';
 
-export type { Stage };
+export type { Stage, InputSupport };
 
 export { normalizeTags } from './game-rules';
 export type { HealthCheck };
@@ -26,7 +27,7 @@ export interface Game {
   sizeBytes: number;
   hue: number;
   thumb: string | null;
-  /** IS-1 column. Missing or unrecognized values are `unknown` (still shown on mobile). */
+  /** IS-1: 'mobile' | 'desktop' | 'both' | 'unknown' (declared by the game or detected by the static check). */
   inputSupport: InputSupport;
   createdAt: number;
   graduatedAt: number | null;
@@ -50,7 +51,7 @@ interface GameRow {
   size_bytes: number;
   hue: number;
   thumb: string | null;
-  input_support?: string | null;
+  input_support: string | null;
   created_at: Date;
   graduated_at: Date | null;
   plays: number;
@@ -81,7 +82,7 @@ function toGame(r: GameRow): Game {
     sizeBytes: r.size_bytes,
     hue: r.hue,
     thumb: r.thumb,
-    inputSupport: normalizeInputSupport(r.input_support),
+    inputSupport: toInputSupport(r.input_support),
     createdAt: r.created_at.getTime(),
     graduatedAt: r.graduated_at?.getTime() ?? null,
     plays: r.plays,
