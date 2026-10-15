@@ -1,6 +1,6 @@
 ---
 import Layout from '../layouts/Layout.astro';
-import { GRADUATION, REVENUE } from '../lib/server/config';
+import { GRADUATION } from '../lib/server/config';
 
 const pct = (n: number) => `${Math.round(n * 100)}%`;
 const gates = [
@@ -29,12 +29,11 @@ window.addEventListener('message', (e) => {
     <p class="lede muted">
       Meshgrounds doesn't care which tool built your game. If it runs in a browser tab and fits in one HTML file, it
       belongs here. We pool traffic from every game on the site so we can get into the premium ad networks a solo
-      creator could never reach alone, and then we pay you your share.
+      creator could never reach alone. We plan to share revenue with creators; details to come.
     </p>
 
     <div class="cards">
-      <div class="panel"><b class="big">{pct(REVENUE.creatorShare)}</b><span class="muted">of net ad revenue to you</span></div>
-      <div class="panel"><b class="big">{pct(REVENUE.forkRoyalty)}</b><span class="muted">royalty from every fork of your game</span></div>
+      <div class="panel"><b class="big">Soon</b><span class="muted">We plan to share revenue with creators; details to come.</span></div>
       <div class="panel"><b class="big">0</b><span class="muted">lines of code required to publish</span></div>
     </div>
 
@@ -42,7 +41,7 @@ window.addEventListener('message', (e) => {
     <ol class="flow">
       <li><b>Upload → the Proving Grounds.</b> Your game goes live straight away in an unmonetized discovery feed. Players scout it, play it, and rate it.</li>
       <li><b>Telemetry, not gatekeepers.</b> Our runtime measures every play automatically: load time, crashes, whether players actually start, whether they finish a loop, and how long they stay.</li>
-      <li><b>Graduation.</b> When every check below passes, the game moves to the main arcade, ads switch on, your revenue share begins, and other creators can fork it.</li>
+      <li><b>Graduation.</b> When every check below passes, the game moves to the main arcade, ads switch on, and other creators can fork it.</li>
     </ol>
     <div class="panel">
       <table>
@@ -74,7 +73,7 @@ window.addEventListener('message', (e) => {
         <li>No unlicensed copyrighted characters, sprites, logos or music, and no AI voice clones of real people.</li>
         <li>No malware, crypto-miners, tracking, redirects, pop-ups or calls to outside networks except approved library CDNs.</li>
         <li>No fake buttons or anything built to farm ad clicks. Invalid traffic is removed and payouts are clawed back.</li>
-        <li>Pick a license when you upload. MIT and CC-BY-SA games can be forked, and forks carry attribution and a royalty back to you.</li>
+        <li>Pick a license when you upload. MIT and CC-BY-SA games can be forked, and forks carry attribution back to you.</li>
       </ul>
     </div>
 

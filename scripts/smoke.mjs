@@ -14,6 +14,7 @@
 import { spawn, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import { localSupabaseEnv } from './lib/local-supabase.mjs';
+import { findMoneyClaims } from '../src/lib/money-claims.ts';
 
 const WEB_PORT = Number(process.env.SMOKE_WEB_PORT ?? 4621);
 const CDN_PORT = Number(process.env.SMOKE_CDN_PORT ?? 4622);
@@ -111,6 +112,8 @@ try {
   await Promise.all([waitFor(`${WEB}/login`), waitFor(`${CDN}/g/${game.id}/index.html`)]);
   console.log('[smoke] servers ready\n--- public pages');
   for (const p of ['/', '/games', '/creators', '/proving', '/login', '/EXCHANGE_SDK.md', '/favicon.svg']) await check(p, WEB + p, 200, { auth: false });
+  // PAY-1: no specific creator revenue numbers (percent / $ near revenue, payout, royalty) on the rendered pages.
+  for (const p of ['/', '/creators']) await check(`${p} (no revenue numbers)`, WEB + p, 200, { auth: false, verify: async (r) => { const hits = findMoneyClaims(await r.text()); return hits.length ? `! ${JSON.stringify(hits)}` : ''; } });
   for (const g of seed) {
     const r = await check(`/play/${g.id}`, `${WEB}/play/${g.id}`, 301, { auth: false });
     const slugPath = new URL(r?.headers.get('location') ?? `/play/${g.id}`, WEB).pathname;

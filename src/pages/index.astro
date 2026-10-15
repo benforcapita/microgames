@@ -3,7 +3,6 @@ import Layout from '../layouts/Layout.astro';
 import GameCard from '../components/GameCard.astro';
 import GameThumb from '../components/GameThumb.astro';
 import { listGames, platformStats } from '../lib/server/games';
-import { REVENUE } from '../lib/server/config';
 import { compact } from '../lib/format';
 import { getContent, getFeatured } from '../lib/server/content';
 
@@ -128,8 +127,8 @@ const loggedIn = !!Astro.locals.user;
         <span class="eyebrow">For creators</span>
         <h2>Built it with Claude, Cursor or by hand? Ship it here.</h2>
         <p class="muted">
-          Upload one HTML file and it goes live right away. Pass the Proving Grounds and we switch on ads for you and pay
-          you {Math.round(REVENUE.creatorShare * 100)}% of the net revenue.
+          Upload one HTML file and it goes live right away. Pass the Proving Grounds and we switch on ads for your game.
+          We plan to share revenue with creators; details to come.
         </p>
         <div class="row">
           <a class="btn" href="/upload">Upload a game</a>

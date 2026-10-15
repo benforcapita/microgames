@@ -31,8 +31,6 @@ export const GRADUATION = {
   minPlays: Number(env.MG_MIN_PLAYS ?? GRADUATION_DEFAULTS.minPlays),
 };
 
-export const REVENUE = { creatorShare: 0.65, forkRoyalty: 0.1 };
-
 export { UPLOAD } from './upload';
 
 export const MAX_SAVE_BYTES = 1024 * 1024;
