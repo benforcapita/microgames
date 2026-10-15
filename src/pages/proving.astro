@@ -14,7 +14,7 @@ const games = await Promise.all(
   (userId ? await listGames({ stage: 'proving', ownerId: userId, includeUnlisted: true, sort: 'new', limit: 40, device }) : []).map(async (g) => ({
     game: g,
     mine: await getUserRating(g.id, userId),
-    passed: (await getHealth(g.id)).checks.filter((c) => c.pass).length,
+    checks: (await getHealth(g.id)).checks,
   })),
 );
 ---
@@ -33,7 +33,7 @@ const games = await Promise.all(
   {
     games.length ? (
       <div class="feed" id="feed" data-cdn={CDN_ORIGIN} data-cloud={userId ? '1' : ''}>
-        {games.map(({ game, mine, passed }) => (
+        {games.map(({ game, mine, checks }) => (
           <article class="slide" data-game-id={game.id} data-game-title={game.title} data-game-stage={game.stage}>
             <div class="screen">
               <div class="mount">
@@ -48,7 +48,7 @@ const games = await Promise.all(
               <div class="chips">{game.tags.map((t) => <span class="tag">#{t}</span>)}</div>
               <Rate slug={game.slug} avg={game.avgRating} count={game.ratingCount} mine={mine} />
               <p class="mono small muted">
-                {compact(game.plays)}/{GRADUATION.minPlays} plays · {passed}/7 checks
+                {compact(game.plays)}/{GRADUATION.minPlays} plays · {checks.filter((c) => c.pass).length}/{checks.length} checks
               </p>
               <a class="btn ghost sm" href={`/play/${game.slug}`}>Open full page →</a>
             </div>

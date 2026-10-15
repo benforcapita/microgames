@@ -58,7 +58,7 @@ export function assessHealth(
     check('start', 'Start rate', stats.startRate, G.minStartRate, 'pct'),
     check('completion', 'Loop completion rate', stats.completionRate, G.minCompletionRate, 'pct'),
     check('session', 'Median session', stats.medianMs === null ? null : stats.medianMs / 1000, G.minMedianSessionSec, 'sec'),
-    check('rating', `Community rating (${stats.ratingCount} votes)`, stats.avgRating, G.minAvgRating, 'stars', 'gte',
+    check('rating', `Community rating (${stats.ratingCount} ${stats.ratingCount === 1 ? "vote" : "votes"})`, stats.avgRating, G.minAvgRating, 'stars', 'gte',
       stats.ratingCount < G.minRatingsForRatingGate ? true : undefined),
   ];
   return { checks, eligible: checks.every((c) => c.pass) };

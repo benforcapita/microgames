@@ -42,7 +42,7 @@ export const CONTENT_DEFAULTS: ContentShapes = {
     title_before: 'The open ground for ',
     title_accent: 'instant 3D',
     title_after: ' web games.',
-    lede: 'Hundreds of tiny, strange, brilliant browser games, each one a single file that loads in seconds. Play them, rate them, and decide which ones make it out of the Proving Grounds.',
+    lede: 'Tiny, strange, brilliant browser games, each one a single file that loads in seconds. Play them, rate them, and decide which ones make it out of the Proving Grounds.',
   },
   // An empty banner text means "no banner".
   'home.banner': { text: '', link_label: '', link_href: '', image_url: '', tone: 'info' },

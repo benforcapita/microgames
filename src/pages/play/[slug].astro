@@ -8,7 +8,7 @@ import { getGame, getHealth, getUserRating, listGames } from '../../lib/server/g
 import { CDN_ORIGIN, CDN_PREVIEW_SECRET, GRADUATION } from '../../lib/server/config';
 import { isListable, isPublicStage } from '../../lib/server/game-rules';
 import { mintPreviewToken } from '../../../cdn/preview-token.mjs';
-import { ago, compact, formatCheck, kb } from '../../lib/format';
+import { ago, compact, count, formatCheck, kb } from '../../lib/format';
 import { desktopOnlyNotice, forkParentLinked, playSurface } from '../../lib/server/device';
 
 const { user } = Astro.locals;
@@ -100,7 +100,7 @@ const uploaded = Astro.url.searchParams.has('uploaded');
       <div class="main-col">
         <h1>{game.title}</h1>
         <p class="byline muted">
-          by <a href={`/u/${game.creator}`}>@{game.creator}</a> · {ago(game.createdAt)} · {compact(game.plays)} plays · {game.license}
+          by <a href={`/u/${game.creator}`}>@{game.creator}</a> · {ago(game.createdAt)} · {count(game.plays, "play")} · {game.license}
           {parent && <> · fork of {forkParentLinked(device, parent.inputSupport) ? <a href={`/play/${parent.slug}`}>{parent.title}</a> : parent.title}</>}
         </p>
         {game.tagline && <p class="tagline">{game.tagline}</p>}

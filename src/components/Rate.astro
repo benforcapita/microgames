@@ -21,7 +21,7 @@ const loggedIn = !!Astro.locals.user;
     }
   </div>
   <button type="button" class="clear" data-clear hidden={!loggedIn || mine === null} aria-label="Clear my rating">Clear</button>
-  <span class="summary mono muted" aria-live="polite">{avg === null ? 'No ratings yet' : `${avg.toFixed(1)} · ${count} votes`}</span>
+  <span class="summary mono muted" aria-live="polite">{avg === null ? 'No ratings yet' : `${avg.toFixed(1)} · ${count === 1 ? "1 vote" : `${count} votes`}`}</span>
 </div>
 
 <style>
@@ -49,7 +49,7 @@ const loggedIn = !!Astro.locals.user;
 
 <script>
   const summary = (d: { avgRating: number | null; ratingCount: number }, note: string) =>
-    `${d.avgRating === null ? 'No ratings yet' : `${d.avgRating.toFixed(1)} · ${d.ratingCount} votes`} · ${note}`;
+    `${d.avgRating === null ? 'No ratings yet' : `${d.avgRating.toFixed(1)} · ${d.ratingCount === 1 ? "1 vote" : `${d.ratingCount} votes`}`} · ${note}`;
   // Stars only change after the server saved (or cleared) the rating.
   const paint = (root: HTMLElement, stars: number) => {
     root.querySelectorAll<HTMLButtonElement>('button[data-stars]').forEach((b) => {

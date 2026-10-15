@@ -1,6 +1,6 @@
 ---
 import type { Game } from '../lib/server/games';
-import { compact, stars } from '../lib/format';
+import { compact, count, stars } from '../lib/format';
 import GameThumb from './GameThumb.astro';
 
 interface Props {
@@ -21,7 +21,7 @@ const ratingLabel = game.avgRating === null ? 'No ratings yet' : `Rated ${stars(
     <p class="muted tagline">{game.tagline || 'An instant 3D web game.'}</p>
     <div class="meta mono">
       <span>@{game.creator}</span>
-      <span>{compact(game.plays)} plays</span>
+      <span>{count(game.plays, "play")}</span>
       <span class="rating" role="img" aria-label={ratingLabel} title={ratingLabel}>
         <span class="stars" aria-hidden="true">{[1, 2, 3, 4, 5].map((n) => <i class:list={{ on: n <= filled }}>★</i>)}</span>
         {game.avgRating === null ? 'new' : `${stars(game.avgRating)} (${compact(game.ratingCount)})`}

@@ -2,7 +2,7 @@
 import Layout from '../layouts/Layout.astro';
 import GameThumb from '../components/GameThumb.astro';
 import { listGames } from '../lib/server/games';
-import { compact, stars, ago } from '../lib/format';
+import { compact, count, stars, ago } from '../lib/format';
 
 const { user, profile } = Astro.locals;
 const NO_STORE = 'private, no-store';
@@ -24,7 +24,7 @@ const deleted = Astro.url.searchParams.has('deleted');
       <div>
         <span class="eyebrow">Creator dashboard</span>
         <h1>@{profile.handle}</h1>
-        <p class="muted mono">{user.email} · {games.length} games · {compact(plays)} plays</p>
+        <p class="muted mono">{user.email} · {count(games.length, "game")} · {count(plays, "play")}</p>
       </div>
       <div class="row">
         <a class="btn ghost" href={`/u/${profile.handle}`}>Public profile</a>
@@ -43,7 +43,7 @@ const deleted = Astro.url.searchParams.has('deleted');
                 <a href={g.stage === 'pending' || g.stage === 'rejected' ? `/submissions/${g.id}` : `/play/${g.slug}`}><h3>{g.title}</h3></a>
                 <p class="muted mono">
                   <span class:list={['badge', g.stage]}>{{ live: 'Monetized', proving: 'Proving Grounds', pending: 'Validating…', rejected: 'Rejected' }[g.stage]}</span>{' '}
-                  {compact(g.plays)} plays · ★ {stars(g.avgRating)} ({g.ratingCount}) · uploaded {ago(g.createdAt)}
+                  {count(g.plays, "play")} · ★ {stars(g.avgRating)} ({g.ratingCount}) · uploaded {ago(g.createdAt)}
                 </p>
               </div>
               <form method="post" action={`/api/games/${g.slug}/delete`} class="del" data-confirm={`Delete “${g.title}” permanently? Plays, ratings and player saves will be removed.`}>
