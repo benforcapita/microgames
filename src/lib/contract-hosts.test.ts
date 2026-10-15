@@ -1,15 +1,18 @@
-// The game CDN's CSP (cdn/handler.mjs) is the source of truth for external hosts.
+// The game CDN's CSP (cdn/csp.mjs, sent by cdn/handler.mjs) is the source of truth for external hosts.
 // The runtime contract and both creator prompts must list exactly those hosts.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { test } from 'node:test';
 import { CREATOR_PROMPTS } from './creator-prompts.ts';
 
-const src = fs.readFileSync('cdn/handler.mjs', 'utf8');
-const LIB = src.match(/const LIB_HOSTS = '([^']+)'/)![1];
+// Parse the real header the CDN sends (cdn/csp.mjs gameCsp).
+// @ts-ignore -- plain .mjs module
+import { gameCsp } from '../../cdn/csp.mjs';
+const header: string = gameCsp("'none'");
 const directive = (name: string) => {
-  const line = src.match(new RegExp('`' + name + ' ([^`]+)`'))![1].replaceAll('${LIB_HOSTS}', LIB);
-  return new Set(line.split(/\s+/).filter((t) => t.startsWith('https://')).map((t) => t.slice('https://'.length)));
+  const d = header.split(';').map((x) => x.trim()).find((x) => x.startsWith(name + ' '));
+  assert.ok(d, `CSP has no ${name}`);
+  return new Set(d.split(/\s+/).filter((t) => t.startsWith('https://')).map((t) => t.slice('https://'.length)));
 };
 const script = directive('script-src'), style = directive('style-src'), font = directive('font-src');
 const minus = (a: Set<string>, b: Set<string>) => [...a].filter((h) => !b.has(h)).sort();

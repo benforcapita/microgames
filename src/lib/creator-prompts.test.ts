@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { describe, it } from 'node:test';
-import { CREATOR_PROMPTS } from './creator-prompts.ts';
+import { CREATOR_PROMPTS, INPUT_SUPPORT_META, INPUT_SUPPORT_VALUES } from './creator-prompts.ts';
 
 describe('creator prompts', () => {
   it('has exactly 2 prompts with ids a and b', () => {
@@ -32,5 +32,30 @@ describe('creator prompts', () => {
         `Prompt ${prompt.id} text must contain '[paste your game code here]'`,
       );
     }
+  });
+});
+
+describe('inputSupport declaration', () => {
+  const doc = fs.readFileSync('docs/RUNTIME-CONTRACT.md', 'utf8');
+  const contract = doc.split('## Creator prompts')[0];
+  const values = INPUT_SUPPORT_VALUES.map((v) => `"${v}"`);
+  it('contract, Prompt A and Prompt B all name the meta tag and the three values', () => {
+    for (const [where, text] of [['contract', contract], ...CREATOR_PROMPTS.map((p) => [`Prompt ${p.id}`, p.text])]) {
+      assert.ok(text.includes(`name="${INPUT_SUPPORT_META}"`), `${where}: meta name`);
+      for (const v of values) assert.ok(text.includes(v), `${where}: ${v}`);
+    }
+  });
+  it('contract names the DB column and states mobile=touch, desktop=keyboard/mouse', () => {
+    assert.match(contract, /`inputSupport`/);
+    assert.match(contract, /`input_support`/);
+    assert.match(contract, /touch controls on mobile/);
+    assert.match(contract, /keyboard\/mouse on desktop/);
+  });
+  it('Prompt B checks the declaration', () => {
+    const b = CREATOR_PROMPTS.find((p) => p.id === 'b')!.text;
+    assert.match(b, /Input support declaration: .*FAIL if missing/);
+  });
+  it('contract says the CDN CSP is the outer limit and the contract may be stricter', () => {
+    assert.match(contract, /CSP is the outer safety limit; this contract may be stricter/);
   });
 });
