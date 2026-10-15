@@ -47,6 +47,14 @@ const store: Store = {
     });
     return row ? { row, stage: row.stage } : null;
   },
+  async applyStoredVerdict(gameId, sha256) {
+    // Atomic in SQL too: lock the game, move it only if it is pending, using the stored verdict for this bundle.
+    const [row] = await rest<{ stage: Stage }[]>('rpc/apply_stored_validation', {
+      method: 'POST',
+      body: JSON.stringify({ p_game_id: gameId, p_sha256: sha256 }),
+    });
+    return row?.stage ?? null;
+  },
 };
 
 Deno.serve(async (req) => {

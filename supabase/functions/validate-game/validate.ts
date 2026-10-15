@@ -28,6 +28,11 @@ export interface Store {
     report: StaticReport;
     nextStage: (current: Stage) => Stage;
   }): Promise<{ row: ValidationRow; stage: Stage } | null>;
+  /**
+   * For a bundle that already has a verdict: atomically apply that stored verdict's transition if the game
+   * is (still, or again) 'pending'. Returns the resulting stage, or null if the game/verdict is gone.
+   */
+  applyStoredVerdict(gameId: string, sha256: string): Promise<Stage | null>;
 }
 
 export interface ValidateResult {
@@ -54,9 +59,9 @@ export async function validateGame(store: Store, gameId: string): Promise<Valida
   const sha256 = await sha256Hex(bytes);
   const existing = await store.findValidation(gameId, sha256);
   if (existing) {
-    // Idempotent: same bundle -> same verdict, no new row, and the stage is left untouched.
-    // Re-read the stage: a concurrent run may have just applied the transition.
-    return { httpStatus: 200, body: { gameId, sha256, status: existing.status, stage: await store.gameStage(gameId), validationId: existing.id, reused: true } };
+    // Idempotent: same bundle -> same verdict, no new row. A game that is pending again (the same bundle
+    // re-set to pending) still gets the stored verdict's move; any other stage is left untouched.
+    return { httpStatus: 200, body: { gameId, sha256, status: existing.status, validationId: existing.id, reused: true, ...(await settleReused(store, gameId, sha256)) } };
   }
 
   const report = analyzeGame(bytes);
@@ -64,8 +69,7 @@ export async function validateGame(store: Store, gameId: string): Promise<Valida
   const recorded = await store.recordValidation({ gameId, sha256, status, report, nextStage: (s) => stageAfterValidation(s, status) });
   if (!recorded) {
     const raced = await store.findValidation(gameId, sha256);
-    const now = await store.gameStage(gameId);
-    return { httpStatus: 200, body: { gameId, sha256, status: raced?.status, stage: now, validationId: raced?.id, reused: true } };
+    return { httpStatus: 200, body: { gameId, sha256, status: raced?.status, validationId: raced?.id, reused: true, ...(await settleReused(store, gameId, sha256)) } };
   }
   return {
     httpStatus: 200,
@@ -75,4 +79,12 @@ export async function validateGame(store: Store, gameId: string): Promise<Valida
       warned: report.checks.filter((c) => c.level === 'warn').map((c) => c.id),
     },
   };
+}
+
+/** Reused verdict: re-read the stage (a concurrent run may have moved it) and, if still pending, apply it. */
+async function settleReused(store: Store, gameId: string, sha256: string): Promise<{ stage: Stage | null; previousStage?: Stage; moved?: boolean }> {
+  const stage = await store.gameStage(gameId);
+  if (stage !== 'pending') return { stage };
+  const next = (await store.applyStoredVerdict(gameId, sha256)) ?? (await store.gameStage(gameId));
+  return next && next !== 'pending' ? { stage: next, previousStage: 'pending', moved: true } : { stage: next };
 }
