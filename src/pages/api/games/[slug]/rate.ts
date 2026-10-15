@@ -1,5 +1,5 @@
 import type { APIRoute } from 'astro';
-import { MG_UID_COOKIE, newUid, parseUid, ratingGuard } from '../../../../lib/server/abuse';
+import { MG_UID_COOKIE, secureCookie, newUid, parseUid, ratingGuard } from '../../../../lib/server/abuse';
 import { getGame, rateGame } from '../../../../lib/server/games';
 
 export const POST: APIRoute = async ({ params, request, locals, cookies, url }) => {
@@ -14,7 +14,7 @@ export const POST: APIRoute = async ({ params, request, locals, cookies, url }) 
     cookies.set(MG_UID_COOKIE, uid, {
       httpOnly: true,
       sameSite: 'lax',
-      secure: url.protocol === 'https:',
+      secure: secureCookie(url.protocol, import.meta.env.PROD, Boolean(process.env.VERCEL)),
       path: '/',
       maxAge: 365 * 24 * 60 * 60,
     });

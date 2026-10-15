@@ -1,10 +1,11 @@
 import type { APIRoute } from 'astro';
 import {
   MG_UID_COOKIE,
+  admitSessionStart,
+  clientIp,
+  secureCookie,
   newUid,
   parseUid,
-  sessionStartByIp,
-  sessionStartByUid,
   telemetryByUid,
 } from '../../lib/server/abuse';
 import { getGame, recordTelemetry, type TelemetryType } from '../../lib/server/games';
@@ -15,12 +16,13 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 export const POST: APIRoute = async (context) => {
   const { request, cookies, url } = context;
 
-  let ip = 'unknown';
+  let socketAddress: string | undefined;
   try {
-    ip = context.clientAddress || 'unknown';
+    socketAddress = context.clientAddress;
   } catch {
-    ip = 'unknown';
+    socketAddress = undefined;
   }
+  const ip = clientIp(request.headers, socketAddress, Boolean(process.env.VERCEL));
 
   const rawUid = cookies.get(MG_UID_COOKIE)?.value;
   let uid = parseUid(rawUid);
@@ -29,7 +31,7 @@ export const POST: APIRoute = async (context) => {
     cookies.set(MG_UID_COOKIE, uid, {
       httpOnly: true,
       sameSite: 'lax',
-      secure: url.protocol === 'https:',
+      secure: secureCookie(url.protocol, import.meta.env.PROD, Boolean(process.env.VERCEL)),
       path: '/',
       maxAge: 365 * 24 * 60 * 60,
     });
@@ -49,7 +51,7 @@ export const POST: APIRoute = async (context) => {
   if (type === 'session_start' && !(await getGame(gameId))) return new Response('Unknown game', { status: 404 });
 
   if (type === 'session_start') {
-    if (!sessionStartByUid.hit(`${uid}:${gameId}`) || !sessionStartByIp.hit(`${ip}:${gameId}`)) {
+    if (!admitSessionStart(uid, ip, gameId)) {
       return new Response(null, { status: 204 });
     }
   }

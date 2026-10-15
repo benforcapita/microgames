@@ -22,6 +22,7 @@ export interface LimiterOptions {
 
 export function createLimiter(opts: LimiterOptions): {
   hit(key: string): boolean;
+  check(key: string): boolean;
   readonly size: number;
 } {
   const { windowMs, max, now = () => Date.now(), maxKeys = 10000 } = opts;
@@ -73,6 +74,12 @@ export function createLimiter(opts: LimiterOptions): {
       map.set(key, timestamps);
       return false;
     },
+    /** Would `hit(key)` be allowed right now? Does not record anything. */
+    check(key: string): boolean {
+      const cutoff = now() - windowMs;
+      const timestamps = map.get(key);
+      return !timestamps || timestamps.filter((ts) => ts > cutoff).length < max;
+    },
     get size(): number {
       return map.size;
     },
@@ -122,3 +129,40 @@ export const sessionStartByUid = createLimiter({ windowMs: 30 * 60_000, max: 1 }
 export const sessionStartByIp = createLimiter({ windowMs: 60 * 60_000, max: 20 });
 export const telemetryByUid = createLimiter({ windowMs: 60_000, max: 120 });
 export const ratingGuard = createRatingGuard();
+
+/**
+ * Client IP used for rate limiting. On Vercel the socket address is the proxy, so use the
+ * platform-set `x-vercel-forwarded-for`, then `x-real-ip`. Elsewhere only the socket address
+ * is trusted. A raw `X-Forwarded-For` is never trusted (clients can forge it).
+ */
+export function clientIp(headers: Headers, socketAddress: string | undefined, isVercel: boolean): string {
+  if (isVercel) {
+    const fwd = headers.get('x-vercel-forwarded-for')?.split(',')[0]?.trim();
+    if (fwd) return fwd;
+    const real = headers.get('x-real-ip')?.trim();
+    if (real) return real;
+  }
+  return socketAddress || 'unknown';
+}
+
+/** Cookie `Secure` flag: always in production / on Vercel, otherwise only over https. */
+export function secureCookie(protocol: string, isProd: boolean, isVercel: boolean): boolean {
+  return isProd || isVercel || protocol === 'https:';
+}
+
+type Limiter = ReturnType<typeof createLimiter>;
+
+/**
+ * Admit a session_start. A device may count once per window per game; the IP cap is a backstop.
+ * The device slot is only consumed when the start is actually counted, so an IP-cap drop
+ * does not lock the device out for the rest of the window.
+ */
+export function admitSessionStart(
+  uid: string, ip: string, gameId: string,
+  byUid: Limiter = sessionStartByUid, byIp: Limiter = sessionStartByIp,
+): boolean {
+  const uidKey = `${uid}:${gameId}`;
+  if (!byUid.check(uidKey)) return false;
+  if (!byIp.hit(`${ip}:${gameId}`)) return false;
+  return byUid.hit(uidKey);
+}

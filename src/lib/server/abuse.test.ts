@@ -2,6 +2,9 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
   MG_UID_COOKIE,
+  admitSessionStart,
+  clientIp,
+  secureCookie,
   createLimiter,
   createRatingGuard,
   newUid,
@@ -161,5 +164,73 @@ describe('singletons', () => {
     assert.equal(typeof sessionStartByIp.hit, 'function');
     assert.equal(typeof telemetryByUid.hit, 'function');
     assert.equal(typeof ratingGuard.allow, 'function');
+  });
+});
+
+describe('clientIp', () => {
+  it('on Vercel, 25 distinct client IPs behind one socket are each counted (not collapsed by the IP cap)', () => {
+    const byIp = createLimiter({ windowMs: 60 * 60_000, max: 20 });
+    const byUid = createLimiter({ windowMs: 30 * 60_000, max: 1 });
+    let counted = 0;
+    for (let i = 1; i <= 25; i++) {
+      const headers = new Headers({ 'x-vercel-forwarded-for': `203.0.113.${i}` });
+      const ip = clientIp(headers, '10.0.0.1', true);
+      assert.equal(ip, `203.0.113.${i}`);
+      if (admitSessionStart(`00000000-0000-4000-8000-${String(i).padStart(12, '0')}`, ip, 'g1', byUid, byIp)) counted++;
+    }
+    assert.equal(counted, 25);
+  });
+
+  it('falls back to x-real-ip on Vercel, then the socket', () => {
+    assert.equal(clientIp(new Headers({ 'x-real-ip': '198.51.100.7' }), '10.0.0.1', true), '198.51.100.7');
+    assert.equal(clientIp(new Headers(), '10.0.0.1', true), '10.0.0.1');
+  });
+
+  it('never trusts raw X-Forwarded-For, and ignores Vercel headers off Vercel', () => {
+    const forged = new Headers({
+      'x-forwarded-for': '1.2.3.4',
+      'x-vercel-forwarded-for': '5.6.7.8',
+      'x-real-ip': '9.9.9.9',
+    });
+    assert.equal(clientIp(forged, '127.0.0.1', false), '127.0.0.1');
+    assert.equal(clientIp(new Headers({ 'x-forwarded-for': '1.2.3.4' }), '10.0.0.1', true), '10.0.0.1');
+    assert.equal(clientIp(new Headers(), undefined, false), 'unknown');
+  });
+});
+
+describe('secureCookie', () => {
+  it('is Secure in production or on Vercel even over http, and over https anywhere', () => {
+    assert.equal(secureCookie('http:', true, false), true);
+    assert.equal(secureCookie('http:', false, true), true);
+    assert.equal(secureCookie('https:', false, false), true);
+    assert.equal(secureCookie('http:', false, false), false);
+  });
+});
+
+describe('admitSessionStart', () => {
+  it('an IP-cap drop does not consume the device 30-min dedupe slot', () => {
+    let t = 0;
+    const now = () => t;
+    const byIp = createLimiter({ windowMs: 60 * 60_000, max: 1, now });
+    const byUid = createLimiter({ windowMs: 30 * 60_000, max: 1, now });
+    const devA = '00000000-0000-4000-8000-00000000000a';
+    const devB = '00000000-0000-4000-8000-00000000000b';
+    assert.equal(admitSessionStart(devA, '1.1.1.1', 'g', byUid, byIp), true);
+    // IP cap now full: device B is dropped by the IP limiter...
+    assert.equal(admitSessionStart(devB, '1.1.1.1', 'g', byUid, byIp), false);
+    // ...but its device slot is untouched, so from another IP it is still counted.
+    assert.equal(byUid.check(`${devB}:g`), true);
+    assert.equal(admitSessionStart(devB, '2.2.2.2', 'g', byUid, byIp), true);
+    // and then deduped within the window
+    assert.equal(admitSessionStart(devB, '3.3.3.3', 'g', byUid, byIp), false);
+  });
+
+  it('a device duplicate does not consume IP budget', () => {
+    const byIp = createLimiter({ windowMs: 60_000, max: 2 });
+    const byUid = createLimiter({ windowMs: 60_000, max: 1 });
+    const dev = '00000000-0000-4000-8000-0000000000aa';
+    assert.equal(admitSessionStart(dev, '1.1.1.1', 'g', byUid, byIp), true);
+    for (let i = 0; i < 10; i++) assert.equal(admitSessionStart(dev, '1.1.1.1', 'g', byUid, byIp), false);
+    assert.equal(admitSessionStart('00000000-0000-4000-8000-0000000000bb', '1.1.1.1', 'g', byUid, byIp), true);
   });
 });
