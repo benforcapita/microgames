@@ -22,7 +22,7 @@ describe('IS-4 backfill: target guards (REST only)', () => {
       { dryRun: true, force: true, all: false, yes: true, allowRemote: true, ids: ['a', 'b'], rest: true });
   });
   it('no env -> local stack, REST', () => assert.deepEqual(resolveTarget({}, parseArgs([])), { mode: 'local', db: 'rest' }));
-  it('remote without --allow-remote is refused', () => assert.match(resolveTarget(remote, parseArgs([])).error, /--allow-remote/));
+  it('remote without --allow-remote is refused', () => assert.match(resolveTarget(remote, parseArgs([])).error ?? "", /--allow-remote/));
   it('remote needs typed confirmation unless --yes', () => {
     assert.equal(resolveTarget(remote, parseArgs(['--allow-remote'])).needConfirm, true);
     const t = resolveTarget(remote, parseArgs(['--allow-remote', '--yes']));
@@ -31,7 +31,7 @@ describe('IS-4 backfill: target guards (REST only)', () => {
   it('DATABASE_URL is ignored: always REST', () => {
     const t = resolveTarget({ ...remote, DATABASE_URL: 'postgresql://u@db.example.com:5432/postgres' }, parseArgs(['--allow-remote', '--yes']));
     assert.equal(t.db, 'rest');
-    assert.equal(t.env.DATABASE_URL, undefined);
+    assert.equal(t.env?.DATABASE_URL, undefined);
   });
   it('the script never opens Postgres and only writes behind the dry-run check, compare-and-set', () => {
     const src = fs.readFileSync(new URL('../backfill-input-support.mjs', import.meta.url), 'utf8');
