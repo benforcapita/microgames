@@ -4,7 +4,7 @@ Rules every game uploaded to Meshgrounds must follow. Source: `docs/FEATURES-v2.
 
 1. Single self-contained `.html` file, UTF-8, ≤ 5 MB (target ≤ 1 MB). External scripts/styles/fonts only from the hosts the game CDN's CSP allows: scripts, styles and fonts from cdn.jsdelivr.net, unpkg.com, esm.sh, cdnjs.cloudflare.com, ga.jspm.io; plus fonts.googleapis.com (stylesheets only) and fonts.gstatic.com (font files only); no other network (`fetch`, XHR, WebSocket, images) — blocked by CSP anyway.
 2. No reliance on real `localStorage`/cookies/IndexedDB semantics beyond the shim: use `localStorage` for saves (persisted by the portal); keep it ≤ 100 KB JSON.
-3. Drive the loop with `requestAnimationFrame` and `performance.now()` (so automatic pause works); audio via WebAudio/HTMLMediaElement. Optionally listen to `Meshgrounds.onPause/onResume`.
+3. Drive the loop with `requestAnimationFrame` and `performance.now()` (so automatic pause works); audio via WebAudio/HTMLMediaElement. Optionally listen to `Meshgrounds.onPause/onResume`. The portal pauses during ads, while the tab is hidden, and while the game is scrolled off-screen. Inside the game `window.devicePixelRatio` reports at most 2.
 4. **Recommended (a warning, not required, in v1):** call `Meshgrounds.ready()` once the first playable frame is shown (portal receives `__MG_READY`). Call `Meshgrounds.gameOver(score)` / `levelComplete(level, score)` at loop end (feeds completion-rate telemetry).
 5. Must render to a `<canvas>` or visible DOM within 3 s, throw no uncaught errors in the first 10 s, work in a sandboxed opaque-origin iframe (`allow-scripts allow-pointer-lock` only: no popups, forms, top navigation, `alert`).
 6. Must not use `eval` of remote code, crypto-mining, or try to escape the frame.

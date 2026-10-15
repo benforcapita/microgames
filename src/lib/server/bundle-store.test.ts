@@ -112,6 +112,61 @@ describe('orphaned bundle cleanup', () => {
     assert.deepEqual(removed, [['abc/index.html']]);
   });
 
+  it('uploads all objects concurrently before inserting', async () => {
+    let inFlight = 0, peak = 0;
+    const order: string[] = [];
+    const storage: BundleStorage = {
+      async upload(path) {
+        inFlight++;
+        peak = Math.max(peak, inFlight);
+        await new Promise((r) => setTimeout(r, 5));
+        inFlight--;
+        order.push(path);
+        return { error: null };
+      },
+      async remove() {
+        throw new Error('nothing should be removed');
+      },
+    };
+    await saveUploadedBundle({
+      objects: [
+        { path: 'abc/index.html', bytes: HTML, contentType: 'text/html; charset=utf-8' },
+        { path: 'abc/thumb.png', bytes: THUMB, contentType: 'image/png' },
+      ],
+      storage,
+      insert: async () => order.push('insert'),
+    });
+    assert.equal(peak, 2);
+    assert.equal(order.at(-1), 'insert');
+  });
+
+  it('deletes the thumbnail when index.html fails, and rethrows the storage error', async () => {
+    const removed: string[][] = [];
+    const storage: BundleStorage = {
+      async upload(path) {
+        return path.endsWith('index.html') ? { error: { message: 'html rejected' } } : { error: null };
+      },
+      async remove(paths) {
+        removed.push(paths);
+        return { error: null };
+      },
+    };
+    await assert.rejects(
+      () => saveUploadedBundle({
+        objects: [
+          { path: 'abc/index.html', bytes: HTML, contentType: 'text/html; charset=utf-8' },
+          { path: 'abc/thumb.png', bytes: THUMB, contentType: 'image/png' },
+        ],
+        storage,
+        insert: async () => {
+          throw new Error('insert should not run');
+        },
+      }),
+      /Storage upload failed: html rejected/,
+    );
+    assert.deepEqual(removed, [['abc/thumb.png']]);
+  });
+
   it('deletes index.html when the thumbnail upload throws', async () => {
     const removed: string[][] = [];
     const storage: BundleStorage = {

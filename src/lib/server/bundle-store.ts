@@ -22,31 +22,31 @@ function isThumbPath(path: string): boolean {
 }
 
 /**
- * Upload every bundle object, then run the games insert.
- * index.html is stored before the thumbnail. If a later upload or the insert
- * fails, delete the objects already stored so a rejected thumbnail cannot leave
- * an orphaned bundle. Cleanup is best-effort: a delete failure is logged, and
- * the original error is always rethrown.
+ * Upload every bundle object (in parallel, one round trip instead of one per object), then run the games insert.
+ * If any upload or the insert fails, delete the objects that were stored so a rejected thumbnail cannot leave
+ * an orphaned bundle. Cleanup is best-effort: a delete failure is logged, and the original error is always rethrown.
  */
 export async function saveUploadedBundle(opts: {
   objects: { path: string; bytes: Uint8Array; contentType: string }[];
   storage: BundleStorage;
   insert: () => Promise<unknown>;
 }): Promise<void> {
-  const stored: string[] = [];
-  let uploading: string | null = null;
-  try {
-    for (const object of opts.objects) {
-      uploading = object.path;
-      const put = await opts.storage.upload(object.path, object.bytes, object.contentType);
+  const results = await Promise.allSettled(
+    opts.objects.map(async ({ path, bytes, contentType }) => {
+      const put = await opts.storage.upload(path, bytes, contentType);
       if (put.error) throw new Error(`Storage upload failed: ${put.error.message}`);
-      stored.push(object.path);
+    }),
+  );
+  const stored = opts.objects.filter((_, i) => results[i].status === 'fulfilled').map((o) => o.path);
+  const failed = results.findIndex((r) => r.status === 'rejected');
+  try {
+    if (failed >= 0) {
+      if (isThumbPath(opts.objects[failed].path)) throw new ThumbnailUploadError();
+      throw (results[failed] as PromiseRejectedResult).reason;
     }
-    uploading = null;
     await opts.insert();
   } catch (err) {
     await discardStoredBundle(opts.storage, stored);
-    if (uploading && isThumbPath(uploading)) throw new ThumbnailUploadError();
     throw err;
   }
 }

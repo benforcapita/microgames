@@ -12,7 +12,7 @@ The game runs in a sandboxed iframe. Talk to the portal ONLY via `window.parent.
    - `REWARD_DENIED` → do nothing, keep the game-over screen.
    Grant rewards ONLY on `REWARD_GRANTED`. Never auto-trigger rewarded ads.
 5. Between levels (never before the player's first level), you MAY send `{ type: 'REQUEST_AD_BREAK' }` and wait for `AD_BREAK_DONE` before continuing.
-6. The portal pauses the game automatically during ads (requestAnimationFrame, `performance.now()`, WebAudio and media are frozen). Use `requestAnimationFrame` for the game loop and `performance.now()` / `THREE.Clock` for time. Clamp frame delta to ≤ 0.1s.
+6. The portal pauses the game automatically during ads, while the tab is hidden, and while the game is scrolled off-screen (requestAnimationFrame, `performance.now()`, WebAudio and media are frozen). `window.devicePixelRatio` is capped at 2 inside the game, so `renderer.setPixelRatio(devicePixelRatio)` is safe on 3x phones. Use `requestAnimationFrame` for the game loop and `performance.now()` / `THREE.Clock` for time. Clamp frame delta to ≤ 0.1s.
 7. `localStorage` works and is persisted by the portal. Use it for high scores and saves.
 8. Show a visible "click / tap to start" state, and support keyboard and touch input. Call `event.preventDefault()` on touch to stop double-tap zoom.
 9. Render the first frame within 3 seconds. Create geometry procedurally and avoid large inline assets.

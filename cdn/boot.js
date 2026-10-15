@@ -192,6 +192,21 @@
     });
   } catch (e) {}
 
+  /* ---------- render budget ---------- */
+  // Most games do renderer.setPixelRatio(devicePixelRatio). On 3x phones that is 2.25x the pixels of 2x for no
+  // visible gain, and the GPU fill cost is what drops frames. Report at most 2; screens at <= 2x are untouched.
+  try {
+    var MAX_DPR = 2;
+    var dprDesc = Object.getOwnPropertyDescriptor(window, 'devicePixelRatio') || Object.getOwnPropertyDescriptor(Window.prototype, 'devicePixelRatio');
+    if (dprDesc && dprDesc.get && dprDesc.get.call(window) > MAX_DPR) {
+      var nativeDpr = dprDesc.get;
+      Object.defineProperty(window, 'devicePixelRatio', {
+        configurable: true,
+        get: function () { return Math.min(MAX_DPR, nativeDpr.call(window)); },
+      });
+    }
+  } catch (e) {}
+
   /* ---------- clock + animation-frame control ---------- */
   var nativeNow = performance.now.bind(performance);
   var rAF = window.requestAnimationFrame.bind(window);
