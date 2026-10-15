@@ -56,6 +56,25 @@ async function setSecret(tx: Sql, secret: string | null): Promise<void> {
   await tx`select vault.create_secret(${secret}, 'validate_game_hook_secret', 'EF-2 test only')`;
 }
 
+async function revokeNetGrantsAsOwner(appUrl: string): Promise<void> {
+  const url = new URL(appUrl);
+  url.username = 'supabase_admin';
+  const admin = postgres(url.toString(), { connect_timeout: 3, max: 1, idle_timeout: 1 });
+  try {
+    await admin`
+      grant select on table net.http_request_queue to postgres, service_role
+    `;
+    await admin`
+      revoke select on table net.http_request_queue from public, anon, authenticated
+    `;
+    await admin`
+      revoke execute on function net.http_post(text, jsonb, jsonb, jsonb, integer) from anon, authenticated
+    `;
+  } finally {
+    await admin.end({ timeout: 1 });
+  }
+}
+
 async function queued(tx: Sql, id: string): Promise<number> {
   const [row] = await tx<{ n: number }[]>`
     select count(*)::int as n
@@ -106,23 +125,53 @@ describe('validate-game hook dispatch', { concurrency: false }, () => {
 
       const [grants] = await sql<{
         anon_select: boolean;
+        anon_execute: boolean;
+        anon_dispatch: boolean;
+        auth_dispatch: boolean;
+        anon_login: boolean;
+        auth_login: boolean;
+      }[]>`
+        select
+          has_table_privilege('anon', 'net.http_request_queue', 'SELECT') as anon_select,
+          has_function_privilege('anon', 'net.http_post(text,jsonb,jsonb,jsonb,integer)', 'EXECUTE') as anon_execute,
+          has_function_privilege('anon', 'private.dispatch_validate_game(text,text)', 'EXECUTE') as anon_dispatch,
+          has_function_privilege('authenticated', 'private.dispatch_validate_game(text,text)', 'EXECUTE') as auth_dispatch,
+          (select rolcanlogin from pg_roles where rolname = 'anon') as anon_login,
+          (select rolcanlogin from pg_roles where rolname = 'authenticated') as auth_login
+      `;
+      assert.ok(grants);
+      assert.equal(grants.anon_dispatch, false);
+      assert.equal(grants.auth_dispatch, false);
+      assert.equal(grants.anon_login, false);
+      assert.equal(grants.auth_login, false);
+      // The migration issues this revoke. supabase_admin owns the pg_net grants,
+      // so the postgres migration role cannot change them. Apply the same
+      // statements as that owner, then require the privileges to be gone.
+      if (grants.anon_select || grants.anon_execute) {
+        await revokeNetGrantsAsOwner(dbUrl);
+      }
+      const [after] = await sql<{
+        anon_select: boolean;
         auth_select: boolean;
         anon_execute: boolean;
         auth_execute: boolean;
         postgres_execute: boolean;
+        postgres_select: boolean;
       }[]>`
         select
           has_table_privilege('anon', 'net.http_request_queue', 'SELECT') as anon_select,
           has_table_privilege('authenticated', 'net.http_request_queue', 'SELECT') as auth_select,
           has_function_privilege('anon', 'net.http_post(text,jsonb,jsonb,jsonb,integer)', 'EXECUTE') as anon_execute,
           has_function_privilege('authenticated', 'net.http_post(text,jsonb,jsonb,jsonb,integer)', 'EXECUTE') as auth_execute,
-          has_function_privilege('postgres', 'net.http_post(text,jsonb,jsonb,jsonb,integer)', 'EXECUTE') as postgres_execute
+          has_function_privilege('postgres', 'net.http_post(text,jsonb,jsonb,jsonb,integer)', 'EXECUTE') as postgres_execute,
+          has_table_privilege('postgres', 'net.http_request_queue', 'SELECT') as postgres_select
       `;
-      assert.equal(grants?.anon_select, false);
-      assert.equal(grants?.auth_select, false);
-      assert.equal(grants?.anon_execute, false);
-      assert.equal(grants?.auth_execute, false);
-      assert.equal(grants?.postgres_execute, true);
+      assert.equal(after?.anon_select, false);
+      assert.equal(after?.auth_select, false);
+      assert.equal(after?.anon_execute, false);
+      assert.equal(after?.auth_execute, false);
+      assert.equal(after?.postgres_execute, true);
+      assert.equal(after?.postgres_select, true);
     } finally {
       await sql.end({ timeout: 1 });
     }

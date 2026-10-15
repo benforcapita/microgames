@@ -14,15 +14,23 @@
 -- leaves an already-installed shared pg_net row where it is.
 create extension if not exists pg_net with schema extensions;
 
--- The queue is granted to PUBLIC, so anon and authenticated can read it until
--- that grant is removed. http_post is granted to those roles by name. Revoke
--- both. Do not drop or alter the extension; postgres and service_role keep
--- execute on http_post.
+-- Take anon and authenticated off the queue and off http_post. pg_net is owned
+-- by supabase_admin, so a non-superuser postgres role's REVOKE warns and does
+-- not change those grants (Supabase platform constraint). Keep the statements:
+-- they take effect when the migration role can revoke. Do not drop or alter
+-- the extension. Grant postgres and service_role SELECT first so a real revoke
+-- of the PUBLIC grant does not remove the only path those roles have.
 do $$
 declare
   fn regprocedure;
 begin
   if to_regclass('net.http_request_queue') is not null then
+    begin
+      grant select on table net.http_request_queue to postgres, service_role;
+    exception
+      when insufficient_privilege then
+        raise warning 'could not grant select on net.http_request_queue: %', sqlerrm;
+    end;
     revoke select on table net.http_request_queue from public, anon, authenticated;
   end if;
 
