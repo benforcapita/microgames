@@ -57,6 +57,31 @@ describe('findMoneyClaims', () => {
     for (const t of ['We will never monetize your data.', 'There is no monetize button.', "We don't take royalties.", 'Not monetization-ready yet.'])
       assert.equal(findMoneyClaims(t).length + findPaymentPromises(t).length, 0, t);
   });
+  it('FINDER-3 QA: a negation in an earlier clause or a non-adjacent word does not hide a claim', () => {
+    for (const t of [
+      'No fees, we pay creators',
+      'No ads. We pay creators.',
+      'No code needed, monetize your game today',
+      'Never been easier: monthly payouts to creators',
+      "Don't miss out: get paid",
+      'No sign-up needed, royalties on every fork',
+      'Not just fun: real income for creators',
+      // Engineering Lead regressions
+      'No catch: free money',
+      'Never worry again, you will be paid',
+      'No limits on royalties',
+      'No catch, earn money from your games',
+      'No ads. Monetize your game.',
+    ]) assert.ok(findMoneyClaims(t).length + findPaymentPromises(t).length >= 1, t);
+  });
+  it('FINDER-3: rules that predate FINDER-3 ignore negation entirely', () => {
+    assert.ok(findMoneyClaims('No monthly payouts to creators yet').length >= 1);
+    assert.ok(findMoneyClaims("Don't make money from ads").length >= 1);
+  });
+  it('FINDER-3 extras: make cash, get a cut, earn $$$, earn rewards, money-making', () => {
+    for (const t of ['Make cash from your games', 'Get a cut of every sale', 'Earn $$$ with Meshgrounds', 'Players earn rewards in games and creators too', 'money-making games for indie devs'])
+      assert.ok(findMoneyClaims(t).length >= 1, t);
+  });
   it('keeps the clawback line and monetized status copy unflagged', () => {
     for (const t of [
       'Invalid traffic is removed and payouts are clawed back.',

@@ -18,9 +18,14 @@ const NUMBER_FREE: RegExp[] = [
   /(?:\b(?:paid|pays|pay)\b|\$\s?\d[\d,.]*|\b\d[\d,.]*\s*(?:dollars?|usd\b))\s+(?:per|for\s+(?:every|each))\s+(?:plays?|games?|views?|installs?|downloads?)\b/gi,
   // payouts: (daily|weekly|monthly|instant|regular|guaranteed) payout(s) and payout(s) to|for creators|you|developers
   /\b(?:(?:daily|weekly|monthly|instant|regular|guaranteed)\s+payouts?(?:\s+(?:to|for)\s+(?:creators|you|developers))?|payouts?\s+(?:to|for)\s+(?:creators|you|developers))\b/gi,
+];
+
+// FINDER-3 rules. Only these (plus the monetize verb, see below) honour a direct negation.
+// The monetize verb rule predates FINDER-3 but lives here so 'We will never monetize your data' / 'no monetize button'
+// stay allowed while 'No code needed, monetize your game today' is still flagged (clause boundary).
+const NEGATABLE: RegExp[] = [
   // monetize as an active verb
   /\b(?:monetize|monetise|monetizes|monetises|monetizing|monetising)\b/gi,
-  // FINDER-3: more number-free money claims
   /\bfree\s+money\b/gi,
   /\bpaid\s+out\b/gi,
   /\brevenue\s+share\b/gi, // not "revenue sharing" (the planned, non-binding wording)
@@ -33,14 +38,22 @@ const NUMBER_FREE: RegExp[] = [
   /\bincome\b/gi,
   /\broyalt(?:y|ies)\b/gi,
   /\bmoneti[sz]ation\b/gi,
+  // non-blocking extras
+  /\bget\s+a\s+cut\b/gi,
+  /\bearn\s+\$\$/gi,
+  /\bearn\s+rewards\b/gi,
+  /\bmoney[-\s]making\b/gi,
 ];
 
-// FINDER-3: a number-free claim is not a claim when negated by one of the 3 words before it
-// ("We will never monetize your data", "no monetize button", "we don't take royalties").
-const NEGATION = /\b(?:never|no|not|don'?t|won'?t|without|cannot|can'?t)\b/i;
+// A negation counts only inside the same clause (look-back stops at . : , ! ?) and directly before the term,
+// with at most a little filler between ('never monetize', 'will never ever monetize', "don't take royalties").
+const NEGATION_WORD = /^(?:no|never|not|don'?t|won'?t)$/i;
+const FILLER = /^(?:will|ever|a|an|any|the|be|take)$/i;
 const negated = (flat: string, i: number) => {
-  const before = flat.slice(Math.max(0, i - 60), i).split(/\s+/).filter(Boolean).slice(-3).join(' ');
-  return NEGATION.test(before) || /\bnot\s*$/i.test(before);
+  const clause = flat.slice(0, i).split(/[.:,!?]/).pop() ?? '';
+  const words = clause.trim().split(/\s+/).filter(Boolean);
+  while (words.length && FILLER.test(words[words.length - 1])) words.pop();
+  return words.length > 0 && NEGATION_WORD.test(words[words.length - 1]);
 };
 
 export function findMoneyClaims(text: string): string[] {
@@ -57,17 +70,18 @@ export function findMoneyClaims(text: string): string[] {
       matchedRanges.push([Math.max(0, i - WINDOW), i + m[0].length + WINDOW]);
     }
   }
-  for (const re of NUMBER_FREE) {
+  const scan = (re: RegExp, honourNegation: boolean) => {
     for (const m of flat.matchAll(re)) {
       const i = m.index ?? 0;
       const end = i + m[0].length;
       if (matchedRanges.some(([s, e]) => Math.max(s, i) < Math.min(e, end))) continue;
-      if (negated(flat, i)) continue;
+      if (honourNegation && negated(flat, i)) continue;
       matchedRanges.push([i, end]);
-      const around = flat.slice(Math.max(0, i - WINDOW), end + WINDOW);
-      hits.push(around.trim());
+      hits.push(flat.slice(Math.max(0, i - WINDOW), end + WINDOW).trim());
     }
-  }
+  };
+  for (const re of NUMBER_FREE) scan(re, false);
+  for (const re of NEGATABLE) scan(re, true);
   return hits;
 }
 
