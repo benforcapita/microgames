@@ -2,6 +2,7 @@
 // Reads bundles from the private Supabase Storage bucket with the secret key; must be served from its own
 // cookieless origin, never the portal's.
 import fs from 'node:fs';
+import { frameAncestors } from './frame-ancestors.mjs';
 
 const SUPABASE_URL = process.env.PUBLIC_SUPABASE_URL?.replace(/\/$/, '');
 const SECRET = process.env.SUPABASE_SECRET_KEY;
@@ -10,7 +11,7 @@ const WEB_ORIGINS = process.env.MG_WEB_ORIGINS ?? 'http://localhost:* http://127
 const BOOT = fs.readFileSync(new URL('./boot.js', import.meta.url), 'utf8');
 
 const LIB_HOSTS = 'https://cdn.jsdelivr.net https://unpkg.com https://esm.sh https://cdnjs.cloudflare.com https://ga.jspm.io';
-const GAME_CSP = [
+const gameCsp = (ancestors) => [
   'sandbox allow-scripts allow-pointer-lock',
   "default-src 'none'",
   `script-src 'unsafe-inline' 'unsafe-eval' blob: ${LIB_HOSTS}`,
@@ -22,7 +23,7 @@ const GAME_CSP = [
   'worker-src blob:',
   "form-action 'none'",
   "base-uri 'none'",
-  `frame-ancestors ${WEB_ORIGINS}`,
+  `frame-ancestors ${ancestors}`,
 ].join('; ');
 
 const ID_RE = /^[A-Za-z0-9_-]{6,16}$/;
@@ -90,8 +91,14 @@ export const handle = async (req, res) => {
       }
       return send(res, 200, inject(body.toString('utf8')), {
         'Content-Type': MIME.html,
-        'Content-Security-Policy': GAME_CSP,
+        'Content-Security-Policy': gameCsp(frameAncestors({
+          origin: req.headers.origin,
+          referer: req.headers.referer,
+          embed: url.searchParams.get('embed'),
+          webOrigins: WEB_ORIGINS,
+        })),
         'Cache-Control': 'no-cache',
+        Vary: 'Origin, Referer',
       });
     } catch (err) {
       console.error('[game-cdn]', err);
