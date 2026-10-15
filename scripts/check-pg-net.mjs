@@ -1,6 +1,8 @@
 // Print the pg_net PASS/GAP report. Does not raise inside the database.
 // --lockdown runs supabase/ops/pg_net_lockdown.sql as the current role first.
-// --strict exits non-zero when any row is GAP (operator/CI gate after a real lockdown).
+// --strict exits non-zero when any row is GAP.
+// After Supabase support runs the lockdown as supabase_admin, this is required:
+//   npm run check:pg-net -- --strict
 
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';

@@ -6,13 +6,14 @@ import { listGames, platformStats } from '../lib/server/games';
 import { compact } from '../lib/format';
 import { getContent, getFeatured } from '../lib/server/content';
 
+const device = Astro.locals.device;
 const [live, fresh, stats, copy, banner, featured] = await Promise.all([
-  listGames({ stage: 'live', sort: 'top', limit: 8 }),
-  listGames({ stage: 'proving', sort: 'new', limit: 4 }),
-  platformStats(),
+  listGames({ stage: 'live', sort: 'top', limit: 8, device }),
+  listGames({ stage: 'proving', sort: 'new', limit: 4, device }),
+  platformStats(device),
   getContent('home.hero'),
   getContent('home.banner'),
-  getFeatured(),
+  getFeatured(8, device),
 ]);
 // Featured games come from featured_games; without any, the hero falls back to the current ordering (top live game).
 const hero = featured[0]?.game ?? live[0];
