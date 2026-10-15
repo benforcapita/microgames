@@ -21,6 +21,34 @@ describe('findMoneyClaims', () => {
     assert.deepEqual(findMoneyClaims('Crash rate ≤ 5% · first frame under 3s for ≥ 90% of plays'), []);
     assert.deepEqual(findMoneyClaims('Plays measured ≥ 100 · start rate ≥ 40% of plays'), []);
   });
+  it('flags number-free money claims', () => {
+    for (const t of [
+      'earn money from every play',
+      'a cut of ad money',
+      'make $5 per game',
+      'paid per play',
+      'monthly payouts to creators',
+      'monetize your game',
+    ]) {
+      assert.ok(findMoneyClaims(t).length >= 1, t);
+    }
+  });
+  it('generalizes the number-free rules', () => {
+    for (const t of ['Make real money with your games', 'your share of ad revenue', 'Creators get paid for every play', 'weekly payouts', 'Monetise your games today'])
+      assert.ok(findMoneyClaims(t).length >= 1, t);
+  });
+  it('keeps the clawback line and monetized status copy unflagged', () => {
+    for (const t of [
+      'Invalid traffic is removed and payouts are clawed back.',
+      'Live and monetized.',
+      'Live and monetized. Revenue sharing for creators is planned; details to come.',
+      'This game has graduated and is monetized.',
+      'Your game goes live straight away in an unmonetized discovery feed.',
+    ]) {
+      assert.deepEqual(findMoneyClaims(t), [], t);
+      assert.deepEqual(findPaymentPromises(t), [], t);
+    }
+  });
 });
 
 describe('findPaymentPromises', () => {
