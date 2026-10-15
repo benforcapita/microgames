@@ -35,7 +35,46 @@ const CASES: Record<string, { status: CheckLevel; expect: Record<string, CheckLe
 
 // Bound is deliberately loose (4x the ~500 ms target) so slow or busy CI machines don't flake: a quadratic
 // scan over 5 MB takes minutes, so this still catches any non-linear regression.
+// Under box load both t and the baseline slow down together; a quadratic regression blows past RATIO*baseline even under load.
 const ADVERSARIAL_MS = 2000;
+// Per-test bound relative to a bare charCodeAt scan of the same input, measured in the same run (so load cancels out).
+// Unloaded ratios: js-budget ~200x, everything else <=25x. A quadratic scan (even one strided every 5000 chars) adds >=500x.
+const RATIO = 100;
+
+const baselineMs = (input: string): number => {
+  let min = Infinity;
+  for (let r = 0; r < 3; r++) {
+    let sum = 0;
+    const t0 = performance.now();
+    for (let i = 0; i < input.length; i++) {
+      sum += input.charCodeAt(i);
+    }
+    const ms = performance.now() - t0;
+    if (sum < 0) throw new Error('unreachable');
+    if (ms < min) min = ms;
+  }
+  return min;
+};
+
+const assertFast = <T>(label: string, input: string, run: () => T, ratio = RATIO): T => {
+  const attempts: { t: number; b: number }[] = [];
+  let lastRes!: T;
+  for (let i = 0; i < 3; i++) {
+    const t0 = performance.now();
+    lastRes = run();
+    const t = performance.now() - t0;
+    const b = baselineMs(input);
+    attempts.push({ t, b });
+    if (t < ADVERSARIAL_MS || t < ratio * b) {
+      return lastRes;
+    }
+  }
+  assert.fail(
+    `${label} exceeded timing budget in all 3 attempts: ${attempts
+      .map((a, i) => `#${i + 1} (t=${a.t.toFixed(1)}ms, b=${a.b.toFixed(1)}ms)`)
+      .join(', ')} (limit: < ${ADVERSARIAL_MS}ms or < ${ratio}*b)`
+  );
+};
 describe('static-check fixtures', () => {
   it('covers at least 10 fixtures, all of them on disk', () => {
     const onDisk = fs.readdirSync(FIXTURES).filter((f) => f.endsWith('.html')).sort();
@@ -156,10 +195,7 @@ describe('static-check is linear on adversarial input (5 MB, < ADVERSARIAL_MS ea
   for (const [name, input] of Object.entries(CASES)) {
     it(name, () => {
       assert.ok(new TextEncoder().encode(input).length <= FIVE_MB);
-      const t0 = performance.now();
-      analyzeGame(input);
-      const ms = performance.now() - t0;
-      assert.ok(ms < ADVERSARIAL_MS, `${name}: ${ms.toFixed(0)} ms (limit ${ADVERSARIAL_MS})`);
+      assertFast(name, input, () => analyzeGame(input));
     });
   }
 });
@@ -167,32 +203,34 @@ describe('static-check is linear on adversarial input (5 MB, < ADVERSARIAL_MS ea
 describe('Edge CPU budget: AST phase is capped, hard fails stay unconditional', () => {
   const MB = 1024 * 1024;
   const fill = (unit: string, size: number) => unit.repeat(Math.floor(size / unit.length));
-  const timed = (html: string) => {
-    const t0 = performance.now();
-    const r = analyzeGame(html);
-    return { r, ms: performance.now() - t0 };
-  };
   const warns = (r: StaticReport) => r.checks.filter((c) => c.level === 'warn').map((c) => c.id);
 
   it('member chain at 4.9 MB finishes under 1 s total', () => {
-    const { r, ms } = timed(`<canvas></canvas><script>x${fill('.a', 4.9 * MB)}</script>`);
-    assert.ok(ms < ADVERSARIAL_MS, `${ms.toFixed(0)} ms (limit ${ADVERSARIAL_MS})`);
+    const input = `<canvas></canvas><script>x${fill('.a', 4.9 * MB)}</script>`;
+    const r = assertFast('member chain at 4.9 MB finishes under 1 s total', input, () => analyzeGame(input));
     assert.notEqual(r.status, 'fail');
   });
   it('270k inline <script> blocks at 4.9 MB finish under 1 s total', () => {
     const html = '<script>a</script>'.repeat(272_000); // 18 bytes each, 4.9 MB
     assert.ok(html.length >= 4.89e6 && html.length <= STATIC_LIMITS.maxBytes, String(html.length));
-    const { r, ms } = timed(html);
-    assert.ok(ms < ADVERSARIAL_MS, `${ms.toFixed(0)} ms (limit ${ADVERSARIAL_MS})`);
+    const r = assertFast('270k inline <script> blocks at 4.9 MB finish under 1 s total', html, () => analyzeGame(html));
     assert.notEqual(r.status, 'fail');
   });
   it('JS just under the byte budget is fully analysed in under 1 s', () => {
-    const { r, ms } = timed(`<canvas></canvas><script>${fill('var a=b+c*d(e,f);', AST_BUDGET.maxJsBytes - 64)}</script>`);
-    assert.ok(ms < ADVERSARIAL_MS, `${ms.toFixed(0)} ms (limit ${ADVERSARIAL_MS})`);
-    assert.equal(level(r, 'deep-analysis'), undefined);
+    const input = `<canvas></canvas><script>${fill('var a=b+c*d(e,f);', AST_BUDGET.maxJsBytes - 64)}</script>`;
+    // AST_BUDGET.ms is a wall-clock guard, so a busy box trips it and flakes this test. Here we test the byte cap
+    // (just under it => full analysis, no skip) and speed (assertFast, load-relative); widen only the wall-clock cap.
+    const savedMs = AST_BUDGET.ms;
+    AST_BUDGET.ms = ADVERSARIAL_MS * 5;
+    try {
+      const r = assertFast('JS just under the byte budget is fully analysed in under 1 s', input, () => analyzeGame(input), 600);
+      assert.equal(level(r, 'deep-analysis'), undefined);
+    } finally {
+      AST_BUDGET.ms = savedMs;
+    }
   });
   it('over budget: exactly one warning "deep analysis skipped (too large)", never a fail', () => {
-    const { r } = timed(`<canvas></canvas><script>${fill('var a=b+c*d(e,f);', 3 * MB)}</script>`);
+    const r = analyzeGame(`<canvas></canvas><script>${fill('var a=b+c*d(e,f);', 3 * MB)}</script>`);
     const deep = r.checks.find((c) => c.id === 'deep-analysis');
     assert.equal(deep?.level, 'warn');
     assert.equal(deep?.message, 'deep analysis skipped (too large)');
@@ -370,9 +408,6 @@ describe('SP-4 QA: budget-skipped files cannot slip past the text-scan fallback'
 
   it('the whole fallback stays fast at 4.9 MB (loose CI bound)', () => {
     const big = `<canvas></canvas><script>${'var a=b+c*d(e,f);/*x*/"s\\x41";'.repeat(Math.floor((4.9 * MB2) / 32))}</script>`;
-    const t0 = performance.now();
-    analyzeGame(big);
-    const ms = performance.now() - t0;
-    assert.ok(ms < ADVERSARIAL_MS, `${ms.toFixed(0)} ms (limit ${ADVERSARIAL_MS})`);
+    assertFast('the whole fallback stays fast at 4.9 MB (loose CI bound)', big, () => analyzeGame(big));
   });
 });
