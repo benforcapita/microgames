@@ -15,6 +15,7 @@ export const GRADUATION_DEFAULTS = {
 export type GraduationRules = typeof GRADUATION_DEFAULTS;
 
 export const MAX_SESSION_MS = 4 * 3600_000;
+export const MAX_FIRST_FRAME_MS = 60_000;
 
 export interface HealthCheck {
   key: string;
@@ -64,24 +65,31 @@ export function assessHealth(
 }
 
 /**
- * Coerce a telemetry sample to a millisecond count.
- * Non-numeric values and -Infinity become 0. +Infinity is left for the duration cap.
+ * Parse an unknown sample into a millisecond number, Infinity, -Infinity, or null if invalid.
+ * Null, undefined, empty/blank strings, non-numeric values, and NaN return null.
  */
-function toMs(value: unknown): number {
+function parseTelemetryMs(value: unknown): number | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'string' && value.trim() === '') return null;
+  if (typeof value !== 'number' && typeof value !== 'string') return null;
   const n = Number(value);
-  if (!Number.isFinite(n)) return n === Number.POSITIVE_INFINITY ? Number.POSITIVE_INFINITY : 0;
+  if (Number.isNaN(n)) return null;
+  return n;
+}
+
+export function clampFirstFrameMs(value: unknown): number | null {
+  const n = parseTelemetryMs(value);
+  if (n === null || n === Number.NEGATIVE_INFINITY) return null;
+  if (n === Number.POSITIVE_INFINITY || n > MAX_FIRST_FRAME_MS) return MAX_FIRST_FRAME_MS;
+  if (n < 0) return 0;
   return Math.round(n);
 }
 
-export function clampFirstFrameMs(value: unknown): number {
-  const n = toMs(value);
-  return Number.isFinite(n) ? Math.max(0, n) : 0;
-}
-
 export function clampDurationMs(value: unknown): number {
-  const n = toMs(value);
+  const n = parseTelemetryMs(value);
+  if (n === null || n === Number.NEGATIVE_INFINITY) return 0;
   if (n === Number.POSITIVE_INFINITY) return MAX_SESSION_MS;
-  return Math.min(MAX_SESSION_MS, Math.max(0, n));
+  return Math.min(MAX_SESSION_MS, Math.max(0, Math.round(n)));
 }
 
 export const slugify = (s: string) =>
@@ -95,4 +103,24 @@ export function normalizeTags(raw: string): string[] {
 export function uniqueSlug(title: string, taken: boolean, id: string): string {
   const base = slugify(title);
   return taken ? `${base}-${id.slice(0, 4).toLowerCase()}` : base;
+}
+
+/** Prior weight C for Bayesian rating: a game behaves as if it already had C votes at the global mean. */
+export const BAYES_PRIOR_VOTES = 10;
+
+/**
+ * Bayesian average `(C*m + sum) / (C + n)`: shrinks games with few votes toward the global mean `m`,
+ * so one 5★ vote does not outrank 200 votes at 4.8★. Must stay in sync with the SQL in `listGames`.
+ */
+export function bayesianRating(avg: number | null, count: number, globalMean: number, priorVotes = BAYES_PRIOR_VOTES): number {
+  const n = Math.max(0, count);
+  const sum = avg === null || n === 0 ? 0 : avg * n;
+  return (priorVotes * globalMean + sum) / (priorVotes + n);
+}
+
+/** Orders games for `sort=rated`: Bayesian average desc, then more votes first. */
+export function compareByBayes(globalMean: number) {
+  return (a: { avgRating: number | null; ratingCount: number }, b: { avgRating: number | null; ratingCount: number }) =>
+    bayesianRating(b.avgRating, b.ratingCount, globalMean) - bayesianRating(a.avgRating, a.ratingCount, globalMean) ||
+    b.ratingCount - a.ratingCount;
 }

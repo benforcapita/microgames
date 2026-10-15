@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import { GRADUATION } from './config';
 import { sql } from './db';
-import { assessHealth, clampDurationMs, clampFirstFrameMs, slugify, uniqueSlug, type HealthCheck } from './game-rules';
+import { BAYES_PRIOR_VOTES, assessHealth, clampDurationMs, clampFirstFrameMs, slugify, uniqueSlug, type HealthCheck } from './game-rules';
 import { bucket } from './supabase';
 
 export { normalizeTags } from './game-rules';
@@ -97,7 +97,8 @@ export interface ListOptions {
 const ORDER = {
   top: 'plays desc, created_at desc',
   new: 'created_at desc',
-  rated: 'coalesce(avg_rating, 0) desc, rating_count desc',
+  // Bayesian average (see bayesianRating in game-rules.ts): (C*m + sum) / (C + n), m = global mean of all stars.
+  rated: `(${BAYES_PRIOR_VOTES} * (select coalesce(avg(stars)::float8, 3) from ratings) + coalesce(avg_rating, 0) * rating_count) / (${BAYES_PRIOR_VOTES} + rating_count) desc, rating_count desc, created_at desc`,
 } as const;
 
 export async function listGames({ stage, sort = 'top', tag, creator, ownerId, forkedFrom, limit = 60 }: ListOptions = {}) {
@@ -191,15 +192,19 @@ export async function getUserRating(gameId: string, voter: string | undefined): 
 
 export type TelemetryType = 'session_start' | 'first_frame' | 'start' | 'complete' | 'crash' | 'heartbeat';
 
-export async function recordTelemetry(sessionId: string, gameId: string, type: TelemetryType, value = 0) {
+export async function recordTelemetry(sessionId: string, gameId: string, type: TelemetryType, value: unknown = 0) {
   const where = sql`where id = ${sessionId} and game_id = ${gameId}`;
   switch (type) {
     case 'session_start':
       await sql`insert into sessions (id, game_id) values (${sessionId}, ${gameId}) on conflict do nothing`;
       return;
-    case 'first_frame':
-      await sql`update sessions set first_frame_ms = ${clampFirstFrameMs(value)} ${where} and first_frame_ms is null`;
+    case 'first_frame': {
+      const ms = clampFirstFrameMs(value);
+      if (ms !== null) {
+        await sql`update sessions set first_frame_ms = ${ms} ${where} and first_frame_ms is null`;
+      }
       return;
+    }
     case 'start':
       await sql`update sessions set started = true ${where}`;
       break;
