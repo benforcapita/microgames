@@ -7,3 +7,5 @@ data/
 !.env.example
 .DS_Store
 .vercel
+test-results/
+playwright-report/
