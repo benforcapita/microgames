@@ -1,7 +1,8 @@
 const NEXT_BASE = 'https://next.invalid';
 
-export function safeNext(next: string | null | undefined, fallback = '/'): string {
-  if (!next || !next.startsWith('/') || /[\u0000-\u0020\u007f\\]/.test(next)) return fallback;
+/** Only allow same-site relative redirects (prevents open redirects via ?next=). */
+export function safeNext(next: unknown, fallback = '/'): string {
+  if (typeof next !== 'string' || !next.startsWith('/') || /[\u0000-\u0020\u007f\\]/.test(next)) return fallback;
   let u: URL;
   try {
     u = new URL(next, NEXT_BASE);
@@ -9,5 +10,7 @@ export function safeNext(next: string | null | undefined, fallback = '/'): strin
     return fallback;
   }
   if (u.origin !== NEXT_BASE) return fallback;
-  return u.pathname + u.search + u.hash;
+  const out = u.pathname + u.search + u.hash;
+  if (!out.startsWith('/') || out.startsWith('//') || out.startsWith('/\\')) return fallback;
+  return out;
 }
