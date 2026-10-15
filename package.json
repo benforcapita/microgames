@@ -13,7 +13,8 @@
     "build": "astro build",
     "start": "node scripts/dev.mjs start",
     "preview": "astro preview",
-    "astro": "astro"
+    "astro": "astro",
+    "smoke": "node scripts/smoke.mjs"
   },
   "dependencies": {
     "@astrojs/node": "11.1.6",
