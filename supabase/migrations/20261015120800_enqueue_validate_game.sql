@@ -14,13 +14,21 @@
 -- leaves an already-installed shared pg_net row where it is.
 create extension if not exists pg_net with schema extensions;
 
--- Take anon and authenticated off the queue and off http_post. On hosted,
--- REVOKE as postgres may only warn, because supabase_admin owns the pg_net
--- grants. That risk is accepted: anon and authenticated cannot run raw SQL,
--- and net is not in the PostgREST exposed schemas. Before and after apply,
--- confirm net is absent from Settings > API (pgrst.db_schemas). Do not drop
--- or alter the extension. Grant postgres and service_role SELECT first so a
--- real revoke of the PUBLIC grant does not remove the only path those roles have.
+-- Harmless attempt to take anon and authenticated off the queue and off
+-- http_post. Migrations run as postgres. supabase_admin owns the pg_net
+-- grants, and postgres is not a member of that role, so these statements warn
+-- and change nothing on hosted (and on the local stack). They stay so a future
+-- role that can revoke still runs them. They do not drop or alter pg_net.
+--
+-- The privileges that remain — USAGE on schema net, SELECT and INSERT on
+-- net.http_request_queue, EXECUTE on net.http_post — are reported by
+-- supabase/ops/check_pg_net_privileges.sql. supabase/ops/pg_net_lockdown.sql
+-- retries the grants and revokes as whoever is connected, then that check
+-- prints PASS or GAP. On hosted our SQL role is postgres, not supabase_admin,
+-- so the lockdown cannot be applied from our side. The guard is that net is
+-- not in the PostgREST exposed schemas. Confirm that before and after apply
+-- (Settings > API, or pgrst.db_schemas). Engineering Lead is raising the
+-- hosted fix with Ben.
 do $$
 declare
   fn regprocedure;

@@ -1,6 +1,13 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import postgres from 'postgres';
+
+const opsDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'ops');
+const lockdownSql = readFileSync(join(opsDir, 'pg_net_lockdown.sql'), 'utf8');
+const checkSql = readFileSync(join(opsDir, 'check_pg_net_privileges.sql'), 'utf8');
 
 const dbUrl = process.env.DATABASE_URL ?? 'postgresql://postgres:postgres@127.0.0.1:54322/postgres';
 const reason = 'validation unavailable, please re-upload';
@@ -56,23 +63,79 @@ async function setSecret(tx: Sql, secret: string | null): Promise<void> {
   await tx`select vault.create_secret(${secret}, 'validate_game_hook_secret', 'EF-2 test only')`;
 }
 
-async function revokeNetGrantsAsOwner(appUrl: string): Promise<void> {
-  const url = new URL(appUrl);
-  url.username = 'supabase_admin';
-  const admin = postgres(url.toString(), { connect_timeout: 3, max: 1, idle_timeout: 1 });
-  try {
-    await admin`
-      grant select on table net.http_request_queue to postgres, service_role
-    `;
-    await admin`
-      revoke select on table net.http_request_queue from public, anon, authenticated
-    `;
-    await admin`
-      revoke execute on function net.http_post(text, jsonb, jsonb, jsonb, integer) from anon, authenticated
-    `;
-  } finally {
-    await admin.end({ timeout: 1 });
+type PrivilegeRow = {
+  role_name: string;
+  privilege: string;
+  object_name: string;
+  status: string;
+};
+
+const closedRoles = ['anon', 'authenticated', 'public'] as const;
+const openPrivileges: Array<[string, string]> = [
+  ['USAGE', 'schema net'],
+  ['SELECT', 'net.http_request_queue'],
+  ['INSERT', 'net.http_request_queue'],
+];
+
+function formatReport(rows: PrivilegeRow[]): string {
+  return rows.map((row) => `${row.status} ${row.role_name} ${row.privilege} ${row.object_name}`).join('\n');
+}
+
+async function privilegeReport(tx: Sql): Promise<PrivilegeRow[]> {
+  const rows = await tx.unsafe<PrivilegeRow[]>(checkSql);
+  return [...rows];
+}
+
+function httpPostRows(rows: PrivilegeRow[], role: string): PrivilegeRow[] {
+  return rows.filter(
+    (row) => row.role_name === role && row.privilege === 'EXECUTE' && row.object_name.startsWith('net.http_post('),
+  );
+}
+
+function assertOpenGap(rows: PrivilegeRow[]): void {
+  for (const role of closedRoles) {
+    for (const [privilege, objectName] of openPrivileges) {
+      const row = rows.find(
+        (item) => item.role_name === role && item.privilege === privilege && item.object_name === objectName,
+      );
+      assert.ok(row, `missing ${role} ${privilege} ${objectName}\n${formatReport(rows)}`);
+      assert.equal(row.status, 'GAP', `${role} ${privilege} ${objectName} should still be granted`);
+    }
   }
+  // http_post's default ACL names anon and authenticated. PUBLIC is not on that
+  // function, so a PASS there is not evidence the migration revoked anything.
+  for (const role of ['anon', 'authenticated'] as const) {
+    const exec = httpPostRows(rows, role);
+    assert.ok(exec.length >= 1, `missing ${role} EXECUTE net.http_post\n${formatReport(rows)}`);
+    for (const row of exec) {
+      assert.equal(row.status, 'GAP', `${role} EXECUTE ${row.object_name} should still be granted`);
+    }
+  }
+}
+
+function assertLockdownPass(rows: PrivilegeRow[]): void {
+  const gaps = rows.filter((row) => row.status !== 'PASS');
+  assert.deepEqual(gaps, [], `lockdown left gaps:\n${formatReport(gaps)}`);
+  for (const role of ['postgres', 'service_role']) {
+    for (const [privilege, objectName] of [
+      ['USAGE', 'schema net'],
+      ['SELECT', 'net.http_request_queue'],
+    ] as const) {
+      const row = rows.find(
+        (item) => item.role_name === role && item.privilege === privilege && item.object_name === objectName,
+      );
+      assert.equal(row?.status, 'PASS', `${role} ${privilege} ${objectName}`);
+    }
+    const exec = httpPostRows(rows, role);
+    assert.ok(exec.length >= 1, `missing ${role} EXECUTE net.http_post`);
+    assert.ok(exec.every((row) => row.status === 'PASS'));
+  }
+}
+
+async function withRole(appUrl: string, username: string): Promise<postgres.Sql> {
+  const url = new URL(appUrl);
+  url.username = username;
+  return postgres(url.toString(), { connect_timeout: 3, max: 1, idle_timeout: 1 });
 }
 
 function hookHeader(headers: Record<string, string> | undefined): string | undefined {
@@ -113,7 +176,7 @@ async function assertDispatchSkipped(tx: Sql, id: string): Promise<void> {
 }
 
 describe('validate-game hook dispatch', { concurrency: false }, () => {
-  it('does not seed a url or hook secret, and revokes net grants', async (t) => {
+  it('does not seed a url or hook secret, and leaves pg_net grants in place', async (t) => {
     const sql = await connect(t);
     if (!sql) return;
     try {
@@ -130,55 +193,67 @@ describe('validate-game hook dispatch', { concurrency: false }, () => {
       `;
       assert.equal(seeded?.n, 0);
 
-      const [grants] = await sql<{
-        anon_select: boolean;
-        anon_execute: boolean;
+      const [dispatch] = await sql<{
         anon_dispatch: boolean;
         auth_dispatch: boolean;
         anon_login: boolean;
         auth_login: boolean;
       }[]>`
         select
-          has_table_privilege('anon', 'net.http_request_queue', 'SELECT') as anon_select,
-          has_function_privilege('anon', 'net.http_post(text,jsonb,jsonb,jsonb,integer)', 'EXECUTE') as anon_execute,
           has_function_privilege('anon', 'private.dispatch_validate_game(text,text)', 'EXECUTE') as anon_dispatch,
           has_function_privilege('authenticated', 'private.dispatch_validate_game(text,text)', 'EXECUTE') as auth_dispatch,
           (select rolcanlogin from pg_roles where rolname = 'anon') as anon_login,
           (select rolcanlogin from pg_roles where rolname = 'authenticated') as auth_login
       `;
-      assert.ok(grants);
-      assert.equal(grants.anon_dispatch, false);
-      assert.equal(grants.auth_dispatch, false);
-      assert.equal(grants.anon_login, false);
-      assert.equal(grants.auth_login, false);
-      // The migration issues this revoke. supabase_admin owns the pg_net grants,
-      // so the postgres migration role cannot change them. Apply the same
-      // statements as that owner, then require the privileges to be gone.
-      if (grants.anon_select || grants.anon_execute) {
-        await revokeNetGrantsAsOwner(dbUrl);
+      assert.equal(dispatch?.anon_dispatch, false);
+      assert.equal(dispatch?.auth_dispatch, false);
+      assert.equal(dispatch?.anon_login, false);
+      assert.equal(dispatch?.auth_login, false);
+
+      // Post-migration state, untouched. The migration REVOKEs do not stick.
+      const migrated = await privilegeReport(sql);
+      assertOpenGap(migrated);
+
+      // Same script, current role (postgres). It must not throw, and it must
+      // not be able to clear the gap. Roll back so the assertion stays on the
+      // post-migration grants.
+      await rollback(sql, async (tx) => {
+        await tx.unsafe(lockdownSql);
+        assertOpenGap(await privilegeReport(tx));
+      });
+
+      const admin = await withRole(dbUrl, 'supabase_admin');
+      try {
+        try {
+          await admin`select 1`;
+        } catch {
+          throw new Error('local supabase_admin login failed; cannot prove post-lockdown PASS');
+        }
+        await rollback(admin, async (tx) => {
+          await tx.unsafe(lockdownSql);
+          assertLockdownPass(await privilegeReport(tx));
+          await tx.unsafe('set role postgres');
+          await setUrl(tx, proofUrl);
+          await setSecret(tx, proofSecret);
+          const id = gameId('lockdown');
+          await tx`
+            insert into public.games (id, slug, creator, title, stage)
+            values (${id}, ${id}, 'stub', 'After lockdown', 'pending')
+          `;
+          const [req] = await tx<{ body: string; headers: Record<string, string> }[]>`
+            select convert_from(body, 'UTF8') as body, headers
+            from net.http_request_queue
+            where position(${id} in convert_from(body, 'UTF8')) > 0
+            order by id desc
+            limit 1
+          `;
+          assert.ok(req, 'dispatch still queues after pg_net lockdown');
+          assert.deepEqual(JSON.parse(req.body), { gameId: id, reason: 'stage_pending' });
+          assert.equal(hookHeader(req.headers), proofSecret);
+        });
+      } finally {
+        await admin.end({ timeout: 1 });
       }
-      const [after] = await sql<{
-        anon_select: boolean;
-        auth_select: boolean;
-        anon_execute: boolean;
-        auth_execute: boolean;
-        postgres_execute: boolean;
-        postgres_select: boolean;
-      }[]>`
-        select
-          has_table_privilege('anon', 'net.http_request_queue', 'SELECT') as anon_select,
-          has_table_privilege('authenticated', 'net.http_request_queue', 'SELECT') as auth_select,
-          has_function_privilege('anon', 'net.http_post(text,jsonb,jsonb,jsonb,integer)', 'EXECUTE') as anon_execute,
-          has_function_privilege('authenticated', 'net.http_post(text,jsonb,jsonb,jsonb,integer)', 'EXECUTE') as auth_execute,
-          has_function_privilege('postgres', 'net.http_post(text,jsonb,jsonb,jsonb,integer)', 'EXECUTE') as postgres_execute,
-          has_table_privilege('postgres', 'net.http_request_queue', 'SELECT') as postgres_select
-      `;
-      assert.equal(after?.anon_select, false);
-      assert.equal(after?.auth_select, false);
-      assert.equal(after?.anon_execute, false);
-      assert.equal(after?.auth_execute, false);
-      assert.equal(after?.postgres_execute, true);
-      assert.equal(after?.postgres_select, true);
     } finally {
       await sql.end({ timeout: 1 });
     }
