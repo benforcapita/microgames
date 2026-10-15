@@ -171,3 +171,10 @@ export function canViewGame(game: { stage: Stage; ownerId: string | null } | nul
 
 /** createGame reads back the row it just inserted, which may be 'pending' (SP-5 default). */
 export const CREATED_GAME_LOOKUP = { includeUnpublished: true } as const;
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** RT-2 expand step: ratings.user_id mirrors voter when voter is an auth user id, else null. */
+export function ratingUserId(voter: string): string | null {
+  return UUID_RE.test(voter) ? voter.toLowerCase() : null;
+}
