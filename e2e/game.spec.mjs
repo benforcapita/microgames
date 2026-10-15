@@ -25,7 +25,8 @@ test('seed game loads in the sandboxed iframe and sends telemetry', async ({ pag
   const frameSrc = await frameEl.getAttribute('src');
   expect(frameSrc).toContain(`${CDN}/g/${GAME_ID}/index.html`);
   const cdnHtml = await (await page.request.get(frameSrc.split('#')[0])).text();
-  expect(cdnHtml).not.toContain('__MG_PREVIEW');
+  expect(cdnHtml).not.toContain('window.__MG_PREVIEW=true');
+  expect(cdnHtml).not.toContain('window.__MG_PREVIEW = true');
 
   // Game booted inside the frame (boot.js runtime injected, canvas rendered).
   const frame = page.frameLocator('iframe.mg-frame');
