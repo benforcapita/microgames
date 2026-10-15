@@ -1,5 +1,6 @@
 ---
 import Layout from '../layouts/Layout.astro';
+import CreatorPrompts from '../components/CreatorPrompts.astro';
 import { getGame } from '../lib/server/games';
 import { UPLOAD } from '../lib/server/config';
 
@@ -39,6 +40,7 @@ const forkable = fork && fork.license !== 'All rights reserved' ? fork : null;
           coding tool and ask it to integrate.
         </p>
       </div>
+      <CreatorPrompts />
     </div>
 
     <form id="upload-form" class="panel form" method="post" action="/api/games" enctype="multipart/form-data">
