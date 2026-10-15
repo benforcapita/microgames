@@ -28,11 +28,18 @@ try {
     const html = fs.readFileSync(path.join('seed/games', s.file));
     const { error } = await storage.upload(`${s.id}/index.html`, html, { contentType: 'text/html; charset=utf-8', upsert: true });
     if (error) throw error;
+    // Real thumbnail captured by `npm run thumbs -- --force --out seed/thumbs` (640x360 webp); optional per game.
+    const thumbFile = path.join('seed/thumbs', `${s.id}.webp`);
+    const thumb = fs.existsSync(thumbFile) ? 'thumb.webp' : null;
+    if (thumb) {
+      const { error: thumbError } = await storage.upload(`${s.id}/${thumb}`, fs.readFileSync(thumbFile), { contentType: 'image/webp', upsert: true });
+      if (thumbError) throw thumbError;
+    }
     const created = now - (games.length - i) * 3 * day;
     await sql`
-      insert into games (id, slug, creator, title, tagline, description, tags, license, stage, size_bytes, hue, created_at, graduated_at)
+      insert into games (id, slug, creator, title, tagline, description, tags, license, stage, size_bytes, hue, thumb, created_at, graduated_at)
       values (${s.id}, ${s.file.replace(/\.html$/, '')}, ${s.creator}, ${s.title}, ${s.tagline}, ${s.description}, ${s.tags},
-              ${s.license}, ${s.stage}, ${html.byteLength}, ${s.hue}, ${new Date(created)},
+              ${s.license}, ${s.stage}, ${html.byteLength}, ${s.hue}, ${thumb}, ${new Date(created)},
               ${s.stage === 'live' ? new Date(created + day) : null})`;
 
     const q = s.quality;
@@ -56,7 +63,7 @@ try {
       stars: Math.min(5, Math.max(1, Math.round(2 + q * 3 + (Math.random() - 0.5) * 2))),
     }));
     if (ratings.length) await sql`insert into ratings ${sql(ratings)}`;
-    console.log(`seeded ${s.title} (${s.sessions} plays)`);
+    console.log(`seeded ${s.title} (${s.sessions} plays${thumb ? ', thumb.webp' : ''})`);
   }
 } finally {
   await sql.end();

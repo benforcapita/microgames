@@ -15,7 +15,7 @@ const BOOT = fs.readFileSync(new URL('./boot.js', import.meta.url), 'utf8');
 
 
 const ID_RE = /^[A-Za-z0-9_-]{6,16}$/;
-const FILE_RE = /^(index\.html|thumb\.(png|jpg|webp))$/;
+const FILE_RE = /^(index\.html|thumb(-[a-z0-9]{4,24})?\.(png|jpg|webp))$/;
 const MIME = { html: 'text/html; charset=utf-8', png: 'image/png', jpg: 'image/jpeg', webp: 'image/webp' };
 
 // Small TTL cache so popular games don't hit Storage on every play.
