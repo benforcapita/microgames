@@ -6,8 +6,10 @@
  * offers a publish action; the page only reflects `games.stage`.
  *
  * `games.stage` accepts `pending` and `game_validations` is on main (SP-3). Reads
- * and writes use the shared columns (`status`, `static_report`, `run_report`,
- * `screenshot_paths`, …). A missing relation or a rejected insert is a real error.
+ * use the shared columns (`status`, `static_report`, `run_report`,
+ * `screenshot_paths`, …). This module does not insert `game_validations`: the
+ * EF-2 trigger enqueues validate-game, and EF-1 writes the one verdict row.
+ * A missing relation or a rejected insert is a real error.
  */
 import { normalizeTags, type Stage } from './game-rules';
 import { validateGameUpload, type ForkParent } from './upload';
@@ -43,12 +45,6 @@ export interface ValidationRow {
   screenshotPaths: string[];
   createdAt: string;
   finishedAt: string | null;
-}
-
-export interface QueuedStaticReport {
-  status: 'pass';
-  bytes: number;
-  checks: [];
 }
 
 export interface SubmissionStore {
@@ -105,6 +101,49 @@ const STATUSES = new Set<ValidationStatus>(['queued', 'running', 'passed', 'fail
 const LEVELS = new Set<CheckLevel>(['pass', 'fail', 'warn']);
 const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const AUTO_PUBLISH = 'A pass is published to the Proving Grounds automatically.';
+/** Verdicts that must never sit on a row whose status is still `queued`. */
+const FAKE_QUEUED_VERDICTS = new Set(['pass', 'fail', 'passed', 'failed', 'warn']);
+
+export const VALIDATION_ENQUEUE_ERROR = 'Validation could not be queued. Try the upload again.';
+
+/**
+ * A queued placeholder has no verdict. `null`, `'queued'`, and `{ status: 'queued' }`
+ * stay. A report that claims pass/fail is a fake verdict and is replaced.
+ */
+export function coerceQueuedStaticReport(report: unknown): unknown {
+  if (report == null) return null;
+  if (report === 'queued') return 'queued';
+  if (typeof report !== 'object' || Array.isArray(report)) return { status: 'queued' };
+  const status = (report as { status?: unknown }).status;
+  if (typeof status === 'string' && FAKE_QUEUED_VERDICTS.has(status)) return { status: 'queued' };
+  return report;
+}
+
+/**
+ * The row the status page should poll. A real verdict wins over a stale
+ * `queued` placeholder (SP-5 used to insert one beside EF-1's row).
+ */
+export function preferValidation(rows: ValidationRow[]): ValidationRow | null {
+  let best: ValidationRow | null = null;
+  for (const row of rows) {
+    if (!best) {
+      best = row;
+      continue;
+    }
+    const rowQueued = row.status === 'queued';
+    const bestQueued = best.status === 'queued';
+    if (rowQueued !== bestQueued) {
+      if (!rowQueued) best = row;
+      continue;
+    }
+    if (row.version !== best.version) {
+      if (row.version > best.version) best = row;
+      continue;
+    }
+    if (row.createdAt > best.createdAt) best = row;
+  }
+  return best;
+}
 
 export function isSubmissionPreview(id: string): boolean {
   return id === 'preview' && process.env.MG_SUBMISSION_PREVIEW === '1' && process.env.NODE_ENV !== 'production';
@@ -120,7 +159,14 @@ export async function planGameUpload(opts: {
   form: FormData | null;
   findGame: (slugOrId: string) => Promise<ForkParent | null>;
   createGame: (input: PendingGameInput) => Promise<{ id: string }>;
-  enqueueValidation: (gameId: string, report: QueuedStaticReport) => Promise<void>;
+  /**
+   * Optional post-insert step. Production does not pass one: EF-2 enqueues inside
+   * the games insert and this flow must not write a second `game_validations` row.
+   * If the step throws, the game and its bundle are removed and the result is an
+   * error response, not an exception that leaves a pending game with no validator.
+   */
+  enqueueValidation?: (gameId: string) => Promise<void>;
+  rollbackUpload?: (gameId: string) => Promise<void>;
 }): Promise<UploadPlan> {
   if (!opts.user || !opts.profile) {
     return { type: 'errors', status: 401, errors: ['Log in and pick a handle to upload.'] };
@@ -143,9 +189,32 @@ export async function planGameUpload(opts: {
     forkedFrom: upload.forkedFrom,
     stage: 'pending',
   });
-  await opts.enqueueValidation(game.id, { status: 'pass', bytes: upload.html.byteLength, checks: [] });
+  if (opts.enqueueValidation) {
+    try {
+      await opts.enqueueValidation(game.id);
+    } catch (err) {
+      if (opts.rollbackUpload) {
+        try {
+          await opts.rollbackUpload(game.id);
+        } catch (cleanupErr) {
+          logRollbackFailure(game.id, cleanupErr);
+        }
+      } else {
+        logRollbackFailure(game.id, err);
+      }
+      return { type: 'errors', status: 503, errors: [VALIDATION_ENQUEUE_ERROR] };
+    }
+  }
 
   return { type: 'redirect', location: `/submissions/${game.id}`, gameId: game.id, stage: 'pending' };
+}
+
+function logRollbackFailure(gameId: string, error: unknown) {
+  try {
+    console.error(`Failed to roll back pending game ${gameId} after validation enqueue failed`, error);
+  } catch {
+    // A broken logger must not replace the enqueue result.
+  }
 }
 
 export async function readSubmission(opts: {
@@ -180,7 +249,10 @@ export function buildSubmissionView(game: SubmissionGame, validation: Validation
   const status = validation?.status ?? null;
   const phase: SubmissionView['phase'] = status ?? 'waiting';
   const terminal = status === 'failed' || status === 'error' || (status === 'passed' && game.stage !== 'pending');
-  const checks = validation ? [...checksFrom(validation.staticReport, 'static'), ...checksFrom(validation.runReport, 'run')] : [];
+  const staticReport = validation?.status === 'queued'
+    ? coerceQueuedStaticReport(validation.staticReport)
+    : validation?.staticReport;
+  const checks = validation ? [...checksFrom(staticReport, 'static'), ...checksFrom(validation.runReport, 'run')] : [];
   const run = reportObject(validation?.runReport);
 
   let headline = 'Waiting';

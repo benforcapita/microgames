@@ -2,9 +2,12 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
 import {
+  VALIDATION_ENQUEUE_ERROR,
   buildSubmissionView,
+  coerceQueuedStaticReport,
   handleSubmissionStatus,
   planGameUpload,
+  preferValidation,
   type PendingGameInput,
   type SubmissionGame,
   type SubmissionStore,
@@ -83,9 +86,9 @@ function memory(row: SubmissionGame | null, latest: ValidationRow | null): Submi
 }
 
 describe('upload creates a pending game', () => {
-  it('redirects the owner to /submissions/:id and enqueues validation', async () => {
+  it('redirects the owner to /submissions/:id without writing a validation row', async () => {
     const created: PendingGameInput[] = [];
-    const queued: string[] = [];
+    let enqueued = 0;
     const result = await planGameUpload({
       user: { id: 'owner-1' },
       profile: { handle: 'ada' },
@@ -95,11 +98,8 @@ describe('upload creates a pending game', () => {
         created.push(input);
         return { id: 'game1234' };
       },
-      enqueueValidation: async (gameId, report) => {
-        queued.push(gameId);
-        assert.equal(report.status, 'pass');
-        assert.equal(report.checks.length, 0);
-        assert.equal(report.bytes, HTML.length);
+      enqueueValidation: async () => {
+        enqueued += 1;
       },
     });
 
@@ -111,7 +111,21 @@ describe('upload creates a pending game', () => {
     assert.equal(created[0].stage, 'pending');
     assert.equal(created[0].creator, 'ada');
     assert.deepEqual(created[0].tags, ['arcade', 'physics']);
-    assert.deepEqual(queued, ['game1234']);
+    // The optional hook may run, but it receives no static report to fake a pass.
+    assert.equal(enqueued, 1);
+  });
+
+  it('does not require an app-level validation insert', async () => {
+    const result = await planGameUpload({
+      user: { id: 'owner-1' },
+      profile: { handle: 'ada' },
+      form: form(),
+      findGame: async () => null,
+      createGame: async () => ({ id: 'game1234' }),
+    });
+    assert.equal(result.type, 'redirect');
+    if (result.type !== 'redirect') return;
+    assert.equal(result.location, '/submissions/game1234');
   });
 
   it('does not create a game when the visitor is logged out or the file is rejected', async () => {
@@ -146,8 +160,9 @@ describe('upload creates a pending game', () => {
     assert.equal(created, 0);
   });
 
-  it('propagates a rejected games insert and a failed validation enqueue', async () => {
+  it('propagates a rejected games insert', async () => {
     const insertError = Object.assign(new Error('new row for relation "games" violates check constraint "games_stage_check"'), { code: '23514' });
+    let enqueued = 0;
     await assert.rejects(
       () => planGameUpload({
         user: { id: 'owner-1' },
@@ -158,32 +173,143 @@ describe('upload creates a pending game', () => {
           throw insertError;
         },
         enqueueValidation: async () => {
-          throw new Error('should not enqueue');
+          enqueued += 1;
         },
       }),
       (err) => err === insertError,
     );
+    assert.equal(enqueued, 0);
+  });
 
+  it('rolls the game back when enqueue fails instead of throwing a 500', async () => {
     const enqueueError = Object.assign(new Error('relation "game_validations" does not exist'), { code: '42P01' });
-    await assert.rejects(
-      () => planGameUpload({
+    const rolledBack: string[] = [];
+    const result = await planGameUpload({
+      user: { id: 'owner-1' },
+      profile: { handle: 'ada' },
+      form: form(),
+      findGame: async () => null,
+      createGame: async () => ({ id: 'game1234' }),
+      enqueueValidation: async () => {
+        throw enqueueError;
+      },
+      rollbackUpload: async (gameId) => {
+        rolledBack.push(gameId);
+      },
+    });
+    assert.equal(result.type, 'errors');
+    if (result.type !== 'errors') return;
+    assert.equal(result.status, 503);
+    assert.deepEqual(result.errors, [VALIDATION_ENQUEUE_ERROR]);
+    assert.deepEqual(rolledBack, ['game1234']);
+  });
+
+  it('still returns 503 when rolling the upload back fails', async () => {
+    const logged: unknown[][] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => {
+      logged.push(args);
+    };
+    try {
+      const result = await planGameUpload({
         user: { id: 'owner-1' },
         profile: { handle: 'ada' },
         form: form(),
         findGame: async () => null,
         createGame: async () => ({ id: 'game1234' }),
         enqueueValidation: async () => {
-          throw enqueueError;
+          throw new Error('enqueue down');
         },
+        rollbackUpload: async () => {
+          throw new Error('storage delete failed');
+        },
+      });
+      assert.equal(result.type, 'errors');
+      if (result.type !== 'errors') return;
+      assert.equal(result.status, 503);
+    } finally {
+      console.error = original;
+    }
+    assert.equal(logged.length, 1);
+    assert.match(String(logged[0][0]), /Failed to roll back pending game game1234/);
+  });
+
+  it('writes stage pending in the games insert and does not insert a validation placeholder', () => {
+    const src = readFileSync(new URL('./games.ts', import.meta.url), 'utf8');
+    const db = readFileSync(new URL('./submissions-db.ts', import.meta.url), 'utf8');
+    const route = readFileSync(new URL('../../pages/api/games/index.ts', import.meta.url), 'utf8');
+    assert.match(src, /const stage = input\.stage \?\? 'pending'/);
+    assert.match(src, /thumb, stage\)/);
+    assert.doesNotMatch(db, /insert into game_validations/);
+    assert.doesNotMatch(route, /enqueueValidation/);
+    assert.doesNotMatch(db, /status: 'pass'/);
+    assert.match(route, /rollbackUpload/);
+  });
+});
+
+describe('queued validation rows', () => {
+  it('keeps a queued placeholder at null or queued and strips a fake pass', () => {
+    assert.equal(coerceQueuedStaticReport(null), null);
+    assert.equal(coerceQueuedStaticReport('queued'), 'queued');
+    assert.deepEqual(coerceQueuedStaticReport({ status: 'queued' }), { status: 'queued' });
+    assert.deepEqual(coerceQueuedStaticReport({}), {});
+    assert.deepEqual(
+      coerceQueuedStaticReport({ status: 'pass', bytes: 48, checks: [] }),
+      { status: 'queued' },
+    );
+    assert.deepEqual(
+      coerceQueuedStaticReport({
+        status: 'pass',
+        checks: [{ id: 'size', name: 'File size', level: 'pass', message: 'ok' }],
       }),
-      (err) => err === enqueueError,
+      { status: 'queued' },
     );
   });
 
-  it('writes stage pending in the games insert', () => {
-    const src = readFileSync(new URL('./games.ts', import.meta.url), 'utf8');
-    assert.match(src, /const stage = input\.stage \?\? 'pending'/);
-    assert.match(src, /thumb, stage\)/);
+  it('does not show a fake pass on the status page while the row is queued', () => {
+    const view = buildSubmissionView(game(), validation({
+      status: 'queued',
+      staticReport: {
+        status: 'pass',
+        checks: [{ id: 'size', name: 'File size', level: 'pass', message: 'Under 5 MB.' }],
+      },
+      runReport: null,
+      finishedAt: null,
+    }));
+    assert.equal(view.phase, 'queued');
+    assert.equal(view.headline, 'Queued');
+    assert.equal(view.terminal, false);
+    assert.equal(view.published, false);
+    assert.deepEqual(view.validation?.checks, []);
+    assert.doesNotMatch(view.detail, /Published|Every required check passed/);
+  });
+
+  it('polls the real verdict when a stale queued row sits beside it', () => {
+    const queued = validation({
+      id: 'queued-row',
+      version: 1,
+      status: 'queued',
+      staticReport: { status: 'pass', checks: [] },
+      createdAt: '2026-10-15T09:06:00.000Z',
+    });
+    const real = validation({
+      id: 'real-row',
+      version: 2,
+      status: 'passed',
+      staticReport: { status: 'fail', checks: [{ id: 'hosts', name: 'Hosts', level: 'fail', message: 'no' }] },
+      createdAt: '2026-10-15T09:05:00.000Z',
+      finishedAt: '2026-10-15T09:05:30.000Z',
+    });
+    const picked = preferValidation([queued, real]);
+    assert.equal(picked?.id, 'real-row');
+    const view = buildSubmissionView(game({ stage: 'proving' }), picked);
+    assert.equal(view.phase, 'passed');
+    assert.equal(view.published, true);
+    assert.equal(view.validation?.version, 2);
+
+    const onlyQueued = preferValidation([queued]);
+    assert.equal(onlyQueued?.id, 'queued-row');
+    assert.equal(preferValidation([]), null);
   });
 });
 

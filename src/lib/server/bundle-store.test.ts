@@ -79,4 +79,66 @@ describe('orphaned bundle cleanup', () => {
     assert.match(String(logged[1][0]), /Failed to delete stored game bundle \(abc\/index\.html\)/);
     assert.equal(logged[1][1], thrown);
   });
+
+  it('deletes index.html when the thumbnail upload fails', async () => {
+    const removed: string[][] = [];
+    let inserted = false;
+    const storage: BundleStorage = {
+      async upload(path) {
+        if (path.endsWith('thumb.png')) return { error: { message: 'thumb rejected' } };
+        return { error: null };
+      },
+      async remove(paths) {
+        removed.push(paths);
+        return { error: null };
+      },
+    };
+
+    await assert.rejects(
+      () => saveUploadedBundle({
+        objects: [
+          { path: 'abc/index.html', bytes: HTML, contentType: 'text/html; charset=utf-8' },
+          { path: 'abc/thumb.png', bytes: THUMB, contentType: 'image/png' },
+        ],
+        storage,
+        insert: async () => {
+          inserted = true;
+        },
+      }),
+      /Storage upload failed: thumb rejected/,
+    );
+
+    assert.equal(inserted, false);
+    assert.deepEqual(removed, [['abc/index.html']]);
+  });
+
+  it('deletes index.html when the thumbnail upload throws', async () => {
+    const removed: string[][] = [];
+    const storage: BundleStorage = {
+      async upload(path) {
+        if (path.endsWith('thumb.png')) throw new Error('storage down');
+        return { error: null };
+      },
+      async remove(paths) {
+        removed.push(paths);
+        return { error: null };
+      },
+    };
+
+    await assert.rejects(
+      () => saveUploadedBundle({
+        objects: [
+          { path: 'abc/index.html', bytes: HTML, contentType: 'text/html; charset=utf-8' },
+          { path: 'abc/thumb.png', bytes: THUMB, contentType: 'image/png' },
+        ],
+        storage,
+        insert: async () => {
+          throw new Error('insert should not run');
+        },
+      }),
+      /storage down/,
+    );
+
+    assert.deepEqual(removed, [['abc/index.html']]);
+  });
 });
