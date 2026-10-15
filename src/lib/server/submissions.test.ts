@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
+import { ThumbnailUploadError } from './bundle-store.ts';
 import {
+  THUMB_UPLOAD_ERROR,
   VALIDATION_ENQUEUE_ERROR,
   buildSubmissionView,
   coerceQueuedStaticReport,
@@ -160,6 +162,23 @@ describe('upload creates a pending game', () => {
     assert.equal(created, 0);
   });
 
+  it('returns a thumbnail upload error instead of throwing', async () => {
+    const result = await planGameUpload({
+      user: { id: 'owner-1' },
+      profile: { handle: 'ada' },
+      form: form(),
+      findGame: async () => null,
+      createGame: async () => {
+        throw new ThumbnailUploadError();
+      },
+    });
+    assert.equal(result.type, 'error');
+    if (result.type !== 'error') return;
+    assert.equal(result.status, 503);
+    assert.equal(result.error, THUMB_UPLOAD_ERROR);
+    assert.deepEqual({ error: result.error }, { error: 'Thumbnail upload failed, please try again' });
+  });
+
   it('propagates a rejected games insert', async () => {
     const insertError = Object.assign(new Error('new row for relation "games" violates check constraint "games_stage_check"'), { code: '23514' });
     let enqueued = 0;
@@ -244,6 +263,7 @@ describe('upload creates a pending game', () => {
     assert.doesNotMatch(route, /enqueueValidation/);
     assert.doesNotMatch(db, /status: 'pass'/);
     assert.match(route, /rollbackUpload/);
+    assert.match(route, /result\.type === 'error' \? \{ error: result\.error \}/);
   });
 });
 

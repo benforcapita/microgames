@@ -21,7 +21,8 @@ export const POST: APIRoute = async ({ request, redirect, locals }) => {
     },
   });
   if (result.type === 'redirect') return redirect(result.location, 303);
-  return new Response(JSON.stringify({ errors: result.errors }), {
+  const body = result.type === 'error' ? { error: result.error } : { errors: result.errors };
+  return new Response(JSON.stringify(body), {
     status: result.status,
     headers: { 'Content-Type': 'application/json' },
   });

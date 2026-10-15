@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { saveUploadedBundle, type BundleStorage } from './bundle-store.ts';
+import { ThumbnailUploadError, saveUploadedBundle, type BundleStorage } from './bundle-store.ts';
 
 const HTML = new Uint8Array([1, 2, 3]);
 const THUMB = new Uint8Array([4, 5]);
@@ -105,7 +105,7 @@ describe('orphaned bundle cleanup', () => {
           inserted = true;
         },
       }),
-      /Storage upload failed: thumb rejected/,
+      (err) => err instanceof ThumbnailUploadError && err.status === 503,
     );
 
     assert.equal(inserted, false);
@@ -136,7 +136,7 @@ describe('orphaned bundle cleanup', () => {
           throw new Error('insert should not run');
         },
       }),
-      /storage down/,
+      (err) => err instanceof ThumbnailUploadError,
     );
 
     assert.deepEqual(removed, [['abc/index.html']]);

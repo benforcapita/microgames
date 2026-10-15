@@ -11,6 +11,7 @@
  * EF-2 trigger enqueues validate-game, and EF-1 writes the one verdict row.
  * A missing relation or a rejected insert is a real error.
  */
+import { isThumbnailUploadError } from './bundle-store';
 import { normalizeTags, type Stage } from './game-rules';
 import { validateGameUpload, type ForkParent } from './upload';
 
@@ -91,7 +92,10 @@ export interface SubmissionView {
 
 export type UploadPlan =
   | { type: 'redirect'; location: string; gameId: string; stage: 'pending' }
-  | { type: 'errors'; status: number; errors: string[] };
+  | { type: 'errors'; status: number; errors: string[] }
+  | { type: 'error'; status: number; error: string };
+
+export const THUMB_UPLOAD_ERROR = 'Thumbnail upload failed, please try again';
 
 export type SubmissionAccess =
   | { status: 200; view: SubmissionView }
@@ -176,19 +180,25 @@ export async function planGameUpload(opts: {
   const { errors, upload } = await validateGameUpload(opts.form, opts.findGame);
   if (!upload) return { type: 'errors', status: 400, errors };
 
-  const game = await opts.createGame({
-    ownerId: opts.user.id,
-    creator: opts.profile.handle,
-    title: upload.title,
-    license: upload.license,
-    html: upload.html,
-    thumb: upload.thumb,
-    tagline: upload.tagline,
-    description: upload.description,
-    tags: normalizeTags(upload.tagsRaw),
-    forkedFrom: upload.forkedFrom,
-    stage: 'pending',
-  });
+  let game: { id: string };
+  try {
+    game = await opts.createGame({
+      ownerId: opts.user.id,
+      creator: opts.profile.handle,
+      title: upload.title,
+      license: upload.license,
+      html: upload.html,
+      thumb: upload.thumb,
+      tagline: upload.tagline,
+      description: upload.description,
+      tags: normalizeTags(upload.tagsRaw),
+      forkedFrom: upload.forkedFrom,
+      stage: 'pending',
+    });
+  } catch (err) {
+    if (isThumbnailUploadError(err)) return { type: 'error', status: 503, error: THUMB_UPLOAD_ERROR };
+    throw err;
+  }
   if (opts.enqueueValidation) {
     try {
       await opts.enqueueValidation(game.id);
