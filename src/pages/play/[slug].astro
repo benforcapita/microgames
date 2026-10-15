@@ -9,8 +9,10 @@ import { CDN_ORIGIN, CDN_PREVIEW_SECRET, GRADUATION, REVENUE } from '../../lib/s
 import { isPublicStage } from '../../lib/server/game-rules';
 import { mintPreviewToken } from '../../../cdn/preview-token.mjs';
 import { ago, compact, formatCheck, kb } from '../../lib/format';
+import { desktopOnlyNotice, playSurface } from '../../lib/server/device';
 
 const { user } = Astro.locals;
+const device = Astro.locals.device;
 
 // Owners can open their own pending/rejected game; everyone else gets a 404 (canViewGame).
 const game = await getGame(Astro.params.slug ?? '', { viewerId: Astro.locals.user?.id });
@@ -21,10 +23,12 @@ const [{ checks }, mine, parent, forks, byCreator] = await Promise.all([
   getHealth(game.id),
   getUserRating(game.id, user?.id),
   game.forkedFrom ? getGame(game.forkedFrom) : null,
-  listGames({ forkedFrom: game.id, limit: 50 }),
-  listGames({ creator: game.creator, limit: 5 }),
+  listGames({ forkedFrom: game.id, limit: 50, device }),
+  listGames({ creator: game.creator, limit: 5, device }),
 ]);
 const more = byCreator.filter((g) => g.id !== game.id).slice(0, 4);
+const desktopOnly = playSurface(device, game.inputSupport) === 'desktop-only';
+const notice = desktopOnlyNotice(game.title);
 const isOwner = !!user && user.id === game.ownerId;
 // SP-6: the CDN serves pending/rejected bundles only with a short-lived token, minted only for the owner here.
 const previewToken = isOwner && !isPublicStage(game.stage) ? mintPreviewToken(CDN_PREVIEW_SECRET, game.id) : null;
@@ -35,7 +39,7 @@ const passed = checks.filter((c) => c.pass).length;
 const uploaded = Astro.url.searchParams.has('uploaded');
 ---
 
-<Layout title={game.title} description={game.tagline || `Play ${game.title} instantly in your browser.`} ads={live}>
+<Layout title={game.title} description={game.tagline || `Play ${game.title} instantly in your browser.`} ads={live && !desktopOnly}>
   <section class="wrap play">
     {
       uploaded && (
@@ -45,6 +49,17 @@ const uploaded = Astro.url.searchParams.has('uploaded');
         </div>
       )
     }
+    {
+      desktopOnly ? (
+        <section class="desktop-only panel" data-testid="desktop-only" role="note" aria-label={notice.heading}>
+          <GameThumb game={game} class="desktop-only-art" eager />
+          <div>
+            <p class="eyebrow">{notice.heading}</p>
+            <p class="desktop-only-title">{notice.title}</p>
+            <p class="desktop-only-message">{notice.message}</p>
+          </div>
+        </section>
+      ) : (
     <div class="stage-wrap">
       <div id="stage" class="stage" data-game-id={game.id} data-game-title={game.title} data-game-stage={game.stage} data-cdn={CDN_ORIGIN} data-cloud={user ? '1' : ''} data-preview={previewToken ?? ''}>
         <button class="launch" type="button" aria-label={`Play ${game.title}`}>
@@ -73,6 +88,8 @@ const uploaded = Astro.url.searchParams.has('uploaded');
         </div>
       </div>
     </div>
+      )
+    }
 
     <div class="info">
       <div class="main-col">
@@ -202,37 +219,51 @@ const uploaded = Astro.url.searchParams.has('uploaded');
   .health li::before { content: '○'; position: absolute; left: 0; color: var(--warn); }
   .health li.pass::before { content: '●'; color: var(--accent); }
   .small { font-size: 0.85rem; }
+  .desktop-only {
+    display: grid;
+    grid-template-columns: minmax(180px, 320px) 1fr;
+    gap: 1.25rem;
+    align-items: center;
+    padding: 1.25rem;
+    margin-bottom: 0.5rem;
+  }
+  .desktop-only :global(.desktop-only-art) { width: 100%; aspect-ratio: 16 / 10; object-fit: cover; border-radius: 10px; background: #000; }
+  .desktop-only-title { margin: 0.35rem 0; font-size: clamp(1.6rem, 3vw, 2.2rem); font-weight: 800; }
+  .desktop-only-message { margin: 0; font-size: 1.05rem; }
   @media (max-width: 900px) {
-    .info { grid-template-columns: 1fr; }
+    .info, .desktop-only { grid-template-columns: 1fr; }
   }
 </style>
 
 <script>
   import { mountPlayer, type PlayerHandle } from '../../client/player';
 
-  const stage = document.getElementById('stage')!;
-  const { gameId, gameTitle, gameStage, cdn, cloud, preview } = stage.dataset;
-  const game = { id: gameId!, title: gameTitle!, stage: gameStage as 'proving' | 'live' };
-  const best = document.getElementById('best')!;
-  const showBest = (n: number) => (best.textContent = Number.isFinite(n) ? `Your best: ${n}` : '');
-  showBest(Number(localStorage.getItem(`mg:best:${game.id}`) ?? NaN));
+  // Desktop-only visits render the notice instead of #stage, so this script no-ops there.
+  const stage = document.getElementById('stage');
+  if (stage) {
+    const { gameId, gameTitle, gameStage, cdn, cloud, preview } = stage.dataset;
+    const game = { id: gameId!, title: gameTitle!, stage: gameStage as 'proving' | 'live' };
+    const best = document.getElementById('best')!;
+    const showBest = (n: number) => (best.textContent = Number.isFinite(n) ? `Your best: ${n}` : '');
+    showBest(Number(localStorage.getItem(`mg:best:${game.id}`) ?? NaN));
 
-  let player: PlayerHandle | null = null;
-  const start = () => {
-    player?.destroy();
-    player = mountPlayer(stage, game, {
-      cdnOrigin: cdn!,
-      cloudSaves: !!cloud,
-      previewToken: preview || null,
-      onEvent: (type, data) => type === 'SCORE' && showBest(Number(data.best)),
+    let player: PlayerHandle | null = null;
+    const start = () => {
+      player?.destroy();
+      player = mountPlayer(stage, game, {
+        cdnOrigin: cdn!,
+        cloudSaves: !!cloud,
+        previewToken: preview || null,
+        onEvent: (type, data) => type === 'SCORE' && showBest(Number(data.best)),
+      });
+      player.frame.focus();
+    };
+    stage.querySelector('.launch')!.addEventListener('click', start);
+    document.getElementById('restart')!.addEventListener('click', start);
+    document.getElementById('fullscreen')!.addEventListener('click', () => {
+      if (!player) start();
+      stage.requestFullscreen?.();
+      player?.frame.focus();
     });
-    player.frame.focus();
-  };
-  stage.querySelector('.launch')!.addEventListener('click', start);
-  document.getElementById('restart')!.addEventListener('click', start);
-  document.getElementById('fullscreen')!.addEventListener('click', () => {
-    if (!player) start();
-    stage.requestFullscreen?.();
-    player?.frame.focus();
-  });
+  }
 </script>
