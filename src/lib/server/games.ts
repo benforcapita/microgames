@@ -1,13 +1,13 @@
 import crypto from 'node:crypto';
 import { GRADUATION } from './config';
 import { sql } from './db';
-import { BAYES_PRIOR_VOTES, assessHealth, clampDurationMs, clampFirstFrameMs, slugify, uniqueSlug, type HealthCheck } from './game-rules';
+import { BAYES_PRIOR_VOTES, PUBLIC_STAGES, assessHealth, clampDurationMs, clampFirstFrameMs, slugify, stagesForList, uniqueSlug, type HealthCheck, type Stage } from './game-rules';
 import { bucket } from './supabase';
+
+export type { Stage };
 
 export { normalizeTags } from './game-rules';
 export type { HealthCheck };
-
-export type Stage = 'proving' | 'live';
 
 export interface Game {
   id: string;
@@ -102,10 +102,11 @@ const ORDER = {
 } as const;
 
 export async function listGames({ stage, sort = 'top', tag, creator, ownerId, forkedFrom, limit = 60 }: ListOptions = {}) {
+  const stages = stagesForList({ stage, ownerScoped: Boolean(ownerId) });
+  if (stages.length === 0) return [];
   const rows = await sql<GameRow[]>`
     select * from (${gameSelect()}) g
-    where true
-      ${stage ? sql`and stage = ${stage}` : sql``}
+    where stage in ${sql([...stages])}
       ${creator ? sql`and lower(creator) = lower(${creator})` : sql``}
       ${ownerId ? sql`and owner_id = ${ownerId}` : sql``}
       ${forkedFrom ? sql`and forked_from = ${forkedFrom}` : sql``}
@@ -115,22 +116,26 @@ export async function listGames({ stage, sort = 'top', tag, creator, ownerId, fo
   return rows.map(toGame);
 }
 
-export async function getGame(slugOrId: string): Promise<Game | null> {
-  const [row] = await sql<GameRow[]>`${gameSelect()} where g.slug = ${slugOrId} or g.id = ${slugOrId}`;
+export async function getGame(slugOrId: string, opts?: { includeUnpublished?: boolean }): Promise<Game | null> {
+  const stages = stagesForList({ ownerScoped: opts?.includeUnpublished === true });
+  const [row] = await sql<GameRow[]>`
+    ${gameSelect()} where (g.slug = ${slugOrId} or g.id = ${slugOrId}) and g.stage in ${sql([...stages])}`;
   return row ? toGame(row) : null;
 }
 
 export async function listTags(): Promise<{ tag: string; count: number }[]> {
   return sql<{ tag: string; count: number }[]>`
-    select t as tag, count(*)::int as count from games, unnest(tags) t group by t order by count desc, t limit 30`;
+    select t as tag, count(*)::int as count from games, unnest(tags) t
+    where stage in ${sql([...PUBLIC_STAGES])}
+    group by t order by count desc, t limit 30`;
 }
 
 export async function platformStats() {
   const [row] = await sql<{ games: number; live: number; plays: number; creators: number }[]>`
-    select (select count(*)::int from games) as games,
+    select (select count(*)::int from games where stage in ${sql([...PUBLIC_STAGES])}) as games,
            (select count(*)::int from games where stage = 'live') as live,
            (select count(*)::int from sessions) as plays,
-           (select count(distinct creator)::int from games) as creators`;
+           (select count(distinct creator)::int from games where stage in ${sql([...PUBLIC_STAGES])}) as creators`;
   return row;
 }
 
@@ -145,6 +150,8 @@ export interface NewGame {
   forkedFrom: string | null;
   html: Uint8Array;
   thumb?: { bytes: Uint8Array; ext: string; type: string };
+  /** New uploads stay pending until validation passes. Auto-publish is EF-1/EF-2, not this insert. */
+  stage: 'pending';
 }
 
 export async function createGame(input: NewGame): Promise<Game> {
@@ -161,11 +168,12 @@ export async function createGame(input: NewGame): Promise<Game> {
   const thumb = input.thumb ? `thumb.${input.thumb.ext}` : null;
   if (input.thumb && thumb) await upload(`${id}/${thumb}`, input.thumb.bytes, input.thumb.type);
 
+  const stage = input.stage ?? 'pending';
   await sql`
-    insert into games (id, slug, owner_id, creator, title, tagline, description, tags, license, forked_from, size_bytes, hue, thumb)
+    insert into games (id, slug, owner_id, creator, title, tagline, description, tags, license, forked_from, size_bytes, hue, thumb, stage)
     values (${id}, ${slug}, ${input.ownerId}, ${input.creator}, ${input.title}, ${input.tagline}, ${input.description},
-            ${input.tags}, ${input.license}, ${input.forkedFrom}, ${input.html.byteLength}, ${crypto.randomInt(0, 360)}, ${thumb})`;
-  return (await getGame(id))!;
+            ${input.tags}, ${input.license}, ${input.forkedFrom}, ${input.html.byteLength}, ${crypto.randomInt(0, 360)}, ${thumb}, ${stage})`;
+  return (await getGame(id, { includeUnpublished: true }))!;
 }
 
 /** Deletes a game owned by `ownerId`, including its bundle in storage. Returns false if not found / not owned. */

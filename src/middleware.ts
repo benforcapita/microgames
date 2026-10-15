@@ -2,6 +2,7 @@ import { defineMiddleware } from 'astro:middleware';
 import { ADSENSE_CLIENT, CDN_ORIGIN } from './lib/server/config';
 import { createRequestClient } from './lib/server/supabase';
 import { getProfile } from './lib/server/profiles';
+import { isSubmissionPreviewPath } from './lib/server/submissions';
 
 const AD_FRAMES = ADSENSE_CLIENT ? ' https://*.googlesyndication.com https://*.doubleclick.net https://*.google.com' : '';
 const CSP = `frame-src ${CDN_ORIGIN}${AD_FRAMES}; frame-ancestors 'self'; object-src 'none'; base-uri 'self'`;
@@ -18,7 +19,10 @@ export const onRequest = defineMiddleware(async (ctx, next) => {
   ctx.locals.user = null;
   ctx.locals.profile = null;
 
-  if (!ANONYMOUS.has(pathname)) {
+  if (isSubmissionPreviewPath(pathname)) {
+    ctx.locals.user = { id: 'preview-owner', email: 'preview@meshgrounds.local' };
+    ctx.locals.profile = { id: 'preview-owner', handle: 'preview' };
+  } else if (!ANONYMOUS.has(pathname)) {
     const { data } = await ctx.locals.supabase.auth.getClaims();
     const claims = data?.claims;
     if (claims?.sub) {

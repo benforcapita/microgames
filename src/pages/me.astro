@@ -31,11 +31,11 @@ const deleted = Astro.url.searchParams.has('deleted');
         <ul class="list">
           {games.map((g) => (
             <li class="panel item">
-              <a href={`/play/${g.slug}`} class="thumb"><GameThumb game={g} class="art" /></a>
+              <a href={g.stage === 'pending' || g.stage === 'rejected' ? `/submissions/${g.id}` : `/play/${g.slug}`} class="thumb"><GameThumb game={g} class="art" /></a>
               <div class="meta">
-                <a href={`/play/${g.slug}`}><h3>{g.title}</h3></a>
+                <a href={g.stage === 'pending' || g.stage === 'rejected' ? `/submissions/${g.id}` : `/play/${g.slug}`}><h3>{g.title}</h3></a>
                 <p class="muted mono">
-                  <span class:list={['badge', g.stage]}>{g.stage === 'live' ? 'Monetized' : 'Proving Grounds'}</span>{' '}
+                  <span class:list={['badge', g.stage]}>{g.stage === 'live' ? 'Monetized' : g.stage === 'pending' ? 'Validating' : g.stage === 'rejected' ? 'Rejected' : 'Proving Grounds'}</span>{' '}
                   {compact(g.plays)} plays · ★ {stars(g.avgRating)} ({g.ratingCount}) · uploaded {ago(g.createdAt)}
                 </p>
               </div>

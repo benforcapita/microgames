@@ -124,3 +124,19 @@ export function compareByBayes(globalMean: number) {
     bayesianRating(b.avgRating, b.ratingCount, globalMean) - bayesianRating(a.avgRating, a.ratingCount, globalMean) ||
     b.ratingCount - a.ratingCount;
 }
+
+/** `pending` is awaiting validation. `rejected` failed it. Neither is public. */
+export const STAGES = ['pending', 'proving', 'live', 'rejected'] as const;
+export type Stage = (typeof STAGES)[number];
+export const PUBLIC_STAGES = ['proving', 'live'] as const satisfies readonly Stage[];
+
+/**
+ * Stages a list or lookup may return. Public queries never include pending or rejected games.
+ * An owner-scoped query (the creator's own dashboard, or a delete of their submission) may.
+ * An empty result means the caller must return no rows.
+ */
+export function stagesForList(opts: { stage?: Stage; ownerScoped?: boolean } = {}): Stage[] {
+  if (opts.ownerScoped) return opts.stage ? [opts.stage] : [...STAGES];
+  if (!opts.stage) return [...PUBLIC_STAGES];
+  return (PUBLIC_STAGES as readonly Stage[]).includes(opts.stage) ? [opts.stage] : [];
+}

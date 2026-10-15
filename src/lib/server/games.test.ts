@@ -4,11 +4,13 @@ import {
   GRADUATION_DEFAULTS,
   MAX_FIRST_FRAME_MS,
   MAX_SESSION_MS,
+  PUBLIC_STAGES,
   assessHealth,
   clampDurationMs,
   clampFirstFrameMs,
   normalizeTags,
   slugify,
+  stagesForList,
   uniqueSlug,
   type HealthStats,
 } from './game-rules.ts';
@@ -176,6 +178,24 @@ describe('tag normalization', () => {
     assert.deepEqual(normalizeTags('   '), []);
     assert.deepEqual(normalizeTags(',,,'), []);
     assert.deepEqual(normalizeTags('action,, ,puzzle'), ['action', 'puzzle']);
+  });
+});
+
+describe('submission stages stay off public lists', () => {
+  it('shows proving and live games to everyone', () => {
+    assert.deepEqual(stagesForList(), [...PUBLIC_STAGES]);
+    assert.deepEqual(stagesForList({ stage: 'live' }), ['live']);
+    assert.deepEqual(stagesForList({ stage: 'proving' }), ['proving']);
+  });
+
+  it('returns no rows when a public query asks for pending or rejected', () => {
+    assert.deepEqual(stagesForList({ stage: 'pending' }), []);
+    assert.deepEqual(stagesForList({ stage: 'rejected' }), []);
+  });
+
+  it('lets an owner see pending and rejected games', () => {
+    assert.deepEqual(stagesForList({ ownerScoped: true }), ['pending', 'proving', 'live', 'rejected']);
+    assert.deepEqual(stagesForList({ ownerScoped: true, stage: 'pending' }), ['pending']);
   });
 });
 
