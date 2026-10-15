@@ -89,8 +89,10 @@ export function classifyInputSupport(js: string, tags: { name: string; attrs: Ma
   const detected: InputClass = mobile && desktop ? 'both' : mobile ? 'mobile' : desktop ? 'desktop' : 'unknown';
   // Same precedence as the runtime (cdn/boot.js, #34): Meshgrounds.declare() beats the meta tag.
   // boot.js keeps the LAST declare() call, so the static check does too.
+  // Comments are stripped first (string/regex-aware, linear; only when the key appears at all), so a
+  // commented-out declare() is ignored.
   let lastDeclare: string | undefined;
-  for (const m of code.matchAll(RE_DECLARE)) lastDeclare = m[1];
+  if (code.includes('inputSupport')) for (const m of normalizeJs(code, true).matchAll(RE_DECLARE)) lastDeclare = m[1];
   const declared = asDeclared(lastDeclare) ?? meta;
   const consistent = declared !== null && (detected === 'unknown'
     || (declared === 'mobile' && mobile) || (declared === 'desktop' && desktop) || (declared === 'both' && mobile && desktop));
