@@ -8,6 +8,8 @@ export interface PlayerGame {
 
 export interface PlayerOptions {
   cdnOrigin: string;
+  /** Persist the game's localStorage to the signed-in user's Supabase cloud save instead of this browser. */
+  cloudSaves?: boolean;
   onEvent?: (type: string, data: Record<string, unknown>) => void;
 }
 
@@ -18,6 +20,20 @@ export interface PlayerHandle {
 
 const MAX_SAVE_BYTES = 1024 * 1024;
 const HEARTBEAT_MS = 15_000;
+const CLOUD_SAVE_DEBOUNCE_MS = 1500;
+
+async function loadSave(gameId: string, saveKey: string, cloud: boolean): Promise<string> {
+  const local = localStorage.getItem(saveKey) ?? '{}';
+  if (!cloud) return local;
+  try {
+    const res = await fetch(`/api/saves/${gameId}`);
+    const { data } = res.ok ? ((await res.json()) as { data: Record<string, string> | null }) : { data: null };
+    // No cloud save yet: carry over progress made while logged out (it gets uploaded on the next write).
+    return data ? JSON.stringify(data) : local;
+  } catch {
+    return local;
+  }
+}
 
 /**
  * Mounts a game inside a sandboxed, opaque-origin iframe and runs the portal side of the
@@ -41,9 +57,27 @@ export function mountPlayer(host: HTMLElement, game: PlayerGame, opts: PlayerOpt
   frame.setAttribute('sandbox', 'allow-scripts allow-pointer-lock');
   frame.setAttribute('allow', 'autoplay; gamepad; accelerometer; gyroscope');
   frame.setAttribute('referrerpolicy', 'no-referrer');
-  const save = localStorage.getItem(saveKey) ?? '{}';
-  frame.src = `${opts.cdnOrigin}/g/${game.id}/index.html#mgs=${encodeURIComponent(save)}`;
   host.replaceChildren(frame);
+  let destroyed = false;
+  loadSave(game.id, saveKey, !!opts.cloudSaves).then((save) => {
+    if (!destroyed) frame.src = `${opts.cdnOrigin}/g/${game.id}/index.html#mgs=${encodeURIComponent(save)}`;
+  });
+
+  let pendingSave: string | null = null;
+  let saveTimer: ReturnType<typeof setTimeout> | undefined;
+  const flushSave = () => {
+    clearTimeout(saveTimer);
+    if (pendingSave === null) return;
+    const body = JSON.stringify({ items: JSON.parse(pendingSave) });
+    pendingSave = null;
+    fetch(`/api/saves/${game.id}`, { method: 'POST', body, headers: { 'Content-Type': 'application/json' }, keepalive: true }).catch(() => {});
+  };
+  const persist = (json: string) => {
+    if (!opts.cloudSaves) return localStorage.setItem(saveKey, json);
+    pendingSave = json;
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(flushSave, CLOUD_SAVE_DEBOUNCE_MS);
+  };
 
   const post = (type: string, data: Record<string, unknown> = {}) => frame.contentWindow?.postMessage({ type, ...data }, '*');
 
@@ -81,7 +115,7 @@ export function mountPlayer(host: HTMLElement, game: PlayerGame, opts: PlayerOpt
         break;
       case '__MG_STORAGE': {
         const json = JSON.stringify(data.items ?? {});
-        if (json.length <= MAX_SAVE_BYTES) localStorage.setItem(saveKey, json);
+        if (json.length <= MAX_SAVE_BYTES) persist(json);
         break;
       }
       case 'GAME_OVER':
@@ -128,6 +162,7 @@ export function mountPlayer(host: HTMLElement, game: PlayerGame, opts: PlayerOpt
   }, HEARTBEAT_MS);
   const flush = () => {
     tick();
+    flushSave();
     if (started) track('heartbeat', activeMs, true);
   };
   const onVisibility = () => (document.visibilityState === 'hidden' ? flush() : (lastTick = performance.now()));
@@ -140,6 +175,7 @@ export function mountPlayer(host: HTMLElement, game: PlayerGame, opts: PlayerOpt
   return {
     frame,
     destroy() {
+      destroyed = true;
       flush();
       clearInterval(heartbeat);
       window.removeEventListener('message', onMessage);

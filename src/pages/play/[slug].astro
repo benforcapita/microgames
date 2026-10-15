@@ -6,15 +6,20 @@ import { getGame, getHealth, getUserRating, listGames } from '../../lib/server/g
 import { CDN_ORIGIN, GRADUATION, REVENUE } from '../../lib/server/config';
 import { ago, compact, formatCheck, kb } from '../../lib/format';
 
-const game = getGame(Astro.params.slug ?? '');
+const game = await getGame(Astro.params.slug ?? '');
 if (!game) return Astro.rewrite('/404');
 if (Astro.params.slug !== game.slug) return Astro.redirect(`/play/${game.slug}`, 301);
 
-const { checks } = getHealth(game.id);
-const mine = getUserRating(game.id, Astro.locals.uid);
-const parent = game.forkedFrom ? getGame(game.forkedFrom) : null;
-const forks = listGames({ limit: 50 }).filter((g) => g.forkedFrom === game.id);
-const more = listGames({ creator: game.creator, limit: 5 }).filter((g) => g.id !== game.id).slice(0, 4);
+const { user } = Astro.locals;
+const [{ checks }, mine, parent, forks, byCreator] = await Promise.all([
+  getHealth(game.id),
+  getUserRating(game.id, user?.id),
+  game.forkedFrom ? getGame(game.forkedFrom) : null,
+  listGames({ forkedFrom: game.id, limit: 50 }),
+  listGames({ creator: game.creator, limit: 5 }),
+]);
+const more = byCreator.filter((g) => g.id !== game.id).slice(0, 4);
+const isOwner = !!user && user.id === game.ownerId;
 const remixable = game.license !== 'All rights reserved';
 const live = game.stage === 'live';
 const passed = checks.filter((c) => c.pass).length;
@@ -32,7 +37,7 @@ const uploaded = Astro.url.searchParams.has('uploaded');
       )
     }
     <div class="stage-wrap">
-      <div id="stage" class="stage" data-game-id={game.id} data-game-title={game.title} data-game-stage={game.stage} data-cdn={CDN_ORIGIN}>
+      <div id="stage" class="stage" data-game-id={game.id} data-game-title={game.title} data-game-stage={game.stage} data-cdn={CDN_ORIGIN} data-cloud={user ? '1' : ''}>
         <button class="launch" type="button" aria-label={`Play ${game.title}`}>
           <span class="play-icon">▶</span>
           <span>Play {game.title}</span>
@@ -43,12 +48,14 @@ const uploaded = Astro.url.searchParams.has('uploaded');
         <div class="row">
           <span class:list={['badge', game.stage]}>{live ? 'Monetized' : 'Proving Grounds · no ads'}</span>
           <span id="best" class="mono muted"></span>
+          <span class="mono muted small">{user ? '☁ cloud saves on' : <a href={`/login?next=/play/${game.slug}`}>log in for cloud saves</a>}</span>
         </div>
         <div class="row">
           <button class="btn ghost sm" type="button" id="restart">↻ Restart</button>
           <button class="btn ghost sm" type="button" id="fullscreen">⛶ Fullscreen</button>
           {remixable && <a class="btn ghost sm" href={`${CDN_ORIGIN}/g/${game.id}/index.html?source`} target="_blank" rel="noopener">{'</>'} Source</a>}
           {remixable && live && <a class="btn sm" href={`/upload?fork=${game.slug}`}>⑂ Fork</a>}
+          {isOwner && <a class="btn ghost sm" href="/me">Manage</a>}
         </div>
       </div>
     </div>
@@ -178,7 +185,7 @@ const uploaded = Astro.url.searchParams.has('uploaded');
   import { mountPlayer, type PlayerHandle } from '../../client/player';
 
   const stage = document.getElementById('stage')!;
-  const { gameId, gameTitle, gameStage, cdn } = stage.dataset;
+  const { gameId, gameTitle, gameStage, cdn, cloud } = stage.dataset;
   const game = { id: gameId!, title: gameTitle!, stage: gameStage as 'proving' | 'live' };
   const best = document.getElementById('best')!;
   const showBest = (n: number) => (best.textContent = Number.isFinite(n) ? `Your best: ${n}` : '');
@@ -189,6 +196,7 @@ const uploaded = Astro.url.searchParams.has('uploaded');
     player?.destroy();
     player = mountPlayer(stage, game, {
       cdnOrigin: cdn!,
+      cloudSaves: !!cloud,
       onEvent: (type, data) => type === 'SCORE' && showBest(Number(data.best)),
     });
     player.frame.focus();

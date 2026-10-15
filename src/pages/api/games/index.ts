@@ -4,21 +4,21 @@ import { createGame, getGame, normalizeTags } from '../../../lib/server/games';
 
 const text = (form: FormData, key: string, max: number) => String(form.get(key) ?? '').trim().slice(0, max);
 
-export const POST: APIRoute = async ({ request, redirect }) => {
+export const POST: APIRoute = async ({ request, redirect, locals }) => {
+  const { user, profile } = locals;
+  if (!user || !profile) return Response.json({ errors: ['Log in and pick a handle to upload.'] }, { status: 401 });
   const form = await request.formData().catch(() => null);
   if (!form) return new Response('Expected multipart form data', { status: 400 });
 
   const errors: string[] = [];
   const title = text(form, 'title', 60);
-  const creator = text(form, 'creator', 32).replace(/[^A-Za-z0-9_-]/g, '');
   const license = text(form, 'license', 32);
   const file = form.get('game');
   const thumbFile = form.get('thumb');
   const forkOf = text(form, 'forkOf', 64);
-  const forked = forkOf ? getGame(forkOf) : null;
+  const forked = forkOf ? await getGame(forkOf) : null;
 
   if (title.length < 2) errors.push('Title is required.');
-  if (creator.length < 2) errors.push('Creator handle must be 2–32 letters, numbers, - or _.');
   if (!UPLOAD.licenses.includes(license)) errors.push('Pick a license.');
   if (form.get('agree') !== 'on') errors.push('You must confirm the content rules.');
   if (forkOf && !forked) errors.push('The game you are forking no longer exists.');
@@ -27,12 +27,12 @@ export const POST: APIRoute = async ({ request, redirect }) => {
   else if (!/\.html?$/i.test(file.name)) errors.push('Game file must be .html.');
   else if (file.size > UPLOAD.maxHtmlBytes) errors.push(`Game file must be under ${UPLOAD.maxHtmlBytes / 1024 / 1024} MB.`);
 
-  let thumb: { bytes: Uint8Array; ext: string } | undefined;
+  let thumb: { bytes: Uint8Array; ext: string; type: string } | undefined;
   if (thumbFile instanceof File && thumbFile.size > 0) {
     const ext = UPLOAD.thumbTypes[thumbFile.type];
     if (!ext) errors.push('Thumbnail must be PNG, JPEG or WebP.');
     else if (thumbFile.size > UPLOAD.maxThumbBytes) errors.push('Thumbnail must be under 512 KB.');
-    else thumb = { bytes: new Uint8Array(await thumbFile.arrayBuffer()), ext };
+    else thumb = { bytes: new Uint8Array(await thumbFile.arrayBuffer()), ext, type: thumbFile.type };
   }
 
   let html: Uint8Array | undefined;
@@ -50,9 +50,10 @@ export const POST: APIRoute = async ({ request, redirect }) => {
     return new Response(JSON.stringify({ errors }), { status: 400, headers: { 'Content-Type': 'application/json' } });
   }
 
-  const game = createGame({
+  const game = await createGame({
+    ownerId: user.id,
+    creator: profile.handle,
     title,
-    creator,
     license,
     html,
     thumb,

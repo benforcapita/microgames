@@ -6,11 +6,14 @@ import { getHealth, getUserRating, listGames } from '../lib/server/games';
 import { CDN_ORIGIN, GRADUATION } from '../lib/server/config';
 import { ago, compact } from '../lib/format';
 
-const games = listGames({ stage: 'proving', sort: 'new', limit: 40 }).map((g) => ({
-  game: g,
-  mine: getUserRating(g.id, Astro.locals.uid),
-  passed: getHealth(g.id).checks.filter((c) => c.pass).length,
-}));
+const userId = Astro.locals.user?.id;
+const games = await Promise.all(
+  (await listGames({ stage: 'proving', sort: 'new', limit: 40 })).map(async (g) => ({
+    game: g,
+    mine: await getUserRating(g.id, userId),
+    passed: (await getHealth(g.id)).checks.filter((c) => c.pass).length,
+  })),
+);
 ---
 
 <Layout title="Proving Grounds" description="Scout brand-new instant 3D web games and decide which ones graduate.">
@@ -25,7 +28,7 @@ const games = listGames({ stage: 'proving', sort: 'new', limit: 40 }).map((g) =>
 
   {
     games.length ? (
-      <div class="feed" id="feed" data-cdn={CDN_ORIGIN}>
+      <div class="feed" id="feed" data-cdn={CDN_ORIGIN} data-cloud={userId ? '1' : ''}>
         {games.map(({ game, mine, passed }) => (
           <article class="slide" data-game-id={game.id} data-game-title={game.title} data-game-stage={game.stage}>
             <div class="screen">
@@ -96,6 +99,7 @@ const games = listGames({ stage: 'proving', sort: 'new', limit: 40 }).map((g) =>
   const feed = document.getElementById('feed');
   if (feed) {
     const cdnOrigin = feed.dataset.cdn!;
+    const cloudSaves = !!feed.dataset.cloud;
     let active: { slide: Element; handle: PlayerHandle; poster: Node[] } | null = null;
 
     const activate = (slide: HTMLElement) => {
@@ -107,7 +111,7 @@ const games = listGames({ stage: 'proving', sort: 'new', limit: 40 }).map((g) =>
       const mount = slide.querySelector<HTMLElement>('.mount')!;
       const poster = [...mount.childNodes];
       const { gameId, gameTitle, gameStage } = slide.dataset;
-      const handle = mountPlayer(mount, { id: gameId!, title: gameTitle!, stage: gameStage as 'proving' }, { cdnOrigin });
+      const handle = mountPlayer(mount, { id: gameId!, title: gameTitle!, stage: gameStage as 'proving' }, { cdnOrigin, cloudSaves });
       active = { slide, handle, poster };
     };
 

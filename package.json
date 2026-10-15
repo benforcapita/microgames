@@ -13,10 +13,22 @@
     "build": "astro build",
     "start": "node scripts/dev.mjs start",
     "preview": "astro preview",
-    "astro": "astro"
+    "astro": "astro",
+    "seed": "node scripts/seed.mjs",
+    "db:start": "npx -y supabase@2.120.0 start -x vector,logflare,edge-runtime,imgproxy,realtime",
+    "db:stop": "npx -y supabase@2.120.0 stop",
+    "check": "astro check"
   },
   "dependencies": {
     "@astrojs/node": "11.1.6",
-    "astro": "7.3.5"
+    "@supabase/ssr": "0.12.7",
+    "@supabase/supabase-js": "2.117.3",
+    "astro": "7.3.5",
+    "postgres": "3.4.9"
+  },
+  "devDependencies": {
+    "@astrojs/check": "0.9.10",
+    "@types/node": "24.19.1",
+    "typescript": "6.0.3"
   }
 }

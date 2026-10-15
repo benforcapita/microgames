@@ -1,14 +1,14 @@
 import crypto from 'node:crypto';
-import fs from 'node:fs';
-import path from 'node:path';
-import { getDb } from './db';
-import { GAMES_DIR, GRADUATION } from './config';
+import { sql } from './db';
+import { bucket } from './supabase';
+import { GRADUATION } from './config';
 
 export type Stage = 'proving' | 'live';
 
 export interface Game {
   id: string;
   slug: string;
+  ownerId: string | null;
   title: string;
   tagline: string;
   description: string;
@@ -30,48 +30,50 @@ export interface Game {
 interface GameRow {
   id: string;
   slug: string;
+  owner_id: string | null;
   title: string;
   tagline: string;
   description: string;
   creator: string;
-  tags: string;
+  tags: string[];
   license: string;
   stage: Stage;
   forked_from: string | null;
   size_bytes: number;
   hue: number;
   thumb: string | null;
-  created_at: number;
-  graduated_at: number | null;
+  created_at: Date;
+  graduated_at: Date | null;
   plays: number;
   avg_rating: number | null;
   rating_count: number;
 }
 
-const SELECT_GAME = `
-  SELECT g.*,
-    (SELECT COUNT(*) FROM sessions s WHERE s.game_id = g.id) AS plays,
-    (SELECT AVG(stars) FROM ratings r WHERE r.game_id = g.id) AS avg_rating,
-    (SELECT COUNT(*) FROM ratings r WHERE r.game_id = g.id) AS rating_count
-  FROM games g`;
+const gameSelect = () => sql`
+  select g.*,
+    (select count(*)::int from sessions s where s.game_id = g.id) as plays,
+    (select avg(stars)::float8 from ratings r where r.game_id = g.id) as avg_rating,
+    (select count(*)::int from ratings r where r.game_id = g.id) as rating_count
+  from games g`;
 
 function toGame(r: GameRow): Game {
   return {
     id: r.id,
     slug: r.slug,
+    ownerId: r.owner_id,
     title: r.title,
     tagline: r.tagline,
     description: r.description,
     creator: r.creator,
-    tags: r.tags ? r.tags.split(',') : [],
+    tags: r.tags,
     license: r.license,
     stage: r.stage,
     forkedFrom: r.forked_from,
     sizeBytes: r.size_bytes,
     hue: r.hue,
     thumb: r.thumb,
-    createdAt: r.created_at,
-    graduatedAt: r.graduated_at,
+    createdAt: r.created_at.getTime(),
+    graduatedAt: r.graduated_at?.getTime() ?? null,
     plays: r.plays,
     avgRating: r.avg_rating,
     ratingCount: r.rating_count,
@@ -83,42 +85,48 @@ export interface ListOptions {
   sort?: 'top' | 'new' | 'rated';
   tag?: string;
   creator?: string;
+  ownerId?: string;
+  forkedFrom?: string;
   limit?: number;
 }
 
-export function listGames({ stage, sort = 'top', tag, creator, limit = 60 }: ListOptions = {}): Game[] {
-  const where: string[] = [];
-  const params: (string | number)[] = [];
-  if (stage) where.push('g.stage = ?'), params.push(stage);
-  if (creator) where.push('g.creator = ?'), params.push(creator);
-  if (tag) where.push("(',' || g.tags || ',') LIKE ?"), params.push(`%,${tag},%`);
-  const order = { top: 'plays DESC', new: 'g.created_at DESC', rated: 'COALESCE(avg_rating, 0) DESC, rating_count DESC' }[sort];
-  const sql = `SELECT * FROM (${SELECT_GAME}${where.length ? ` WHERE ${where.join(' AND ')}` : ''}) g ORDER BY ${order} LIMIT ?`;
-  return (getDb().prepare(sql).all(...params, limit) as unknown as GameRow[]).map(toGame);
+const ORDER = {
+  top: 'plays desc, created_at desc',
+  new: 'created_at desc',
+  rated: 'coalesce(avg_rating, 0) desc, rating_count desc',
+} as const;
+
+export async function listGames({ stage, sort = 'top', tag, creator, ownerId, forkedFrom, limit = 60 }: ListOptions = {}) {
+  const rows = await sql<GameRow[]>`
+    select * from (${gameSelect()}) g
+    where true
+      ${stage ? sql`and stage = ${stage}` : sql``}
+      ${creator ? sql`and lower(creator) = lower(${creator})` : sql``}
+      ${ownerId ? sql`and owner_id = ${ownerId}` : sql``}
+      ${forkedFrom ? sql`and forked_from = ${forkedFrom}` : sql``}
+      ${tag ? sql`and ${tag} = any(tags)` : sql``}
+    order by ${sql.unsafe(ORDER[sort] ?? ORDER.top)}
+    limit ${limit}`;
+  return rows.map(toGame);
 }
 
-export function getGame(slugOrId: string): Game | null {
-  const row = getDb().prepare(`${SELECT_GAME} WHERE g.slug = ? OR g.id = ?`).get(slugOrId, slugOrId) as GameRow | undefined;
+export async function getGame(slugOrId: string): Promise<Game | null> {
+  const [row] = await sql<GameRow[]>`${gameSelect()} where g.slug = ${slugOrId} or g.id = ${slugOrId}`;
   return row ? toGame(row) : null;
 }
 
-export function listTags(): { tag: string; count: number }[] {
-  const counts = new Map<string, number>();
-  for (const { tags } of getDb().prepare('SELECT tags FROM games').all() as { tags: string }[]) {
-    for (const t of tags.split(',').filter(Boolean)) counts.set(t, (counts.get(t) ?? 0) + 1);
-  }
-  return [...counts].map(([tag, count]) => ({ tag, count })).sort((a, b) => b.count - a.count);
+export async function listTags(): Promise<{ tag: string; count: number }[]> {
+  return sql<{ tag: string; count: number }[]>`
+    select t as tag, count(*)::int as count from games, unnest(tags) t group by t order by count desc, t limit 30`;
 }
 
-export function platformStats() {
-  return getDb()
-    .prepare(
-      `SELECT (SELECT COUNT(*) FROM games) AS games,
-              (SELECT COUNT(*) FROM games WHERE stage = 'live') AS live,
-              (SELECT COUNT(*) FROM sessions) AS plays,
-              (SELECT COUNT(DISTINCT creator) FROM games) AS creators`,
-    )
-    .get() as { games: number; live: number; plays: number; creators: number };
+export async function platformStats() {
+  const [row] = await sql<{ games: number; live: number; plays: number; creators: number }[]>`
+    select (select count(*)::int from games) as games,
+           (select count(*)::int from games where stage = 'live') as live,
+           (select count(*)::int from sessions) as plays,
+           (select count(distinct creator)::int from games) as creators`;
+  return row;
 }
 
 const slugify = (s: string) =>
@@ -129,53 +137,58 @@ export function normalizeTags(raw: string): string[] {
 }
 
 export interface NewGame {
+  ownerId: string;
+  creator: string;
   title: string;
   tagline: string;
   description: string;
-  creator: string;
   tags: string[];
   license: string;
   forkedFrom: string | null;
   html: Uint8Array;
-  thumb?: { bytes: Uint8Array; ext: string };
+  thumb?: { bytes: Uint8Array; ext: string; type: string };
 }
 
-export function createGame(input: NewGame): Game {
-  const db = getDb();
+export async function createGame(input: NewGame): Promise<Game> {
   const id = crypto.randomBytes(6).toString('base64url');
   let slug = slugify(input.title);
-  if (db.prepare('SELECT 1 FROM games WHERE slug = ?').get(slug)) slug = `${slug}-${id.slice(0, 4).toLowerCase()}`;
+  const [clash] = await sql`select 1 from games where slug = ${slug}`;
+  if (clash) slug = `${slug}-${id.slice(0, 4).toLowerCase()}`;
 
-  const dir = path.join(GAMES_DIR, id);
-  fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, 'index.html'), input.html);
+  const upload = async (path: string, bytes: Uint8Array, contentType: string) => {
+    const { error } = await bucket().upload(path, bytes, { contentType, upsert: true });
+    if (error) throw new Error(`Storage upload failed: ${error.message}`);
+  };
+  await upload(`${id}/index.html`, input.html, 'text/html; charset=utf-8');
   const thumb = input.thumb ? `thumb.${input.thumb.ext}` : null;
-  if (input.thumb && thumb) fs.writeFileSync(path.join(dir, thumb), input.thumb.bytes);
+  if (input.thumb && thumb) await upload(`${id}/${thumb}`, input.thumb.bytes, input.thumb.type);
 
-  db.prepare(
-    `INSERT INTO games (id, slug, title, tagline, description, creator, tags, license, forked_from, size_bytes, hue, thumb, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(
-    id, slug, input.title, input.tagline, input.description, input.creator, input.tags.join(','), input.license,
-    input.forkedFrom, input.html.byteLength, crypto.randomInt(0, 360), thumb, Date.now(),
-  );
-  return getGame(id)!;
+  await sql`
+    insert into games (id, slug, owner_id, creator, title, tagline, description, tags, license, forked_from, size_bytes, hue, thumb)
+    values (${id}, ${slug}, ${input.ownerId}, ${input.creator}, ${input.title}, ${input.tagline}, ${input.description},
+            ${input.tags}, ${input.license}, ${input.forkedFrom}, ${input.html.byteLength}, ${crypto.randomInt(0, 360)}, ${thumb})`;
+  return (await getGame(id))!;
 }
 
-export function rateGame(gameId: string, voter: string, stars: number) {
-  getDb()
-    .prepare(
-      `INSERT INTO ratings (game_id, voter, stars, created_at) VALUES (?, ?, ?, ?)
-       ON CONFLICT (game_id, voter) DO UPDATE SET stars = excluded.stars, created_at = excluded.created_at`,
-    )
-    .run(gameId, voter, stars, Date.now());
-  evaluateGraduation(gameId);
+/** Deletes a game owned by `ownerId`, including its bundle in storage. Returns false if not found / not owned. */
+export async function deleteGame(gameId: string, ownerId: string): Promise<boolean> {
+  const [row] = await sql<{ id: string; thumb: string | null }[]>`
+    delete from games where id = ${gameId} and owner_id = ${ownerId} returning id, thumb`;
+  if (!row) return false;
+  await bucket().remove([`${row.id}/index.html`, ...(row.thumb ? [`${row.id}/${row.thumb}`] : [])]);
+  return true;
 }
 
-export function getUserRating(gameId: string, voter: string): number | null {
-  const row = getDb().prepare('SELECT stars FROM ratings WHERE game_id = ? AND voter = ?').get(gameId, voter) as
-    | { stars: number }
-    | undefined;
+export async function rateGame(gameId: string, voter: string, stars: number) {
+  await sql`
+    insert into ratings (game_id, voter, stars) values (${gameId}, ${voter}, ${stars})
+    on conflict (game_id, voter) do update set stars = excluded.stars, created_at = now()`;
+  await evaluateGraduation(gameId);
+}
+
+export async function getUserRating(gameId: string, voter: string | undefined): Promise<number | null> {
+  if (!voter) return null;
+  const [row] = await sql<{ stars: number }[]>`select stars from ratings where game_id = ${gameId} and voter = ${voter}`;
   return row?.stars ?? null;
 }
 
@@ -183,33 +196,29 @@ export type TelemetryType = 'session_start' | 'first_frame' | 'start' | 'complet
 
 const MAX_SESSION_MS = 4 * 3600_000;
 
-export function recordTelemetry(sessionId: string, gameId: string, type: TelemetryType, value = 0) {
-  const db = getDb();
+export async function recordTelemetry(sessionId: string, gameId: string, type: TelemetryType, value = 0) {
+  const where = sql`where id = ${sessionId} and game_id = ${gameId}`;
   switch (type) {
     case 'session_start':
-      db.prepare('INSERT OR IGNORE INTO sessions (id, game_id, created_at) VALUES (?, ?, ?)').run(sessionId, gameId, Date.now());
+      await sql`insert into sessions (id, game_id) values (${sessionId}, ${gameId}) on conflict do nothing`;
       return;
     case 'first_frame':
-      db.prepare('UPDATE sessions SET first_frame_ms = ? WHERE id = ? AND game_id = ? AND first_frame_ms IS NULL').run(
-        Math.max(0, Math.round(value)), sessionId, gameId,
-      );
+      await sql`update sessions set first_frame_ms = ${Math.max(0, Math.round(value))} ${where} and first_frame_ms is null`;
       return;
     case 'start':
-      db.prepare('UPDATE sessions SET started = 1 WHERE id = ? AND game_id = ?').run(sessionId, gameId);
+      await sql`update sessions set started = true ${where}`;
       break;
     case 'complete':
-      db.prepare('UPDATE sessions SET started = 1, completed = 1 WHERE id = ? AND game_id = ?').run(sessionId, gameId);
+      await sql`update sessions set started = true, completed = true ${where}`;
       break;
     case 'crash':
-      db.prepare('UPDATE sessions SET crashed = 1 WHERE id = ? AND game_id = ?').run(sessionId, gameId);
+      await sql`update sessions set crashed = true ${where}`;
       break;
     case 'heartbeat':
-      db.prepare('UPDATE sessions SET duration_ms = MAX(duration_ms, ?) WHERE id = ? AND game_id = ?').run(
-        Math.min(MAX_SESSION_MS, Math.max(0, Math.round(value))), sessionId, gameId,
-      );
+      await sql`update sessions set duration_ms = greatest(duration_ms, ${Math.min(MAX_SESSION_MS, Math.max(0, Math.round(value)))}) ${where}`;
       break;
   }
-  evaluateGraduation(gameId);
+  await evaluateGraduation(gameId);
 }
 
 export interface HealthCheck {
@@ -222,36 +231,30 @@ export interface HealthCheck {
   pass: boolean;
 }
 
-export function getHealth(gameId: string): { checks: HealthCheck[]; eligible: boolean } {
-  const db = getDb();
-  const s = db
-    .prepare(
-      `SELECT COUNT(*) AS plays,
-         AVG(CASE WHEN first_frame_ms IS NOT NULL AND first_frame_ms <= ? THEN 1.0 ELSE 0.0 END) AS ff_ok,
-         AVG(crashed * 1.0) AS crash_rate,
-         AVG(started * 1.0) AS start_rate,
-         AVG(CASE WHEN started = 1 THEN completed * 1.0 END) AS completion_rate
-       FROM sessions WHERE game_id = ?`,
-    )
-    .get(GRADUATION.maxFirstFrameMs, gameId) as {
-    plays: number;
-    ff_ok: number | null;
-    crash_rate: number | null;
-    start_rate: number | null;
-    completion_rate: number | null;
-  };
-  const started = db.prepare('SELECT COUNT(*) AS n FROM sessions WHERE game_id = ? AND started = 1').get(gameId) as { n: number };
-  const median = started.n
-    ? (db
-        .prepare('SELECT duration_ms FROM sessions WHERE game_id = ? AND started = 1 ORDER BY duration_ms LIMIT 1 OFFSET ?')
-        .get(gameId, Math.floor(started.n / 2)) as { duration_ms: number })
-    : null;
-  const r = db.prepare('SELECT AVG(stars) AS avg, COUNT(*) AS n FROM ratings WHERE game_id = ?').get(gameId) as {
-    avg: number | null;
-    n: number;
-  };
-
+export async function getHealth(gameId: string): Promise<{ checks: HealthCheck[]; eligible: boolean }> {
   const G = GRADUATION;
+  const [s] = await sql<
+    {
+      plays: number;
+      ff_ok: number | null;
+      crash_rate: number | null;
+      start_rate: number | null;
+      completion_rate: number | null;
+      median_ms: number | null;
+      avg_rating: number | null;
+      rating_count: number;
+    }[]
+  >`
+    select count(*)::int as plays,
+      (avg(case when first_frame_ms is not null and first_frame_ms <= ${G.maxFirstFrameMs} then 1.0 else 0.0 end))::float8 as ff_ok,
+      (avg(crashed::int))::float8 as crash_rate,
+      (avg(started::int))::float8 as start_rate,
+      (avg(completed::int) filter (where started))::float8 as completion_rate,
+      (percentile_disc(0.5) within group (order by duration_ms) filter (where started))::float8 as median_ms,
+      (select avg(stars)::float8 from ratings where game_id = ${gameId}) as avg_rating,
+      (select count(*)::int from ratings where game_id = ${gameId}) as rating_count
+    from sessions where game_id = ${gameId}`;
+
   const check = (
     key: string, label: string, value: number | null, target: number, format: HealthCheck['format'],
     comparator: HealthCheck['comparator'] = 'gte', passOverride?: boolean,
@@ -266,17 +269,16 @@ export function getHealth(gameId: string): { checks: HealthCheck[]; eligible: bo
     check('crash', 'Crash rate', s.crash_rate, G.maxCrashRate, 'pct', 'lte'),
     check('start', 'Start rate', s.start_rate, G.minStartRate, 'pct'),
     check('completion', 'Loop completion rate', s.completion_rate, G.minCompletionRate, 'pct'),
-    check('session', 'Median session', median ? median.duration_ms / 1000 : null, G.minMedianSessionSec, 'sec'),
-    check('rating', `Community rating (${r.n} votes)`, r.avg, G.minAvgRating, 'stars', 'gte',
-      r.n < G.minRatingsForRatingGate ? true : undefined),
+    check('session', 'Median session', s.median_ms === null ? null : s.median_ms / 1000, G.minMedianSessionSec, 'sec'),
+    check('rating', `Community rating (${s.rating_count} votes)`, s.avg_rating, G.minAvgRating, 'stars', 'gte',
+      s.rating_count < G.minRatingsForRatingGate ? true : undefined),
   ];
   return { checks, eligible: checks.every((c) => c.pass) };
 }
 
-export function evaluateGraduation(gameId: string): boolean {
-  const db = getDb();
-  const row = db.prepare('SELECT stage FROM games WHERE id = ?').get(gameId) as { stage: Stage } | undefined;
-  if (!row || row.stage === 'live' || !getHealth(gameId).eligible) return false;
-  db.prepare("UPDATE games SET stage = 'live', graduated_at = ? WHERE id = ?").run(Date.now(), gameId);
+export async function evaluateGraduation(gameId: string): Promise<boolean> {
+  const [row] = await sql<{ stage: Stage }[]>`select stage from games where id = ${gameId}`;
+  if (!row || row.stage === 'live' || !(await getHealth(gameId)).eligible) return false;
+  await sql`update games set stage = 'live', graduated_at = now() where id = ${gameId} and stage = 'proving'`;
   return true;
 }
