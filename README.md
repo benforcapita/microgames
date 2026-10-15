@@ -58,6 +58,18 @@ Database schema and migration files live in `supabase/migrations/`.
 - To create a new migration, add a timestamped SQL file in `supabase/migrations/` (for example, `YYYYMMDDHHMMSS_name.sql`).
 - Applying migrations to a hosted project is handled by maintainers.
 
+### pg_net lockdown (hosted, required)
+
+Migrations run as `postgres` and cannot change pg_net grants (`supabase_admin` owns them). On pg_net 0.20.4, `anon` and `authenticated` can execute all 12 functions in schema `net` (see the comment in `supabase/migrations/20261015120800_enqueue_validate_game.sql`).
+
+Hosted remediation: Supabase support runs `supabase/ops/pg_net_lockdown.sql` as `supabase_admin`. Then this is a required post-deploy step:
+
+```bash
+npm run check:pg-net -- --strict
+```
+
+It exits non-zero while any reported row is `GAP`. `net` must stay out of the API exposed schemas (Settings > API / `pgrst.db_schemas`).
+
 ---
 
 ## Development

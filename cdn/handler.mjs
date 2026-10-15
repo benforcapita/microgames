@@ -10,6 +10,7 @@ import fs from 'node:fs';
 import { frameAncestors, matchEmbedder, parseOriginList } from './frame-ancestors.mjs';
 import { verifyPreviewToken } from './preview-token.mjs';
 import { gameCsp } from './csp.mjs';
+import { injectHead } from './inject.mjs';
 
 const BOOT = fs.readFileSync(new URL('./boot.js', import.meta.url), 'utf8');
 export const PUBLIC_STAGES = new Set(['proving', 'live']);
@@ -22,13 +23,7 @@ const FILE_RE = /^(index\.html|thumb(-[a-z0-9]{4,24})?\.(png|jpg|webp))$/;
 const MIME = { html: 'text/html; charset=utf-8', png: 'image/png', jpg: 'image/jpeg', webp: 'image/webp' };
 
 // Boot only. The upload preview sets its own capture flag; do not add one here.
-function inject(html) {
-  const tag = `<script>${BOOT}</script>`;
-  const head = html.match(/<head[^>]*>/i);
-  if (head) return html.replace(head[0], head[0] + tag);
-  const lead = html.match(/^\s*(<!doctype[^>]*>)?\s*(<html[^>]*>)?/i)[0];
-  return lead + tag + html.slice(lead.length);
-}
+const inject = (html) => injectHead(html, BOOT);
 
 const base = {
   'X-Content-Type-Options': 'nosniff',
