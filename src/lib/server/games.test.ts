@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
   GRADUATION_DEFAULTS,
+  MAX_FIRST_FRAME_MS,
   MAX_SESSION_MS,
   assessHealth,
   clampDurationMs,
@@ -125,27 +126,33 @@ describe('telemetry clamping', () => {
   it('clamps negative samples to zero', () => {
     assert.equal(clampFirstFrameMs(-1), 0);
     assert.equal(clampFirstFrameMs(-0.4), 0);
+    assert.equal(clampFirstFrameMs(-5), 0);
     assert.equal(clampDurationMs(-50), 0);
     assert.equal(clampDurationMs(-1e15), 0);
   });
 
-  it('caps huge durations at four hours and keeps a huge first-frame time', () => {
+  it('caps huge durations at four hours and first-frame times at sixty seconds', () => {
     assert.equal(MAX_SESSION_MS, 4 * 3600_000);
+    assert.equal(MAX_FIRST_FRAME_MS, 60_000);
     assert.equal(clampDurationMs(MAX_SESSION_MS - 1), MAX_SESSION_MS - 1);
     assert.equal(clampDurationMs(MAX_SESSION_MS), MAX_SESSION_MS);
     assert.equal(clampDurationMs(MAX_SESSION_MS + 1), MAX_SESSION_MS);
     assert.equal(clampDurationMs(1e15), MAX_SESSION_MS);
     assert.equal(clampDurationMs(Number.POSITIVE_INFINITY), MAX_SESSION_MS);
-    assert.equal(clampFirstFrameMs(1e15), 1e15);
+    assert.equal(clampFirstFrameMs(Number.POSITIVE_INFINITY), MAX_FIRST_FRAME_MS);
+    assert.equal(clampFirstFrameMs(1e12), MAX_FIRST_FRAME_MS);
     assert.equal(clampFirstFrameMs(1.6), 2);
+    assert.equal(clampFirstFrameMs(1234.4), 1234);
   });
 
-  it('clamps non-numeric samples to zero', () => {
-    for (const value of [Number.NaN, 'nope', undefined, Number.NEGATIVE_INFINITY]) {
-      assert.equal(clampFirstFrameMs(value), 0, String(value));
+  it('handles invalid and non-finite samples', () => {
+    for (const value of [Number.NaN, Number.NEGATIVE_INFINITY, null, 'abc', 'nope', undefined]) {
+      assert.equal(clampFirstFrameMs(value), null, String(value));
+    }
+    for (const value of [Number.NaN, Number.NEGATIVE_INFINITY, 'nope', undefined]) {
       assert.equal(clampDurationMs(value), 0, String(value));
     }
-    assert.equal(clampFirstFrameMs(Number.POSITIVE_INFINITY), 0);
+    assert.equal(clampDurationMs(Number.NaN), 0);
   });
 });
 
