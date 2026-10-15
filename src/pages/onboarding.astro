@@ -1,0 +1,36 @@
+---
+import Layout from '../layouts/Layout.astro';
+import { safeNext, withParams } from '../lib/server/auth';
+
+const p = Astro.url.searchParams;
+const next = safeNext(p.get('next'));
+if (!Astro.locals.user) return Astro.redirect(withParams('/login', { next: '/onboarding' }));
+if (Astro.locals.profile) return Astro.redirect(next);
+const error = p.get('error');
+---
+
+<Layout title="Pick your handle">
+  <section class="section wrap onboard">
+    <form class="panel card" method="post" action="/api/profile">
+      <span class="eyebrow">One last step</span>
+      <h1>Pick your handle</h1>
+      <p class="muted">This is the name players see on your games, like <code>@neonwizard</code>. You can't change it later.</p>
+      {error && <p class="msg" role="alert">{error}</p>}
+      <input type="hidden" name="next" value={next} />
+      <label>Handle
+        <div class="handle"><span>@</span><input name="handle" required pattern="[A-Za-z0-9_\-]{2,32}" maxlength="32" value={p.get('handle') ?? ''} autofocus /></div>
+        <small>2–32 letters, numbers, - or _</small>
+      </label>
+      <button class="btn" type="submit">Claim handle</button>
+    </form>
+  </section>
+</Layout>
+
+<style>
+  .onboard { display: grid; place-items: center; }
+  .card { width: min(440px, 100%); display: grid; gap: 1rem; padding: 2rem; }
+  .card h1 { margin: 0; font-size: 2.2rem; }
+  .card p { margin: 0; }
+  .handle { display: flex; align-items: center; gap: 0.4rem; font: 700 1.1rem var(--mono); }
+  .msg { background: #ff5d5d1a; border: 1px solid #ff5d5d66; color: #ffb3b3; border-radius: 10px; padding: 0.75rem 1rem; }
+</style>

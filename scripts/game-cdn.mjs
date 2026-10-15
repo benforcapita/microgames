@@ -1,4 +1,4 @@
-// Cookieless static origin for user-submitted game bundles.
+// Cookieless origin for user-submitted game bundles stored in the private Supabase Storage bucket.
 // Runs on a different origin than the portal so arbitrary game JS can never touch portal cookies,
 // storage, or DOM — even when someone opens a bundle URL directly in a tab.
 import fs from 'node:fs';
@@ -7,8 +7,12 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+if (fs.existsSync(path.join(root, '.env')) && !process.env.PUBLIC_SUPABASE_URL) process.loadEnvFile(path.join(root, '.env'));
+
 const PORT = Number(process.env.MG_CDN_PORT ?? 4322);
-const GAMES_DIR = path.join(path.resolve(process.env.MG_DATA_DIR ?? path.join(root, 'data')), 'games');
+const SUPABASE_URL = process.env.PUBLIC_SUPABASE_URL?.replace(/\/$/, '');
+const SECRET = process.env.SUPABASE_SECRET_KEY;
+if (!SUPABASE_URL || !SECRET) throw new Error('game-cdn needs PUBLIC_SUPABASE_URL and SUPABASE_SECRET_KEY');
 const WEB_ORIGINS = process.env.MG_WEB_ORIGINS ?? 'http://localhost:* http://127.0.0.1:*';
 const BOOT = fs.readFileSync(path.join(root, 'cdn', 'boot.js'), 'utf8');
 
@@ -29,8 +33,24 @@ const GAME_CSP = [
 ].join('; ');
 
 const ID_RE = /^[A-Za-z0-9_-]{6,16}$/;
-const THUMB_RE = /^thumb\.(png|jpg|webp)$/;
-const MIME = { png: 'image/png', jpg: 'image/jpeg', webp: 'image/webp' };
+const FILE_RE = /^(index\.html|thumb\.(png|jpg|webp))$/;
+const MIME = { html: 'text/html; charset=utf-8', png: 'image/png', jpg: 'image/jpeg', webp: 'image/webp' };
+
+// Small TTL cache so popular games don't hit Storage on every play.
+const TTL_MS = 30_000, MAX_ENTRIES = 300;
+const cache = new Map();
+
+async function fetchObject(key) {
+  const hit = cache.get(key);
+  if (hit && hit.expires > Date.now()) return hit.body;
+  const headers = { apikey: SECRET };
+  if (SECRET.startsWith('eyJ')) headers.Authorization = `Bearer ${SECRET}`;
+  const res = await fetch(`${SUPABASE_URL}/storage/v1/object/authenticated/games/${key}`, { headers });
+  const body = res.ok ? Buffer.from(await res.arrayBuffer()) : null;
+  if (cache.size >= MAX_ENTRIES) cache.delete(cache.keys().next().value);
+  cache.set(key, { body, expires: Date.now() + TTL_MS });
+  return body;
+}
 
 function inject(html) {
   const tag = `<script>${BOOT}</script>`;
@@ -52,40 +72,38 @@ function send(res, status, body, headers = {}) {
 }
 
 http
-  .createServer((req, res) => {
-    const url = new URL(req.url ?? '/', 'http://cdn');
-    if (req.method !== 'GET' && req.method !== 'HEAD') return send(res, 405, 'Method not allowed');
-    const [, scope, id, file] = url.pathname.split('/');
-    if (scope !== 'g' || !ID_RE.test(id ?? '')) return send(res, 404, 'Not found');
+  .createServer(async (req, res) => {
+    try {
+      const url = new URL(req.url ?? '/', 'http://cdn');
+      if (req.method !== 'GET' && req.method !== 'HEAD') return send(res, 405, 'Method not allowed');
+      const [, scope, id, file, ...rest] = url.pathname.split('/');
+      if (scope !== 'g' || !ID_RE.test(id ?? '') || !FILE_RE.test(file ?? '') || rest.length) return send(res, 404, 'Not found');
 
-    if (file === 'index.html') {
-      const p = path.join(GAMES_DIR, id, 'index.html');
-      if (!fs.existsSync(p)) return send(res, 404, 'Not found');
-      const html = fs.readFileSync(p, 'utf8');
+      const body = await fetchObject(`${id}/${file}`);
+      if (!body) return send(res, 404, 'Not found');
+
+      if (file !== 'index.html') {
+        return send(res, 200, body, {
+          'Content-Type': MIME[file.split('.').pop()],
+          'Content-Security-Policy': "default-src 'none'",
+          'Cache-Control': 'public, max-age=300',
+        });
+      }
       if (url.searchParams.has('source')) {
-        return send(res, 200, html, {
+        return send(res, 200, body, {
           'Content-Type': 'text/plain; charset=utf-8',
           'Content-Security-Policy': "sandbox; default-src 'none'",
           'Access-Control-Allow-Origin': '*',
         });
       }
-      return send(res, 200, inject(html), {
-        'Content-Type': 'text/html; charset=utf-8',
+      return send(res, 200, inject(body.toString('utf8')), {
+        'Content-Type': MIME.html,
         'Content-Security-Policy': GAME_CSP,
         'Cache-Control': 'no-cache',
       });
+    } catch (err) {
+      console.error('[game-cdn]', err);
+      send(res, 502, 'Upstream error');
     }
-
-    const thumb = file?.match(THUMB_RE);
-    if (thumb) {
-      const p = path.join(GAMES_DIR, id, file);
-      if (!fs.existsSync(p)) return send(res, 404, 'Not found');
-      return send(res, 200, fs.readFileSync(p), {
-        'Content-Type': MIME[thumb[1]],
-        'Content-Security-Policy': "default-src 'none'",
-        'Cache-Control': 'public, max-age=86400',
-      });
-    }
-    send(res, 404, 'Not found');
   })
-  .listen(PORT, () => console.log(`[game-cdn] serving ${GAMES_DIR} on http://localhost:${PORT}`));
+  .listen(PORT, () => console.log(`[game-cdn] serving Supabase bucket "games" on http://localhost:${PORT}`));

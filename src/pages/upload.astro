@@ -3,8 +3,10 @@ import Layout from '../layouts/Layout.astro';
 import { getGame } from '../lib/server/games';
 import { REVENUE, UPLOAD } from '../lib/server/config';
 
+const { profile } = Astro.locals;
+if (!profile) return Astro.redirect(`/login?mode=signup&next=${encodeURIComponent(Astro.url.pathname + Astro.url.search)}`);
 const forkSlug = Astro.url.searchParams.get('fork');
-const fork = forkSlug ? getGame(forkSlug) : null;
+const fork = forkSlug ? await getGame(forkSlug) : null;
 const forkable = fork && fork.license !== 'All rights reserved' ? fork : null;
 ---
 
@@ -45,10 +47,9 @@ const forkable = fork && fork.license !== 'All rights reserved' ? fork : null;
       <label>Game file <small>single .html, everything inlined except CDN libraries</small>
         <input type="file" name="game" accept=".html,.htm,text/html" required />
       </label>
-      <div class="two">
-        <label>Title <input name="title" maxlength="60" required value={forkable ? `${forkable.title} Remix` : ''} /></label>
-        <label>Creator handle <input name="creator" maxlength="32" pattern="[A-Za-z0-9_\-]{2,32}" required placeholder="neonwizard" /></label>
-      </div>
+      <label>Title <small>publishing as <b class="accent">@{profile.handle}</b></small>
+        <input name="title" maxlength="60" required value={forkable ? `${forkable.title} Remix` : ''} />
+      </label>
       <label>Tagline <small>one punchy line</small><input name="tagline" maxlength="90" /></label>
       <label>Description <small>controls, goal, what you built it with</small><textarea name="description" rows="5" maxlength="2000"></textarea></label>
       <div class="two">

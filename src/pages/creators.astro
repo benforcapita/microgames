@@ -56,7 +56,7 @@ window.addEventListener('message', (e) => {
     <p class="muted">Every upload is wrapped in a small runtime, so these work without touching your code:</p>
     <ul class="feature-list">
       <li><b>Auto-pause during ads.</b> We freeze <code>requestAnimationFrame</code>, <code>performance.now()</code>, WebAudio and media, then resume without a time jump.</li>
-      <li><b>Saves just work.</b> <code>localStorage</code> is persisted for each player, even inside the security sandbox.</li>
+      <li><b>Saves just work.</b> <code>localStorage</code> works inside the security sandbox, and for signed-in players it syncs to the cloud across devices.</li>
       <li><b>Health telemetry.</b> First frame, first input, crashes and WebGL context loss are all reported for you.</li>
     </ul>
 

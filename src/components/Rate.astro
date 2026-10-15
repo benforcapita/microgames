@@ -6,10 +6,12 @@ interface Props {
   mine: number | null;
 }
 const { slug, avg, count, mine } = Astro.props;
+const loggedIn = !!Astro.locals.user;
 ---
 
 <div class="rate" data-rate={slug} data-mine={mine ?? ''}>
-  <div class="stars" role="radiogroup" aria-label="Rate this game">
+  {!loggedIn && <a class="login" href={`/login?next=${encodeURIComponent(Astro.url.pathname)}`}>Log in to rate</a>}
+  <div class="stars" role="radiogroup" aria-label="Rate this game" hidden={!loggedIn}>
     {
       [1, 2, 3, 4, 5].map((n) => (
         <button type="button" role="radio" data-stars={n} aria-checked={mine === n ? 'true' : 'false'} aria-label={`${n} star${n > 1 ? 's' : ''}`} class:list={{ on: (mine ?? 0) >= n }}>
@@ -39,6 +41,7 @@ const { slug, avg, count, mine } = Astro.props;
   .stars button:hover ~ button { color: #3a3f52; }
   button:hover { transform: scale(1.15); }
   .summary { font-size: 0.8rem; }
+  .login { color: var(--accent); font-size: 0.9rem; font-weight: 600; }
 </style>
 
 <script>

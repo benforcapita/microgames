@@ -8,8 +8,8 @@ const sorts = { top: 'Most played', rated: 'Top rated', new: 'Newest' } as const
 const sort = (params.get('sort') ?? 'top') as NonNullable<ListOptions['sort']>;
 const activeSort = sort in sorts ? sort : 'top';
 const tag = params.get('tag') ?? undefined;
-const games = listGames({ stage: 'live', sort: activeSort, tag });
-const tags = listTags().slice(0, 16);
+const [games, allTags] = await Promise.all([listGames({ stage: 'live', sort: activeSort, tag }), listTags()]);
+const tags = allTags.slice(0, 16);
 
 const href = (next: { sort?: string; tag?: string | null }) => {
   const q = new URLSearchParams();

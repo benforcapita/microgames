@@ -1,0 +1,78 @@
+---
+import Layout from '../layouts/Layout.astro';
+import GameThumb from '../components/GameThumb.astro';
+import { listGames } from '../lib/server/games';
+import { compact, stars, ago } from '../lib/format';
+
+const { user, profile } = Astro.locals;
+if (!user || !profile) return Astro.redirect('/login?next=/me');
+const games = await listGames({ ownerId: user.id, sort: 'new', limit: 200 });
+const plays = games.reduce((n, g) => n + g.plays, 0);
+const deleted = Astro.url.searchParams.has('deleted');
+---
+
+<Layout title="Your dashboard">
+  <section class="section wrap">
+    <div class="spread">
+      <div>
+        <span class="eyebrow">Creator dashboard</span>
+        <h1>@{profile.handle}</h1>
+        <p class="muted mono">{user.email} · {games.length} games · {compact(plays)} plays</p>
+      </div>
+      <div class="row">
+        <a class="btn ghost" href={`/u/${profile.handle}`}>Public profile</a>
+        <a class="btn" href="/upload">Upload a game</a>
+      </div>
+    </div>
+    {deleted && <p class="panel notice">Game deleted.</p>}
+
+    {
+      games.length ? (
+        <ul class="list">
+          {games.map((g) => (
+            <li class="panel item">
+              <a href={`/play/${g.slug}`} class="thumb"><GameThumb game={g} class="art" /></a>
+              <div class="meta">
+                <a href={`/play/${g.slug}`}><h3>{g.title}</h3></a>
+                <p class="muted mono">
+                  <span class:list={['badge', g.stage]}>{g.stage === 'live' ? 'Monetized' : 'Proving Grounds'}</span>{' '}
+                  {compact(g.plays)} plays · ★ {stars(g.avgRating)} ({g.ratingCount}) · uploaded {ago(g.createdAt)}
+                </p>
+              </div>
+              <form method="post" action={`/api/games/${g.slug}/delete`} class="del" data-confirm={`Delete “${g.title}” permanently? Plays, ratings and player saves will be removed.`}>
+                <button class="btn ghost sm" type="submit">Delete</button>
+              </form>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <div class="panel empty">
+          <p>You haven't uploaded anything yet.</p>
+          <a class="btn" href="/upload">Ship your first game</a>
+        </div>
+      )
+    }
+    <form method="post" action="/api/auth/logout" class="logout"><button class="btn ghost sm" type="submit">Log out</button></form>
+  </section>
+</Layout>
+
+<style>
+  .list { list-style: none; padding: 0; margin: 2rem 0; display: grid; gap: 0.75rem; }
+  .item { display: grid; grid-template-columns: 120px 1fr auto; gap: 1rem; align-items: center; padding: 0.75rem; }
+  .thumb { aspect-ratio: 16 / 10; border-radius: 8px; overflow: hidden; display: block; }
+  .thumb :global(.art) { width: 100%; height: 100%; object-fit: cover; }
+  .meta h3 { margin: 0 0 0.3rem; }
+  .meta a { text-decoration: none; }
+  .meta p { margin: 0; font-size: 0.8rem; }
+  .notice { margin-top: 1rem; border-color: #c4ff3d55; }
+  .empty { text-align: center; padding: 3rem; margin-top: 2rem; }
+  .logout { margin-top: 2rem; }
+</style>
+
+<script>
+  document.querySelectorAll<HTMLFormElement>('form[data-confirm]').forEach((f) =>
+    f.addEventListener('submit', (e) => {
+      if (!confirm(f.dataset.confirm)) e.preventDefault();
+    }),
+  );
+</script>
