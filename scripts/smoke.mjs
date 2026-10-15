@@ -161,8 +161,9 @@ try {
   const newPath = new URL(up?.headers.get('location') ?? '/play/none', WEB).pathname;
   const slug = newPath.split('/')[2];
   await check(newPath, WEB + newPath, 200);
-  // SP-5: new uploads start as `pending` (owner-only /submissions/<id>) until validate-game publishes them,
-  // which doesn't run in smoke, so the creator page still has no public games.
+  // Smoke covers upload up to `pending` only (SP-5: owner-only /submissions/<id>); it makes no stage assertions.
+  // pending -> proving/rejected is covered by the validate-game edge-function tests
+  // (supabase/functions/validate-game/*_test.ts), not here. So the creator page has no public games yet.
   await check(`/u/${handle} (upload still pending)`, `${WEB}/u/${handle}`, 404);
   await check(`/api/games/${slug}/delete`, `${WEB}/api/games/${slug}/delete`, 303, { method: 'POST', verify: expectLoc(/^\/me\?deleted=1/) });
   await check(`${newPath} (after delete)`, WEB + newPath, 404);
