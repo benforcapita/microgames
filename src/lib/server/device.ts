@@ -126,7 +126,7 @@ function warnMissingInputSupport(err: unknown): void {
   if (warned.inputSupport) return;
   warned.inputSupport = true;
   const code = (err as { code?: string } | null)?.code ?? '42703';
-  console.warn(`[meshgrounds] games.input_support is not available yet (${code}); treating every game as unknown`);
+  console.warn(`[meshground] games.input_support is not available yet (${code}); treating every game as unknown`);
 }
 
 /** Run a catalog query. A missing `input_support` column is treated as every game being `unknown`. */

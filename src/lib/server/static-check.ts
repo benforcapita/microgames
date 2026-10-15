@@ -61,7 +61,7 @@ const asDeclared = (v: string | undefined | null): 'mobile' | 'desktop' | 'both'
  * mobile signals: touch events, pointer events, on-screen controls. desktop signals: key events, mouse-only events
  * (mousedown/up/move, wheel). click is neutral: it fires on tap too.
  * Mobile + desktop -> 'both'; keys/mouse only -> 'desktop'; mobile only -> 'mobile'; nothing -> 'unknown'.
- * A declaration (Meshgrounds.declare({ inputSupport }), else the meta tag; same order as boot.js) wins when the code is consistent with it
+ * A declaration (Meshground.declare({ inputSupport }), else the meta tag; same order as boot.js) wins when the code is consistent with it
  * (its signals are present, or the code shows no input signals at all).
  */
 export function classifyInputSupport(js: string, tags: { name: string; attrs: Map<string, string> }[]): InputSupportReport {
@@ -69,7 +69,7 @@ export function classifyInputSupport(js: string, tags: { name: string; attrs: Ma
   let attrNames = '', attrIds = '';
   let meta: 'mobile' | 'desktop' | 'both' | null = null;
   for (const t of tags) {
-    if (t.name === 'meta' && (t.attrs.get('name') ?? '').trim().toLowerCase() === 'meshgrounds:input-support') meta ??= asDeclared(t.attrs.get('content'));
+    if (t.name === 'meta' && (t.attrs.get('name') ?? '').trim().toLowerCase().match(/^meshgrounds?:input-support$/)) /* new name + pre-rebrand name */ meta ??= asDeclared(t.attrs.get('content'));
     for (const [k, v] of t.attrs) {
       if (k.startsWith('on')) attrNames += ' ' + k.slice(2);
       if (k === 'id' || k === 'class' || k.startsWith('data-')) attrIds += ' ' + v;
@@ -87,7 +87,7 @@ export function classifyInputSupport(js: string, tags: { name: string; attrs: Ma
   const mobile = signals.touch || signals.pointer || signals.controls;
   const desktop = signals.keyboard || signals.mouse;
   const detected: InputClass = mobile && desktop ? 'both' : mobile ? 'mobile' : desktop ? 'desktop' : 'unknown';
-  // Same precedence as the runtime (cdn/boot.js, #34): Meshgrounds.declare() beats the meta tag.
+  // Same precedence as the runtime (cdn/boot.js, #34): Meshground.declare() beats the meta tag.
   // boot.js keeps the LAST declare() call, so the static check does too.
   // Comments are stripped first (string/regex-aware, linear; only when the key appears at all), so a
   // commented-out declare() is ignored.
@@ -426,7 +426,7 @@ function walk(root: N, facts: JsFacts, budget?: Budget) {
           const bare = stripWindow(p);
           // parent.postMessage is how games talk to the portal (boot.js telemetry), not navigation.
           if (/^(?:top|parent)\.(?:location|document|window)\b/.test(bare) || bare === 'top' || bare.startsWith('frameElement')) facts.topNav.push(p);
-          const m = /(?:^|\.)Meshgrounds\.(ready|onPause|onResume)\b/.exec(p);
+          const m = /(?:^|\.)Meshgrounds?\.(ready|onPause|onResume)\b/.exec(p);
           if (m) facts.hooks.add(m[1]);
         }
         break;
@@ -695,7 +695,7 @@ const LEX = {
   topNav: /(?<![\w$.])(?:(?:window|self|globalThis)\s*\.\s*)?(?:top|parent)\s*\.\s*(?:location|document|window)(?![\w$])|(?<![\w$.])(?:window|self|globalThis)\s*\.\s*top(?![\w$])|(?<![\w$.])frameElement(?![\w$])/g,
   topNavIndex: /(?<![\w$.])(?:(?:window|self|globalThis)\s*\.\s*)?(?:top|parent)\s*\[\s*(['"`])(?:location|document|window)\1\s*\]/g,
   dialogs: /(?<![\w$.])(?:(?:window|self|globalThis)\s*\.\s*)?(?:alert|confirm|prompt)\s*\(/g,
-  hooks: /Meshgrounds\s*\??\.\s*(ready|onPause|onResume)(?![\w$])/g,
+  hooks: /Meshgrounds?\s*\??\.\s*(ready|onPause|onResume)(?![\w$])/g,
 };
 
 /** Text-scan of normalised JS. Every collection is bounded by LEXICAL_CAP and built with loops (no spread). */
@@ -913,14 +913,14 @@ export function analyzeGame(input: string | Uint8Array): StaticReport {
   const forms = doc.tags.filter((t) => t.name === 'form' && t.attrs.has('action')).map((t) => `<form action="${t.attrs.get('action')}">`);
   add('forms', 'Form submission', forms.length ? 'warn' : 'pass', forms.length ? 'Forms that submit are blocked in the sandbox (no allow-forms).' : 'None.', forms);
   add('popups', 'Popups', facts.popups.length ? 'warn' : 'pass', facts.popups.length ? 'window.open() is blocked in the sandbox.' : 'None.', facts.popups);
-  add('top-navigation', 'Frame escape / top navigation', facts.topNav.length ? 'warn' : 'pass', facts.topNav.length ? 'Touching top/parent is blocked; use window.Meshgrounds instead.' : 'None.', facts.topNav);
+  add('top-navigation', 'Frame escape / top navigation', facts.topNav.length ? 'warn' : 'pass', facts.topNav.length ? 'Touching top/parent is blocked; use window.Meshground instead.' : 'None.', facts.topNav);
   add('dialogs', 'Blocking dialogs', facts.dialogs.length ? 'warn' : 'pass', facts.dialogs.length ? 'alert/confirm/prompt do nothing in the sandbox.' : 'None.', facts.dialogs);
 
   // Contract hooks (warn only).
   const missing = ['ready', 'onPause', 'onResume'].filter((h) => !facts.hooks.has(h));
-  add('contract-hooks', 'Meshgrounds hooks', missing.length ? 'warn' : 'pass',
-    missing.length ? `Not calling ${missing.map((h) => `Meshgrounds.${h}`).join(', ')} (runtime contract v1.1; guard with ?.).` : 'Calls ready, onPause and onResume.',
-    missing.map((h) => `Meshgrounds.${h}`));
+  add('contract-hooks', 'Meshground hooks', missing.length ? 'warn' : 'pass',
+    missing.length ? `Not calling ${missing.map((h) => `Meshground.${h}`).join(', ')} (runtime contract v1.1; guard with ?.).` : 'Calls ready, onPause and onResume.',
+    missing.map((h) => `Meshground.${h}`));
 
   // Input support (IS-2): report-only, always 'pass'. Lexical, capped, so it never blows the time budget.
   const inputSupport = classifyInputSupport(doc.scripts.map((x) => x.text).join('\n') + '\n' + doc.handlers.join('\n'), doc.tags);

@@ -341,9 +341,9 @@ export function previewSubmissionView(): SubmissionView {
       runReport: {
         checks: [
           { id: 'boot', name: 'First frame', level: 'pass', message: 'First frame arrived in 420 ms.' },
-          { id: 'ready', name: 'Meshgrounds.ready()', level: 'warn', message: 'ready() was not called. This stays a warning during the grace period.' },
+          { id: 'ready', name: 'Meshground.ready()', level: 'warn', message: 'ready() was not called. This stays a warning during the grace period.' },
         ],
-        console: ['[boot] Meshgrounds runtime injected'],
+        console: ['[boot] Meshground runtime injected'],
         blocked_requests: [],
         timings: { firstFrameMs: 420 },
       },

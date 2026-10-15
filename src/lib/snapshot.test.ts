@@ -76,7 +76,7 @@ function bootFrame(opts: { search?: string; preview?: unknown } = {}) {
   };
   vm.createContext(context);
   vm.runInContext(boot, context);
-  const mg = windowObj.Meshgrounds as { ready: () => void };
+  const mg = windowObj.Meshground as { ready: () => void };
   return {
     posts,
     getContextCalls,

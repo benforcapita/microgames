@@ -1,5 +1,5 @@
 // Renders the launch film: synthesizes the soundtrack, captures launch/video.html frame by frame, muxes an MP4.
-//   node launch/render.mjs                 → launch/out/meshgrounds-launch.mp4 (1920×1080, 30 fps)
+//   node launch/render.mjs                 → launch/out/meshground-launch.mp4 (1920×1080, 30 fps)
 //   node launch/render.mjs --stills 3,9.5  → launch/out/still-<t>.png only (quick visual check)
 //   node launch/render.mjs --audio         → launch/out/soundtrack.wav only
 // Needs ffmpeg on PATH and Playwright's Chromium (npx playwright install chromium).
@@ -217,7 +217,7 @@ if (args[0] === '--audio') {
 } else {
   const wav = soundtrack();
   console.log('soundtrack:', wav);
-  const mp4 = path.join(out, 'meshgrounds-launch.mp4');
+  const mp4 = path.join(out, 'meshground-launch.mp4');
   const ff = spawn('ffmpeg', ['-y', '-loglevel', 'error', '-f', 'image2pipe', '-framerate', String(FPS), '-c:v', 'mjpeg', '-i', '-', '-i', wav,
     '-c:v', 'libx264', '-preset', 'medium', '-crf', '18', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-shortest', '-movflags', '+faststart', mp4], { stdio: ['pipe', 'inherit', 'inherit'] });
   const done = new Promise((res, rej) => ff.on('close', (code) => (code ? rej(new Error(`ffmpeg exited ${code}`)) : res())));

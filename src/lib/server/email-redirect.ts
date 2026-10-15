@@ -1,7 +1,9 @@
 import { safeNext } from './safe-next';
 
 /** Production portal. Confirmation and magic-link redirects are allowed here. */
-export const PORTAL_ORIGIN = 'https://meshgrounds.vercel.app';
+export const PORTAL_ORIGIN = 'https://meshground.com';
+/** Other production hosts that serve the same portal: www, and the Vercel project's default domain. */
+export const PORTAL_ALIASES = new Set([PORTAL_ORIGIN, 'https://www.meshground.com', 'https://meshgrounds.vercel.app']);
 
 /**
  * Vercel preview hosts for the portal project (team benteam2).
@@ -13,7 +15,7 @@ const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1']);
 
 export function isAllowedEmailOrigin(origin: string, allowLocal: boolean): boolean {
   if (typeof origin !== 'string' || !origin || /[\s\u0000-\u001f\u007f]/.test(origin)) return false;
-  if (origin === PORTAL_ORIGIN) return true;
+  if (PORTAL_ALIASES.has(origin)) return true;
   if (PREVIEW_ORIGIN_RE.test(origin)) return true;
   if (!allowLocal) return false;
   let url: URL;

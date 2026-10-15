@@ -34,42 +34,55 @@ describe('input support: declared flag wins when consistent', () => {
     const r = cls(page("addEventListener('keydown', f); c.addEventListener('touchstart', g)", '<canvas></canvas>', '<meta name="meshgrounds:input-support" content="mobile">'));
     assert.deepEqual([r.class, r.source, r.detected], ['mobile', 'declared', 'both']);
   });
-  it('Meshgrounds.declare({ inputSupport }) with no detectable input is trusted', () => {
-    const r = cls(page("Meshgrounds?.declare?.({ inputSupport: 'both' })"));
+  it('Meshground.declare({ inputSupport }) with no detectable input is trusted', () => {
+    const r = cls(page("Meshground?.declare?.({ inputSupport: 'both' })"));
     assert.deepEqual([r.class, r.source], ['both', 'declared']);
+  });
+  it('pre-rebrand games: the old meshgrounds meta tag is still read; the new name works too', () => {
+    for (const name of ['meshground:input-support', 'meshgrounds:input-support']) {
+      const r = cls(page('', '<canvas></canvas>', `<meta name="${name}" content="mobile">`));
+      assert.deepEqual([r.class, r.source], ['mobile', 'declared'], name);
+    }
+  });
+  it('contract hooks are recognised on both window.Meshground and the legacy window.Meshgrounds', () => {
+    for (const api of ['Meshground', 'Meshgrounds']) {
+      const js = `window.${api}?.ready?.(); ${api}.onPause(() => {}); ${api}.onResume(() => {});`;
+      const c = analyzeGame(page(js, '<canvas></canvas>')).checks.find((x) => x.id === 'contract-hooks')!;
+      assert.equal(c.level, 'pass', api);
+    }
   });
   it('declaration contradicted by the code loses (declared mobile, keys only)', () => {
     const r = cls(page("addEventListener('keydown', f)", '<canvas></canvas>', '<meta name="meshgrounds:input-support" content="mobile">'));
     assert.deepEqual([r.class, r.source, r.declared], ['desktop', 'detected', 'mobile']);
   });
   it('declared both needs both kinds of signal', () => {
-    assert.equal(cls(page("Meshgrounds.declare({ inputSupport: 'both' }); addEventListener('keydown', f)")).class, 'desktop');
+    assert.equal(cls(page("Meshground.declare({ inputSupport: 'both' }); addEventListener('keydown', f)")).class, 'desktop');
   });
   it('declare() in source beats the meta tag (same precedence as boot.js / #34)', () => {
-    const r = cls(page("Meshgrounds.declare({ inputSupport: 'desktop' }); addEventListener('keydown', f); c.ontouchstart = g", '<canvas></canvas>', '<meta name="meshgrounds:input-support" content="mobile">'));
+    const r = cls(page("Meshground.declare({ inputSupport: 'desktop' }); addEventListener('keydown', f); c.ontouchstart = g", '<canvas></canvas>', '<meta name="meshgrounds:input-support" content="mobile">'));
     assert.deepEqual([r.declared, r.class, r.source], ['desktop', 'desktop', 'declared']);
   });
   it('with several declare() calls the LAST one wins (same as boot.js at runtime)', () => {
-    const r = cls(page("Meshgrounds.declare({ inputSupport: 'mobile' }); Meshgrounds.declare({ inputSupport: 'desktop' }); addEventListener('keydown', f); c.ontouchstart = g"));
+    const r = cls(page("Meshground.declare({ inputSupport: 'mobile' }); Meshground.declare({ inputSupport: 'desktop' }); addEventListener('keydown', f); c.ontouchstart = g"));
     assert.deepEqual([r.declared, r.class, r.source], ['desktop', 'desktop', 'declared']);
-    const r2 = cls(page("Meshgrounds.declare({ inputSupport: 'desktop' }); Meshgrounds.declare({ inputSupport: 'both' }); addEventListener('keydown', f); c.ontouchstart = g"));
+    const r2 = cls(page("Meshground.declare({ inputSupport: 'desktop' }); Meshground.declare({ inputSupport: 'both' }); addEventListener('keydown', f); c.ontouchstart = g"));
     assert.equal(r2.declared, 'both');
   });
   it('a declare() inside a comment is ignored (line and block comments)', () => {
-    const js = "/* Meshgrounds.declare({ inputSupport: 'mobile' }) */ Meshgrounds.declare({ inputSupport: 'desktop' });\n// Meshgrounds.declare({ inputSupport: 'both' })\naddEventListener('keydown', f); c.ontouchstart = g";
+    const js = "/* Meshground.declare({ inputSupport: 'mobile' }) */ Meshground.declare({ inputSupport: 'desktop' });\n// Meshground.declare({ inputSupport: 'both' })\naddEventListener('keydown', f); c.ontouchstart = g";
     const r = cls(page(js));
     assert.deepEqual([r.declared, r.class], ['desktop', 'desktop']);
-    assert.equal(cls(page("// Meshgrounds.declare({ inputSupport: 'mobile' })\naddEventListener('keydown', f)")).declared, null);
+    assert.equal(cls(page("// Meshground.declare({ inputSupport: 'mobile' })\naddEventListener('keydown', f)")).declared, null);
   });
   it('a // inside a string does not hide a later declare() on the same line', () => {
-    const r = cls(page("const u = 'https://x.example'; Meshgrounds.declare({ inputSupport: 'desktop' }); addEventListener('keydown', f)"));
+    const r = cls(page("const u = 'https://x.example'; Meshground.declare({ inputSupport: 'desktop' }); addEventListener('keydown', f)"));
     assert.equal(r.declared, 'desktop');
   });
   it('the meta tag applies when there is no declare() call', () => {
     const r = cls(page("addEventListener('keydown', f); c.ontouchstart = g", '<canvas></canvas>', '<meta name="meshgrounds:input-support" content="mobile">'));
     assert.deepEqual([r.declared, r.class], ['mobile', 'mobile']);
   });
-  it('invalid declarations are ignored', () => assert.equal(cls(page("Meshgrounds.declare({ inputSupport: 'tv' })")).class, 'unknown'));
+  it('invalid declarations are ignored', () => assert.equal(cls(page("Meshground.declare({ inputSupport: 'tv' })")).class, 'unknown'));
 });
 
 describe('input support: report-only', () => {

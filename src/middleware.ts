@@ -24,7 +24,7 @@ export const onRequest = defineMiddleware(async (ctx, next) => {
   ctx.locals.device = detectDevice(ctx.request.headers);
 
   if (isSubmissionPreviewPath(pathname)) {
-    ctx.locals.user = { id: 'preview-owner', email: 'preview@meshgrounds.local' };
+    ctx.locals.user = { id: 'preview-owner', email: 'preview@meshground.local' };
     ctx.locals.profile = { id: 'preview-owner', handle: 'preview' };
   } else if (!ANONYMOUS.has(pathname)) {
     const { data } = await ctx.locals.supabase.auth.getClaims();

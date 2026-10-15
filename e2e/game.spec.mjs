@@ -32,7 +32,7 @@ test('seed game loads in the sandboxed iframe and sends telemetry', async ({ pag
   const frame = page.frameLocator('iframe.mg-frame');
   await expect(frame.locator('canvas').first()).toBeVisible({ timeout: 30_000 });
 
-  // Telemetry reached the portal API. Stack Tower never calls Meshgrounds.ready(),
+  // Telemetry reached the portal API. Stack Tower never calls Meshground.ready(),
   // so the automatic first-frame event still arrives on its own.
   expect((await sessionStart).status()).toBe(204);
   expect((await firstFrame).status()).toBe(204);
@@ -45,8 +45,8 @@ test('seed game loads in the sandboxed iframe and sends telemetry', async ({ pag
   const gameFrame = page.frames().find((f) => f.url().includes(`/g/${GAME_ID}/index.html`));
   expect(gameFrame, 'game iframe').toBeTruthy();
   await gameFrame.evaluate(() => {
-    const mg = window.Meshgrounds;
-    if (typeof mg?.ready !== 'function') throw new Error('Meshgrounds.ready is missing');
+    const mg = window.Meshground;
+    if (typeof mg?.ready !== 'function') throw new Error('Meshground.ready is missing');
     mg.ready();
     mg.ready();
   });

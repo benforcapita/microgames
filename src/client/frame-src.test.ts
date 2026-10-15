@@ -21,10 +21,10 @@ describe('gameFrameSrc', () => {
   it('properly URI-encodes embedOrigin and save data', () => {
     const embed = 'https://meshgrounds.vercel.app';
     const save = JSON.stringify({ highscore: 9999, level: 'boss & extra' });
-    const url = gameFrameSrc('https://cdn.meshgrounds.com', 'game-xyz', embed, save);
+    const url = gameFrameSrc('https://cdn.meshground.com', 'game-xyz', embed, save);
     assert.equal(
       url,
-      `https://cdn.meshgrounds.com/g/game-xyz/index.html?embed=${encodeURIComponent(embed)}#mgs=${encodeURIComponent(save)}`,
+      `https://cdn.meshground.com/g/game-xyz/index.html?embed=${encodeURIComponent(embed)}#mgs=${encodeURIComponent(save)}`,
     );
   });
 });

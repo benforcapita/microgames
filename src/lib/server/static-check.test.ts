@@ -118,7 +118,7 @@ describe('static-check scales linearly on large valid JS (acorn-bound)', () => {
   const CASES: Record<string, (bytes: number) => string> = {
     'many fetch() calls': (b) => '<canvas></canvas><script>' + "fetch('https://x.example/a');".repeat(Math.floor(b / 29)) + '</script>',
     'long member chain x.a.a.a…': (b) => '<script>x' + '.a'.repeat(Math.floor(b / 2)) + ';</script>',
-    'many Meshgrounds.* members': (b) => '<script>' + 'Meshgrounds.ready;'.repeat(Math.floor(b / 18)) + '</script>',
+    'many Meshground.* members': (b) => '<script>' + 'Meshground.ready;'.repeat(Math.floor(b / 18)) + '</script>',
   };
   for (const [name, make] of Object.entries(CASES)) {
     it(`${name}: 4 MB < 6x the 1 MB time, 1 MB < ${ADVERSARIAL_MS / 2} ms`, () => {

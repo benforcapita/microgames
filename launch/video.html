@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Meshgrounds — launch film</title>
+<title>Meshground — launch film</title>
 <style>
   html, body { margin: 0; height: 100%; background: #000; display: grid; place-items: center; overflow: hidden; }
   canvas { width: min(100vw, 177.78vh); aspect-ratio: 16 / 9; display: block; }
@@ -11,7 +11,7 @@
 <body>
 <canvas id="c" width="1920" height="1080"></canvas>
 <script>
-/* Meshgrounds launch film. Deterministic: renderFrame(t) draws second t. Open directly to preview (click for sound
+/* Meshground launch film. Deterministic: renderFrame(t) draws second t. Open directly to preview (click for sound
  * if out/soundtrack.wav exists); launch/render.mjs drives it frame by frame to make the MP4. */
 const W = 1920, H = 1080, DURATION = 46;
 const cv = document.getElementById('c');
@@ -351,16 +351,16 @@ const CODE = [
   '  const overhang = top.position.x - prev.position.x;',
   '  if (Math.abs(overhang) >= prev.scale.x) return gameOver();',
   '  slice(top, overhang); score++; addBlock(top.scale.x, 4);',
-  '  window.Meshgrounds?.submitScore?.(score);',
+  '  window.Meshground?.submitScore?.(score);',
   '}',
   "addEventListener('pointerdown', drop);",
-  "window.Meshgrounds?.declare?.({ inputSupport: 'both' });",
+  "window.Meshground?.declare?.({ inputSupport: 'both' });",
   'function loop(t) {',
   '  requestAnimationFrame(loop);',
   '  stack.at(-1).position.x = Math.sin(t / 400) * 6;',
   '  renderer.render(scene, camera);',
   '}',
-  'requestAnimationFrame(() => window.Meshgrounds?.ready?.());',
+  'requestAnimationFrame(() => window.Meshground?.ready?.());',
 ];
 const KW = /^(import|from|const|let|function|return|new|if)$/;
 function codeLine(g, line, x, y, chars) {
@@ -369,7 +369,7 @@ function codeLine(g, line, x, y, chars) {
   for (const p of parts) {
     if (shown >= chars) break;
     const s = p.slice(0, chars - shown); shown += p.length;
-    g.fillStyle = p[0] === "'" ? C.lime : /^\d/.test(p) ? C.warn : KW.test(p) ? C.hot : /^(THREE|Math|window|Meshgrounds)$/.test(p) ? C.cyan : C.text;
+    g.fillStyle = p[0] === "'" ? C.lime : /^\d/.test(p) ? C.warn : KW.test(p) ? C.hot : /^(THREE|Math|window|Meshground)$/.test(p) ? C.cyan : C.text;
     g.fillText(s, x, y); x += g.measureText(s).width;
   }
   return x;
@@ -572,7 +572,7 @@ function scene6(t) { // 38–46: logo
   LOGO_LINES.forEach((l, i) => polyline(l, prog(draw, 0.4 + i * 0.15, 0.75 + i * 0.1)));
   ctx.restore();
   if (t < 40.6) { const f = 1 - prog(t, 40.3, 40.6); ctx.fillStyle = `rgba(196,255,61,${f * 0.35})`; ctx.fillRect(0, 0, W, H); }
-  const word = 'meshgrounds', n = Math.floor(clamp((t - 41.3) * 14, 0, word.length));
+  const word = 'meshground', n = Math.floor(clamp((t - 41.3) * 14, 0, word.length));
   ctx.save(); ctx.font = `600 120px ${MONO}`; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
   const full = ctx.measureText(word).width, wx = W / 2 - full / 2, wy = 640;
   ctx.fillStyle = C.text; ctx.fillText(word.slice(0, Math.min(n, 4)), wx, wy);
@@ -594,6 +594,12 @@ function scene6(t) { // 38–46: logo
     ctx.font = `800 40px ${SANS}`; const bw = ctx.measureText(label).width + 100;
     ctx.fillStyle = C.lime; ctx.shadowColor = C.lime; ctx.shadowBlur = 40 + Math.sin(t * 6) * 10; rr(ctx, -bw / 2, -42, bw, 84, 42); ctx.fill(); ctx.shadowBlur = 0;
     ctx.fillStyle = C.ink; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(label, 0, 2);
+    ctx.restore();
+  }
+  const url = easeOut(prog(t, 44.0, 44.5));
+  if (url > 0) {
+    ctx.save(); ctx.globalAlpha = url; ctx.font = `500 34px ${MONO}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = C.muted; ctx.fillText('meshground.com', W / 2, 1000 + (1 - url) * 14);
     ctx.restore();
   }
   const fade = prog(t, 45.2, 46);
