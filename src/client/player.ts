@@ -12,6 +12,8 @@ export interface PlayerOptions {
   /** Persist the game's localStorage to the signed-in user's Supabase cloud save instead of this browser. */
   cloudSaves?: boolean;
   onEvent?: (type: string, data: Record<string, unknown>) => void;
+  /** SP-6: owner preview token for their own pending/rejected game (the CDN 404s those otherwise). */
+  previewToken?: string | null;
 }
 
 export interface PlayerHandle {
@@ -77,7 +79,7 @@ export function mountPlayer(host: HTMLElement, game: PlayerGame, opts: PlayerOpt
   loadSave(game.id, saveKey, !!opts.cloudSaves).then((save) => {
     if (!destroyed) {
       srcSet = true;
-      frame.src = gameFrameSrc(opts.cdnOrigin, game.id, location.origin, save);
+      frame.src = gameFrameSrc(opts.cdnOrigin, game.id, location.origin, save, opts.previewToken);
     }
   });
 
