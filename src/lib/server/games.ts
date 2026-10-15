@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import { GRADUATION } from './config';
 import { sql } from './db';
-import { BAYES_PRIOR_VOTES, CREATED_GAME_LOOKUP, PUBLIC_STAGES, assessHealth, canViewGame, visibleStages, clampDurationMs, clampFirstFrameMs, ratingUserId, slugify, uniqueSlug, type HealthCheck, type Stage } from './game-rules';
+import { BAYES_PRIOR_VOTES, CREATED_GAME_LOOKUP, LISTABLE_STAGES, PUBLIC_STAGES, assessHealth, canViewGame, visibleStages, clampDurationMs, clampFirstFrameMs, ratingUserId, slugify, uniqueSlug, type HealthCheck, type Stage } from './game-rules';
 import { saveUploadedBundle } from './bundle-store';
 import { insertSessionStart, postgresSchemaClient } from './schema-rollout';
 import { bucket } from './supabase';
@@ -95,6 +95,8 @@ export interface ListOptions {
   limit?: number;
   /** Owner dashboards only (requires ownerId): also return pending/rejected games. */
   includeUnpublished?: boolean;
+  /** Owner-scoped views only (requires ownerId): also return the owner's own unlisted (proving) games. PV-1. */
+  includeUnlisted?: boolean;
 }
 
 const ORDER = {
@@ -104,8 +106,8 @@ const ORDER = {
   rated: `(${BAYES_PRIOR_VOTES} * (select coalesce(avg(stars)::float8, 3) from ratings) + coalesce(avg_rating, 0) * rating_count) / (${BAYES_PRIOR_VOTES} + rating_count) desc, rating_count desc, created_at desc`,
 } as const;
 
-export async function listGames({ stage, sort = 'top', tag, creator, ownerId, forkedFrom, limit = 60, includeUnpublished }: ListOptions = {}) {
-  const stages = visibleStages({ stage, ownerId, includeUnpublished });
+export async function listGames({ stage, sort = 'top', tag, creator, ownerId, forkedFrom, limit = 60, includeUnpublished, includeUnlisted }: ListOptions = {}) {
+  const stages = visibleStages({ stage, ownerId, includeUnpublished, includeUnlisted });
   if (!stages.length) return [];
   const rows = await sql<GameRow[]>`
     select * from (${gameSelect()}) g
@@ -120,9 +122,10 @@ export async function listGames({ stage, sort = 'top', tag, creator, ownerId, fo
   return rows.map(toGame);
 }
 
-/** Games by id restricted to the given stages (CM-1 featured row). */
-export async function listGamesByIds(ids: string[], stages: string[]): Promise<Game[]> {
-  if (!ids.length || !stages.length) return [];
+/** Listable games by id (CM-1 featured row). PV-1: never returns unlisted games. */
+export async function listGamesByIds(ids: string[]): Promise<Game[]> {
+  const stages = [...LISTABLE_STAGES];
+  if (!ids.length) return [];
   const rows = await sql<GameRow[]>`
     select * from (${gameSelect()}) g where id in ${sql(ids)} and stage in ${sql(stages)}`;
   return rows.map(toGame);
@@ -146,15 +149,15 @@ export async function getGame(
 
 export async function listTags(): Promise<{ tag: string; count: number }[]> {
   return sql<{ tag: string; count: number }[]>`
-    select t as tag, count(*)::int as count from games, unnest(tags) t where stage in ${sql([...PUBLIC_STAGES])} group by t order by count desc, t limit 30`;
+    select t as tag, count(*)::int as count from games, unnest(tags) t where stage in ${sql([...LISTABLE_STAGES])} group by t order by count desc, t limit 30`;
 }
 
 export async function platformStats() {
   const [row] = await sql<{ games: number; live: number; plays: number; creators: number }[]>`
-    select (select count(*)::int from games where stage in ${sql([...PUBLIC_STAGES])}) as games,
+    select (select count(*)::int from games where stage in ${sql([...LISTABLE_STAGES])}) as games,
            (select count(*)::int from games where stage = 'live') as live,
-           (select count(*)::int from sessions s join games g on g.id = s.game_id where g.stage in ${sql([...PUBLIC_STAGES])}) as plays,
-           (select count(distinct creator)::int from games where stage in ${sql([...PUBLIC_STAGES])}) as creators`;
+           (select count(*)::int from sessions s join games g on g.id = s.game_id where g.stage in ${sql([...LISTABLE_STAGES])}) as plays,
+           (select count(distinct creator)::int from games where stage in ${sql([...LISTABLE_STAGES])}) as creators`;
   return row;
 }
 

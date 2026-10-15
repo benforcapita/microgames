@@ -6,7 +6,7 @@ import GameThumb from '../../components/GameThumb.astro';
 import { ratingLabel } from '../../lib/rating';
 import { getGame, getHealth, getUserRating, listGames } from '../../lib/server/games';
 import { CDN_ORIGIN, CDN_PREVIEW_SECRET, GRADUATION, REVENUE } from '../../lib/server/config';
-import { isPublicStage } from '../../lib/server/game-rules';
+import { isListable, isPublicStage } from '../../lib/server/game-rules';
 import { mintPreviewToken } from '../../../cdn/preview-token.mjs';
 import { ago, compact, formatCheck, kb } from '../../lib/format';
 
@@ -17,7 +17,9 @@ const game = await getGame(Astro.params.slug ?? '', { viewerId: Astro.locals.use
 if (!game) return Astro.rewrite('/404');
 if (Astro.params.slug !== game.slug) return Astro.redirect(`/play/${game.slug}`, 301);
 
-const [{ checks }, mine, parent, forks, byCreator] = await Promise.all([
+// PV-1: related lists (forks, more from this creator) only ever contain listable games; the "forked from" link is
+// hidden when the parent is unlisted, unless the viewer owns it.
+const [{ checks }, mine, parentGame, forks, byCreator] = await Promise.all([
   getHealth(game.id),
   getUserRating(game.id, user?.id),
   game.forkedFrom ? getGame(game.forkedFrom) : null,
@@ -25,6 +27,7 @@ const [{ checks }, mine, parent, forks, byCreator] = await Promise.all([
   listGames({ creator: game.creator, limit: 5 }),
 ]);
 const more = byCreator.filter((g) => g.id !== game.id).slice(0, 4);
+const parent = parentGame && (isListable(parentGame) || (!!user && parentGame.ownerId === user.id)) ? parentGame : null;
 const isOwner = !!user && user.id === game.ownerId;
 // SP-6: the CDN serves pending/rejected bundles only with a short-lived token, minted only for the owner here.
 const previewToken = isOwner && !isPublicStage(game.stage) ? mintPreviewToken(CDN_PREVIEW_SECRET, game.id) : null;
@@ -35,7 +38,7 @@ const passed = checks.filter((c) => c.pass).length;
 const uploaded = Astro.url.searchParams.has('uploaded');
 ---
 
-<Layout title={game.title} description={game.tagline || `Play ${game.title} instantly in your browser.`} ads={live}>
+<Layout title={game.title} description={game.tagline || `Play ${game.title} instantly in your browser.`} ads={live} noindex={!live}>
   <section class="wrap play">
     {
       uploaded && (
