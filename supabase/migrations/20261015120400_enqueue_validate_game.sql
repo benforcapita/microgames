@@ -129,9 +129,10 @@ begin
     return null;
   end if;
 
+  -- EF-1 reads camelCase gameId. The hook header is the Vault secret, not a service-role key.
   select net.http_post(
     url := v_url,
-    body := jsonb_build_object('game_id', p_game_id, 'reason', p_reason),
+    body := jsonb_build_object('gameId', p_game_id, 'reason', p_reason),
     headers := jsonb_build_object(
       'Content-Type', 'application/json',
       'x-meshgrounds-hook', v_secret
