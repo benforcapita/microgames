@@ -30,11 +30,6 @@ export const GRADUATION = {
 
 export const REVENUE = { creatorShare: 0.65, forkRoyalty: 0.1, minPayoutUsd: 25 };
 
-export const UPLOAD = {
-  maxHtmlBytes: 5 * 1024 * 1024,
-  maxThumbBytes: 512 * 1024,
-  thumbTypes: { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp' } as Record<string, string>,
-  licenses: ['MIT', 'CC-BY-SA-4.0', 'All rights reserved'],
-};
+export { UPLOAD } from './upload';
 
 export const MAX_SAVE_BYTES = 1024 * 1024;
