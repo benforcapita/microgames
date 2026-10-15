@@ -55,7 +55,8 @@ export async function validateGame(store: Store, gameId: string): Promise<Valida
   const existing = await store.findValidation(gameId, sha256);
   if (existing) {
     // Idempotent: same bundle -> same verdict, no new row, and the stage is left untouched.
-    return { httpStatus: 200, body: { gameId, sha256, status: existing.status, stage, validationId: existing.id, reused: true } };
+    // Re-read the stage: a concurrent run may have just applied the transition.
+    return { httpStatus: 200, body: { gameId, sha256, status: existing.status, stage: await store.gameStage(gameId), validationId: existing.id, reused: true } };
   }
 
   const report = analyzeGame(bytes);

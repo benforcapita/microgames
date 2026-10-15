@@ -1,10 +1,19 @@
-// validate-game: POST { "gameId": "<id>" } using the service-role key.
+// validate-game: POST { "gameId": "<id>", "reason"?: string } with the x-meshgrounds-hook secret or a service-role JWT (auth.ts).
 // Loads games/<id>/index.html from Storage, runs the shared static check (SP-4), writes a
 // game_validations row (SP-3) and auto-publishes: pending -> proving on pass, pending -> rejected on fail.
 // Re-running for the same bundle (same sha256) is a no-op that returns the stored verdict.
 // It has no npm dependencies (acorn is vendored), so the worker boots without registry access.
 import type { Stage } from '../../../src/lib/server/game-rules.ts';
 import { validateGame, type Store, type ValidationRow } from './validate.ts';
+import { isAuthorized, parseBody, type AuthEnv } from './auth.ts';
+
+// Env: VALIDATE_GAME_HOOK_SECRET (shared with the EF-2 hook; set via `supabase secrets set`, never logged),
+// SUPABASE_SERVICE_ROLE_KEY / SUPABASE_JWT_SECRET (manual reruns with a service-role JWT). See auth.ts.
+const AUTH: AuthEnv = {
+  hookSecret: Deno.env.get('VALIDATE_GAME_HOOK_SECRET') || undefined,
+  serviceRoleKey: Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || undefined,
+  jwtSecret: Deno.env.get('SUPABASE_JWT_SECRET') || undefined,
+};
 
 const URL_ = Deno.env.get('SUPABASE_URL')!;
 const KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
@@ -40,33 +49,16 @@ const store: Store = {
   },
 };
 
-function isServiceRole(req: Request): boolean {
-  const token = (req.headers.get('authorization') ?? '').replace(/^Bearer\s+/i, '');
-  if (!token) return false;
-  if (KEY && token === KEY) return true;
-  // The gateway has already verified the JWT signature (verify_jwt); just check the role claim.
-  try {
-    const payload = JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
-    return payload.role === 'service_role';
-  } catch {
-    return false;
-  }
-}
-
 Deno.serve(async (req) => {
   const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
   if (req.method !== 'POST') return json(405, { error: 'POST only' });
-  if (!isServiceRole(req)) return json(403, { error: 'service role required' });
-  let gameId: unknown;
-  try {
-    ({ gameId } = await req.json());
-  } catch {
-    return json(400, { error: 'body must be JSON { gameId }' });
-  }
-  if (typeof gameId !== 'string') return json(400, { error: 'gameId required' });
+  if (!(await isAuthorized(req, AUTH))) return json(401, { error: 'unauthorized' });
+  const parsed = await parseBody(req);
+  if ('error' in parsed) return json(400, { error: parsed.error });
+  const { gameId, reason } = parsed;
   try {
     const r = await validateGame(store, gameId);
-    return json(r.httpStatus, r.body);
+    return json(r.httpStatus, { ...r.body, ...(reason ? { reason } : {}) });
   } catch (e) {
     console.error('validate-game', e);
     return json(500, { error: 'validation failed to run' });

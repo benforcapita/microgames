@@ -118,6 +118,15 @@ You can also run the portal and CDN independently:
 | `MG_MIN_PLAYS` | Optional | Minimum number of plays required before a game can graduate out of the Proving Grounds |
 | `PUBLIC_ADSENSE_CLIENT` | Optional | Google AdSense H5 Games client identifier (uses a mock ad overlay if omitted) |
 
+### Edge Function secrets (`validate-game`)
+
+These are set on the Supabase side, with `supabase secrets set` or the dashboard. They are not portal env vars, and must never be logged or committed.
+
+| Name | Required | Purpose |
+| --- | --- | --- |
+| `VALIDATE_GAME_HOOK_SECRET` | Required for the EF-2 hook | Shared secret that the database hook sends in the `x-meshgrounds-hook` header. It's compared in constant time. If it's unset, header auth is disabled and only a service-role JWT works. It must match the vault secret `validate_game_hook_secret` used by EF-2. |
+| `SUPABASE_SERVICE_ROLE_KEY` / `SUPABASE_JWT_SECRET` | Injected by Supabase | Allow manual reruns with `Authorization: Bearer <service-role JWT>`. Any other caller gets 401. |
+
 ---
 
 ## Project Layout
