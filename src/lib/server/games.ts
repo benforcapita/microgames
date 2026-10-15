@@ -1,13 +1,14 @@
 import crypto from 'node:crypto';
 import { GRADUATION } from './config';
 import { sql } from './db';
-import { BAYES_PRIOR_VOTES, assessHealth, clampDurationMs, clampFirstFrameMs, slugify, uniqueSlug, type HealthCheck } from './game-rules';
+import { BAYES_PRIOR_VOTES, PUBLIC_STAGES, assessHealth, visibleStages, clampDurationMs, clampFirstFrameMs, slugify, uniqueSlug, type HealthCheck } from './game-rules';
 import { bucket } from './supabase';
 
 export { normalizeTags } from './game-rules';
 export type { HealthCheck };
 
-export type Stage = 'proving' | 'live';
+import type { Stage } from './game-rules';
+export type { Stage };
 
 export interface Game {
   id: string;
@@ -92,6 +93,8 @@ export interface ListOptions {
   ownerId?: string;
   forkedFrom?: string;
   limit?: number;
+  /** Owner dashboards only (requires ownerId): also return pending/rejected games. */
+  includeUnpublished?: boolean;
 }
 
 const ORDER = {
@@ -101,11 +104,13 @@ const ORDER = {
   rated: `(${BAYES_PRIOR_VOTES} * (select coalesce(avg(stars)::float8, 3) from ratings) + coalesce(avg_rating, 0) * rating_count) / (${BAYES_PRIOR_VOTES} + rating_count) desc, rating_count desc, created_at desc`,
 } as const;
 
-export async function listGames({ stage, sort = 'top', tag, creator, ownerId, forkedFrom, limit = 60 }: ListOptions = {}) {
+export async function listGames({ stage, sort = 'top', tag, creator, ownerId, forkedFrom, limit = 60, includeUnpublished }: ListOptions = {}) {
+  const stages = visibleStages({ stage, ownerId, includeUnpublished });
+  if (!stages.length) return [];
   const rows = await sql<GameRow[]>`
     select * from (${gameSelect()}) g
     where true
-      ${stage ? sql`and stage = ${stage}` : sql``}
+      and stage in ${sql(stages)}
       ${creator ? sql`and lower(creator) = lower(${creator})` : sql``}
       ${ownerId ? sql`and owner_id = ${ownerId}` : sql``}
       ${forkedFrom ? sql`and forked_from = ${forkedFrom}` : sql``}
@@ -115,22 +120,24 @@ export async function listGames({ stage, sort = 'top', tag, creator, ownerId, fo
   return rows.map(toGame);
 }
 
-export async function getGame(slugOrId: string): Promise<Game | null> {
-  const [row] = await sql<GameRow[]>`${gameSelect()} where g.slug = ${slugOrId} or g.id = ${slugOrId}`;
+/** Public lookup: pending/rejected games are invisible unless `includeUnpublished` (owner-only callers). */
+export async function getGame(slugOrId: string, { includeUnpublished = false } = {}): Promise<Game | null> {
+  const [row] = await sql<GameRow[]>`${gameSelect()} where (g.slug = ${slugOrId} or g.id = ${slugOrId})
+    ${includeUnpublished ? sql`` : sql`and g.stage in ${sql([...PUBLIC_STAGES])}`}`;
   return row ? toGame(row) : null;
 }
 
 export async function listTags(): Promise<{ tag: string; count: number }[]> {
   return sql<{ tag: string; count: number }[]>`
-    select t as tag, count(*)::int as count from games, unnest(tags) t group by t order by count desc, t limit 30`;
+    select t as tag, count(*)::int as count from games, unnest(tags) t where stage in ${sql([...PUBLIC_STAGES])} group by t order by count desc, t limit 30`;
 }
 
 export async function platformStats() {
   const [row] = await sql<{ games: number; live: number; plays: number; creators: number }[]>`
-    select (select count(*)::int from games) as games,
+    select (select count(*)::int from games where stage in ${sql([...PUBLIC_STAGES])}) as games,
            (select count(*)::int from games where stage = 'live') as live,
-           (select count(*)::int from sessions) as plays,
-           (select count(distinct creator)::int from games) as creators`;
+           (select count(*)::int from sessions s join games g on g.id = s.game_id where g.stage in ${sql([...PUBLIC_STAGES])}) as plays,
+           (select count(distinct creator)::int from games where stage in ${sql([...PUBLIC_STAGES])}) as creators`;
   return row;
 }
 

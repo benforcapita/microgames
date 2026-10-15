@@ -6,7 +6,7 @@ import { compact, stars, ago } from '../lib/format';
 
 const { user, profile } = Astro.locals;
 if (!user || !profile) return Astro.redirect('/login?next=/me');
-const games = await listGames({ ownerId: user.id, sort: 'new', limit: 200 });
+const games = await listGames({ ownerId: user.id, sort: 'new', limit: 200, includeUnpublished: true });
 const plays = games.reduce((n, g) => n + g.plays, 0);
 const deleted = Astro.url.searchParams.has('deleted');
 ---
@@ -35,7 +35,7 @@ const deleted = Astro.url.searchParams.has('deleted');
               <div class="meta">
                 <a href={`/play/${g.slug}`}><h3>{g.title}</h3></a>
                 <p class="muted mono">
-                  <span class:list={['badge', g.stage]}>{g.stage === 'live' ? 'Monetized' : 'Proving Grounds'}</span>{' '}
+                  <span class:list={['badge', g.stage]}>{{ live: 'Monetized', proving: 'Proving Grounds', pending: 'Validating…', rejected: 'Rejected' }[g.stage]}</span>{' '}
                   {compact(g.plays)} plays · ★ {stars(g.avgRating)} ({g.ratingCount}) · uploaded {ago(g.createdAt)}
                 </p>
               </div>
