@@ -41,6 +41,13 @@ export const STATIC_LIMITS = { maxBytes: 5 * 1024 * 1024, warnBytes: 1024 * 1024
 const MAX_FINDINGS = 10;
 /** Upper bound on per-handler parses when the combined handler parse fails (keeps the worst case linear). */
 const MAX_HANDLER_PARSES = 200;
+/**
+ * Budget for the acorn/AST warning phase (the Edge Function has ~2s of CPU). Parsing can't be interrupted
+ * mid-file, so the budget is enforced before each parse (bytes of JS still allowed) and during the walk
+ * (wall time). acorn does roughly 3 MB/s here, so 1.25 MB keeps the phase near 600 ms with headroom for
+ * slower edge CPUs. Past the budget we stop and emit one 'deep analysis skipped (too large)' warning.
+ */
+export const AST_BUDGET = { ms: 600, maxJsBytes: 1.25 * 1024 * 1024 };
 
 /* ------------------------------------------------------------------ URLs */
 
@@ -259,9 +266,35 @@ function parseJs(code: string, module: boolean, retryAsModule = true): { ast: N 
   }
 }
 
-function walk(root: N, facts: JsFacts) {
+class Budget {
+  private readonly start = now();
+  private readonly opts: { ms: number; maxJsBytes: number };
+  private bytesLeft: number;
+  skipped = false;
+  constructor(opts: { ms: number; maxJsBytes: number }) {
+    this.opts = opts;
+    this.bytesLeft = opts.maxJsBytes;
+  }
+  timeLeft() {
+    return now() - this.start < this.opts.ms;
+  }
+  /** Reserve `len` bytes of parsing; false (and skipped) once the byte or time budget is exhausted. */
+  take(len: number): boolean {
+    if (this.skipped || len > this.bytesLeft || !this.timeLeft()) return !(this.skipped = true);
+    this.bytesLeft -= len;
+    return true;
+  }
+}
+const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+
+function walk(root: N, facts: JsFacts, budget?: Budget) {
   const stack: N[] = [root];
+  let steps = 0;
   while (stack.length) {
+    if ((++steps & 4095) === 0 && budget && !budget.timeLeft()) {
+      budget.skipped = true;
+      return;
+    }
     const node = stack.pop()!;
     switch (node.type) {
       case 'ImportDeclaration':
@@ -300,7 +333,8 @@ function walk(root: N, facts: JsFacts) {
         const p = path(node);
         if (p) {
           const bare = stripWindow(p);
-          if (/^(?:top|parent)\.(?:location|document|window|postMessage)/.test(bare) || bare === 'top' || bare.startsWith('frameElement')) facts.topNav.push(p);
+          // parent.postMessage is how games talk to the portal (boot.js telemetry), not navigation.
+          if (/^(?:top|parent)\.(?:location|document|window)\b/.test(bare) || bare === 'top' || bare.startsWith('frameElement')) facts.topNav.push(p);
           const m = /(?:^|\.)Meshgrounds\.(ready|onPause|onResume)\b/.exec(p);
           if (m) facts.hooks.add(m[1]);
         }
@@ -318,6 +352,81 @@ function walk(root: N, facts: JsFacts) {
       } else if (v && typeof v === 'object' && typeof v.type === 'string') stack.push(v);
     }
   }
+}
+
+/**
+ * Parses all classic scripts as `{\n<code>\n}` blocks in one acorn call. Two blocks with unbalanced braces
+ * could cancel out when concatenated, so the result is only trusted if the program's top level is exactly
+ * one BlockStatement per script at the expected offsets; otherwise (or on a syntax error) the run is split
+ * at the offending script and the rest is parsed again. Every parse draws from the byte budget, which keeps
+ * the total work linear.
+ */
+function parseClassic(blocks: { idx: number; text: string }[], facts: JsFacts, errors: string[], budget: Budget) {
+  let from = 0;
+  while (from < blocks.length && !budget.skipped) {
+    const offsets: number[] = [];
+    let src = '';
+    for (let k = from; k < blocks.length; k++) {
+      offsets.push(src.length);
+      src += `{\n${blocks[k].text}\n}\n`;
+    }
+    if (!budget.take(src.length)) return;
+    const { ast, error, pos } = parseAt(src);
+    if (ast) {
+      const body = ast.body as N[];
+      const aligned = body.length === offsets.length && body.every((b, k) => b.type === 'BlockStatement' && b.start === offsets[k]);
+      if (aligned) {
+        walk(ast, facts, budget);
+        return;
+      }
+    }
+    // Find the first script that is wrong on its own, record it, and continue after it.
+    let bad = from;
+    if (!ast && pos !== null) {
+      let k = 0;
+      while (k + 1 < offsets.length && offsets[k + 1] <= pos) k++;
+      bad = from + k;
+    } else {
+      for (let k = 0; k < offsets.length; k++) {
+        const b = body0(ast)[k];
+        if (!b || b.type !== 'BlockStatement' || b.start !== offsets[k]) { bad = from + k; break; }
+      }
+    }
+    if (bad > from) parseClassic(blocks.slice(from, bad), facts, errors, budget); // prefix parsed fine up to here
+    const one = blocks[bad];
+    if (!budget.take(one.text.length)) return;
+    const single = parseJs(one.text, false);
+    if (single.error) errors.push(`<script> #${one.idx + 1}: ${single.error ?? error}`);
+    else if (single.ast) walk(single.ast, facts, budget);
+    from = bad + 1;
+  }
+}
+const body0 = (ast: N | null): N[] => (ast?.body as N[]) ?? [];
+
+function parseAt(code: string): { ast: N | null; error: string | null; pos: number | null } {
+  try {
+    return { ast: parse(code, { ecmaVersion: 'latest', allowHashBang: true, allowAwaitOutsideFunction: true, sourceType: 'script' }) as N, error: null, pos: null };
+  } catch (e) {
+    const pos = (e as { pos?: number }).pos;
+    return { ast: null, error: (e as Error).message, pos: typeof pos === 'number' ? pos : null };
+  }
+}
+
+/** Cheap, linear import-specifier scan used only when the AST phase was skipped. */
+function lexicalImports(code: string): string[] {
+  const out: string[] = [];
+  const grab = (at: number) => {
+    let j = at;
+    while (j < code.length && isSpace(code.charCodeAt(j))) j++;
+    if (code[j] === '(') { j++; while (j < code.length && isSpace(code.charCodeAt(j))) j++; }
+    const q = code[j];
+    if (q !== '"' && q !== "'" && q !== '`') return;
+    const e = code.indexOf(q, j + 1);
+    if (e > j && e - j < 2048) out.push(code.slice(j + 1, e));
+  };
+  for (let i = code.indexOf('import'); i >= 0; i = code.indexOf('import', i + 6)) grab(i + 6);
+  for (let i = code.indexOf('from'); i >= 0; i = code.indexOf('from', i + 4)) grab(i + 4);
+  return out;
 }
 
 /* ------------------------------------------------------------------ analyzer */
@@ -363,6 +472,9 @@ export function analyzeGame(input: string | Uint8Array): StaticReport {
   const syntaxErrors: string[] = [];
   const importMapUrls: string[] = [];
   const scriptSrcs: string[] = [];
+  const budget = new Budget(AST_BUDGET);
+  const classic: { idx: number; text: string }[] = [];
+  const modules: { idx: number; text: string }[] = [];
   doc.scripts.forEach((s, idx) => {
     const type = (s.attrs.get('type') ?? '').trim().toLowerCase();
     const src = s.attrs.get('src');
@@ -381,23 +493,37 @@ export function analyzeGame(input: string | Uint8Array): StaticReport {
     }
     const isJs = type === '' || type === 'module' || type.includes('javascript') || type.includes('ecmascript');
     if (!isJs || !s.text.trim()) return; // data blocks (x-shader, json, …) are not executed
-    const { ast, error } = parseJs(s.text, type === 'module');
-    if (error) syntaxErrors.push(`<script> #${idx + 1}: ${error}`);
-    if (ast) walk(ast, facts);
+    (type === 'module' ? modules : classic).push({ idx, text: s.text });
   });
+  // All classic inline scripts go through ONE parse (each wrapped in its own block), so 270k tiny
+  // <script>s cost one acorn call instead of 270k; see parseClassic for the boundary check.
+  parseClassic(classic, facts, syntaxErrors, budget);
+  for (const m of modules) {
+    if (!budget.take(m.text.length)) break;
+    const { ast, error } = parseJs(m.text, true);
+    if (error) syntaxErrors.push(`<script> #${m.idx + 1}: ${error}`);
+    if (ast) walk(ast, facts, budget);
+  }
   // Inline event handlers: parse them all in one pass (each wrapped in its own function). If that fails
   // (one malformed handler), fall back to parsing a bounded number individually so cost stays linear.
-  if (doc.handlers.length) {
-    const combined = parseJs(doc.handlers.map((h) => `(function(){${h}\n});`).join('\n'), false, false);
-    if (combined.ast) walk(combined.ast, facts);
+  const handlerSrc = doc.handlers.length ? doc.handlers.map((h) => `(function(){${h}\n});`).join('\n') : '';
+  if (handlerSrc && budget.take(handlerSrc.length)) {
+    const combined = parseJs(handlerSrc, false, false);
+    if (combined.ast) walk(combined.ast, facts, budget);
     else
       for (const h of doc.handlers.slice(0, MAX_HANDLER_PARSES)) {
         const { ast } = parseJs(h, false, false);
-        if (ast) walk(ast, facts);
+        if (ast) walk(ast, facts, budget);
       }
   }
+  if (budget.skipped) {
+    // Host checks stay a hard fail without the AST: scan the script text for import specifiers instead.
+    for (const x of [...classic, ...modules]) facts.imports.push(...lexicalImports(x.text));
+    add('deep-analysis', 'Deep analysis', 'warn', 'deep analysis skipped (too large)',
+      [`JavaScript over the ${Math.round(AST_BUDGET.maxJsBytes / 1024)} KB / ${AST_BUDGET.ms} ms analysis budget; syntax and pattern checks were not run.`]);
+  }
   if (syntaxErrors.length) add('js-syntax', 'JavaScript syntax', 'fail', 'A script does not parse, so the game would break on load.', syntaxErrors);
-  else add('js-syntax', 'JavaScript syntax', 'pass', `${doc.scripts.length} script(s) parse.`);
+  else add('js-syntax', 'JavaScript syntax', 'pass', budget.skipped ? 'Not fully checked (deep analysis skipped).' : `${doc.scripts.length} script(s) parse.`);
 
   // Script hosts: <script src>, ES imports, import maps (hard fail).
   const scriptRefs = [...scriptSrcs, ...facts.imports.filter((u) => isRemote(u) || /^\.{0,2}\//.test(u)), ...importMapUrls];
@@ -451,6 +577,10 @@ export function analyzeGame(input: string | Uint8Array): StaticReport {
     missing.length ? `Not calling ${missing.map((h) => `Meshgrounds.${h}`).join(', ')} (runtime contract v1.1; guard with ?.).` : 'Calls ready, onPause and onResume.',
     missing.map((h) => `Meshgrounds.${h}`));
 
+  if (budget.skipped) {
+    const astOnly = new Set(['eval', 'popups', 'top-navigation', 'dialogs', 'contract-hooks']);
+    for (const c of checks) if (astOnly.has(c.id) && c.level === 'warn') Object.assign(c, { level: 'pass', message: `Not fully checked (deep analysis skipped). ${c.message}` });
+  }
   return finish(checks, bytes);
 }
 

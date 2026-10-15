@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { describe, it } from 'node:test';
 import { gameCsp, CSP_SOURCES } from '../../../cdn/csp.mjs';
-import { analyzeGame, CONNECT_HOSTS, SCRIPT_HOSTS, STATIC_LIMITS, STYLE_HOSTS, type CheckLevel, type StaticReport } from './static-check.ts';
+import { AST_BUDGET, analyzeGame, CONNECT_HOSTS, SCRIPT_HOSTS, STATIC_LIMITS, STYLE_HOSTS, type CheckLevel, type StaticReport } from './static-check.ts';
 
 const FIXTURES = new URL('./fixtures/static-check/', import.meta.url);
 const SEED = new URL('../../../seed/games/', import.meta.url);
@@ -159,4 +159,94 @@ describe('static-check is linear on adversarial input (5 MB, < 500 ms each)', ()
       assert.ok(ms < 500, `${name}: ${ms.toFixed(0)} ms`);
     });
   }
+});
+
+describe('Edge CPU budget: AST phase is capped, hard fails stay unconditional', () => {
+  const MB = 1024 * 1024;
+  const fill = (unit: string, size: number) => unit.repeat(Math.floor(size / unit.length));
+  const timed = (html: string) => {
+    const t0 = performance.now();
+    const r = analyzeGame(html);
+    return { r, ms: performance.now() - t0 };
+  };
+  const warns = (r: StaticReport) => r.checks.filter((c) => c.level === 'warn').map((c) => c.id);
+
+  it('member chain at 4.9 MB finishes under 1 s total', () => {
+    const { r, ms } = timed(`<canvas></canvas><script>x${fill('.a', 4.9 * MB)}</script>`);
+    assert.ok(ms < 1000, `${ms.toFixed(0)} ms`);
+    assert.notEqual(r.status, 'fail');
+  });
+  it('270k inline <script> blocks at 4.9 MB finish under 1 s total', () => {
+    const html = '<script>a</script>'.repeat(272_000); // 18 bytes each, 4.9 MB
+    assert.ok(html.length >= 4.89e6 && html.length <= STATIC_LIMITS.maxBytes, String(html.length));
+    const { r, ms } = timed(html);
+    assert.ok(ms < 1000, `${ms.toFixed(0)} ms`);
+    assert.notEqual(r.status, 'fail');
+  });
+  it('JS just under the byte budget is fully analysed in under 1 s', () => {
+    const { r, ms } = timed(`<canvas></canvas><script>${fill('var a=b+c*d(e,f);', AST_BUDGET.maxJsBytes - 64)}</script>`);
+    assert.ok(ms < 1000, `${ms.toFixed(0)} ms`);
+    assert.equal(level(r, 'deep-analysis'), undefined);
+  });
+  it('over budget: exactly one warning "deep analysis skipped (too large)", never a fail', () => {
+    const { r } = timed(`<canvas></canvas><script>${fill('var a=b+c*d(e,f);', 3 * MB)}</script>`);
+    const deep = r.checks.find((c) => c.id === 'deep-analysis');
+    assert.equal(deep?.level, 'warn');
+    assert.equal(deep?.message, 'deep analysis skipped (too large)');
+    assert.deepEqual(warns(r).filter((id) => id !== 'size'), ['deep-analysis']);
+    assert.equal(r.status, 'warn');
+  });
+  it('over budget: a non-allowlisted import is still a hard fail (lexical fallback)', () => {
+    const big = fill('var a=b+c*d(e,f);', 3 * MB);
+    const r = analyzeGame(`<canvas></canvas><script type="module">import x from "https://evil.example/x.js";${big}</script>`);
+    assert.equal(level(r, 'script-hosts'), 'fail');
+    assert.ok(findings(r, 'script-hosts').includes('https://evil.example/x.js'));
+    const r2 = analyzeGame(`<canvas></canvas><script src="https://evil.example/a.js"></script><script>${big}</script>`);
+    assert.equal(level(r2, 'script-hosts'), 'fail');
+  });
+  it('size, UTF-8 and markup fails do not depend on the AST phase', () => {
+    assert.equal(level(analyzeGame('x'.repeat(STATIC_LIMITS.maxBytes + 1)), 'size'), 'fail');
+    assert.equal(level(analyzeGame(new Uint8Array([0x3c, 0xff, 0xfe])), 'utf8'), 'fail');
+    assert.equal(level(analyzeGame(`<p>${fill('hello ', 3 * MB)}</p>`), 'game-markup'), 'fail');
+  });
+});
+
+describe('inline scripts are parsed in one pass, with exact per-script errors', () => {
+  it('two scripts with unbalanced braces that cancel out are still a syntax fail', () => {
+    const r = analyzeGame('<canvas></canvas><script>function f(){</script><script>}</script>');
+    assert.equal(level(r, 'js-syntax'), 'fail');
+  });
+  it('reports the right script among many', () => {
+    const blocks = Array.from({ length: 500 }, (_, i) => (i === 321 ? '<script>let = ;</script>' : `<script>var v${i}=${i};</script>`)).join('');
+    const r = analyzeGame(`<canvas></canvas>${blocks}`);
+    assert.equal(level(r, 'js-syntax'), 'fail');
+    assert.ok(findings(r, 'js-syntax').some((f) => f.startsWith('<script> #322:')), findings(r, 'js-syntax').join(' | '));
+  });
+  it('separate scripts may reuse let/const names (each is its own block)', () => {
+    const r = analyzeGame('<canvas></canvas><script>let a=1;</script><script>let a=2;</script>');
+    assert.equal(level(r, 'js-syntax'), 'pass');
+  });
+  it('a classic script using import syntax still falls back to a module parse', () => {
+    const r = analyzeGame('<canvas></canvas><script>var a=1;</script><script>import "https://cdn.jsdelivr.net/npm/three/+esm"; a++;</script><script>var b;</script>');
+    assert.equal(level(r, 'js-syntax'), 'pass');
+  });
+  it('warnings from every script are still collected', () => {
+    const r = analyzeGame('<canvas></canvas><script>eval("1")</script><script>alert(1)</script>');
+    assert.equal(level(r, 'eval'), 'warn');
+    assert.equal(level(r, 'dialogs'), 'warn');
+  });
+});
+
+describe('top-navigation: parent.postMessage is not navigation', () => {
+  for (const name of ['stack-tower.html', 'neon-lanes.html', 'prism-pop.html']) {
+    it(`seed ${name} has no top-navigation warning`, () => {
+      const r = analyzeGame(fs.readFileSync(new URL(name, SEED)));
+      assert.equal(level(r, 'top-navigation'), 'pass', JSON.stringify(findings(r, 'top-navigation')));
+    });
+  }
+  it('postMessage passes; real escapes still warn', () => {
+    assert.equal(level(analyzeGame('<canvas></canvas><script>parent.postMessage({t:1},"*");window.parent.postMessage(1,"*")</script>'), 'top-navigation'), 'pass');
+    for (const js of ['top.location="x"', 'parent.location.href="x"', 'window.top.document', 'frameElement.remove()'])
+      assert.equal(level(analyzeGame(`<canvas></canvas><script>${js}</script>`), 'top-navigation'), 'warn', js);
+  });
 });
