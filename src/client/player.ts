@@ -99,7 +99,7 @@ export function mountPlayer(host: HTMLElement, game: PlayerGame, opts: PlayerOpt
 
   const post = (type: string, data: Record<string, unknown> = {}) => frame.contentWindow?.postMessage({ type, ...data }, '*');
 
-  let started = false, completed = false, crashed = false, adInFlight = false;
+  let started = false, completed = false, crashed = false, ready = false, adInFlight = false;
   let activeMs = 0, lastTick = performance.now();
 
   const runAd = async <T>(show: () => Promise<T>, fallback: T): Promise<T> => {
@@ -124,6 +124,9 @@ export function mountPlayer(host: HTMLElement, game: PlayerGame, opts: PlayerOpt
     switch (type) {
       case '__MG_FIRST_FRAME':
         track('first_frame', Number(data.ms) || 0);
+        break;
+      case '__MG_READY':
+        if (!ready) (ready = true), track('ready', Number(data.ms) || 0);
         break;
       case '__MG_INPUT':
         if (!started) (started = true), track('start');

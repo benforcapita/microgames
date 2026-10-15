@@ -1,7 +1,7 @@
 /* Meshgrounds runtime — injected into every game bundle by the game CDN.
  * Runs before any game code inside a sandboxed, opaque-origin iframe and gives
  * vibe-coded games zero-code platform features:
- *  - telemetry (first frame, first input, crashes) for the Proving Grounds
+ *  - telemetry (first frame, explicit ready, first input, crashes) for the Proving Grounds
  *  - automatic pause (requestAnimationFrame, game clock, WebAudio, media) during ads
  *  - localStorage / sessionStorage / cookie shims (blocked in opaque origins), persisted by the portal
  *  - window.Meshgrounds helper wrapping the postMessage protocol from EXCHANGE_SDK.md
@@ -152,8 +152,16 @@
     });
   };
 
+  var readySent = false;
   window.Meshgrounds = {
     version: 1,
+    // Once, when the first playable frame is showing. Games that never call this
+    // still report __MG_FIRST_FRAME from the first animation frame.
+    ready: function () {
+      if (readySent) return;
+      readySent = true;
+      post('__MG_READY', { ms: Math.round(nativeNow()) });
+    },
     gameOver: function (score) { post('GAME_OVER', { score: score }); },
     levelComplete: function (level, score) { post('LEVEL_COMPLETE', { level: level, score: score }); },
     submitScore: function (score) { post('SUBMIT_SCORE', { score: score }); },
