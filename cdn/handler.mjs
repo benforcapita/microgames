@@ -34,6 +34,7 @@ async function fetchObject(key) {
   return body;
 }
 
+// Boot only. The upload preview sets its own capture flag; do not add one here.
 function inject(html) {
   const tag = `<script>${BOOT}</script>`;
   const head = html.match(/<head[^>]*>/i);

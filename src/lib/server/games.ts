@@ -1,7 +1,8 @@
 import crypto from 'node:crypto';
 import { GRADUATION } from './config';
 import { sql } from './db';
-import { BAYES_PRIOR_VOTES, PUBLIC_STAGES, assessHealth, visibleStages, clampDurationMs, clampFirstFrameMs, slugify, uniqueSlug, type HealthCheck } from './game-rules';
+import { BAYES_PRIOR_VOTES, CREATED_GAME_LOOKUP, PUBLIC_STAGES, assessHealth, canViewGame, visibleStages, clampDurationMs, clampFirstFrameMs, slugify, uniqueSlug, type HealthCheck } from './game-rules';
+import { insertSessionStart, postgresSchemaClient } from './schema-rollout';
 import { bucket } from './supabase';
 
 export { normalizeTags } from './game-rules';
@@ -120,11 +121,20 @@ export async function listGames({ stage, sort = 'top', tag, creator, ownerId, fo
   return rows.map(toGame);
 }
 
-/** Public lookup: pending/rejected games are invisible unless `includeUnpublished` (owner-only callers). */
-export async function getGame(slugOrId: string, { includeUnpublished = false } = {}): Promise<Game | null> {
+/**
+ * Public lookup: pending/rejected games are invisible unless `includeUnpublished` (owner-only
+ * callers such as delete/createGame) or the `viewerId` owns the game (see canViewGame).
+ */
+export async function getGame(
+  slugOrId: string,
+  { includeUnpublished = false, viewerId }: { includeUnpublished?: boolean; viewerId?: string | null } = {},
+): Promise<Game | null> {
+  const unfiltered = includeUnpublished || !!viewerId;
   const [row] = await sql<GameRow[]>`${gameSelect()} where (g.slug = ${slugOrId} or g.id = ${slugOrId})
-    ${includeUnpublished ? sql`` : sql`and g.stage in ${sql([...PUBLIC_STAGES])}`}`;
-  return row ? toGame(row) : null;
+    ${unfiltered ? sql`` : sql`and g.stage in ${sql([...PUBLIC_STAGES])}`}`;
+  if (!row) return null;
+  const game = toGame(row);
+  return includeUnpublished || canViewGame(game, viewerId) ? game : null;
 }
 
 export async function listTags(): Promise<{ tag: string; count: number }[]> {
@@ -172,7 +182,7 @@ export async function createGame(input: NewGame): Promise<Game> {
     insert into games (id, slug, owner_id, creator, title, tagline, description, tags, license, forked_from, size_bytes, hue, thumb)
     values (${id}, ${slug}, ${input.ownerId}, ${input.creator}, ${input.title}, ${input.tagline}, ${input.description},
             ${input.tags}, ${input.license}, ${input.forkedFrom}, ${input.html.byteLength}, ${crypto.randomInt(0, 360)}, ${thumb})`;
-  return (await getGame(id))!;
+  return (await getGame(id, CREATED_GAME_LOOKUP))!;
 }
 
 /** Deletes a game owned by `ownerId`, including its bundle in storage. Returns false if not found / not owned. */
@@ -197,13 +207,19 @@ export async function getUserRating(gameId: string, voter: string | undefined): 
   return row?.stars ?? null;
 }
 
-export type TelemetryType = 'session_start' | 'first_frame' | 'start' | 'complete' | 'crash' | 'heartbeat';
+export type TelemetryType = 'session_start' | 'first_frame' | 'start' | 'complete' | 'crash' | 'heartbeat' | 'ready';
 
-export async function recordTelemetry(sessionId: string, gameId: string, type: TelemetryType, value: unknown = 0) {
+export async function recordTelemetry(
+  sessionId: string,
+  gameId: string,
+  type: TelemetryType,
+  value: unknown = 0,
+  userId: string | null = null,
+) {
   const where = sql`where id = ${sessionId} and game_id = ${gameId}`;
   switch (type) {
     case 'session_start':
-      await sql`insert into sessions (id, game_id) values (${sessionId}, ${gameId}) on conflict do nothing`;
+      await insertSessionStart(postgresSchemaClient(sql), { sessionId, gameId, userId });
       return;
     case 'first_frame': {
       const ms = clampFirstFrameMs(value);
@@ -212,6 +228,10 @@ export async function recordTelemetry(sessionId: string, gameId: string, type: T
       }
       return;
     }
+    case 'ready':
+      // Acknowledged only. sessions has no ready column, and this ticket does not migrate.
+      // first_frame_ms stays the automatic animation-frame metric.
+      return;
     case 'start':
       await sql`update sessions set started = true ${where}`;
       break;

@@ -158,3 +158,16 @@ export function stageAfterValidation(current: Stage, status: ValidationStatus): 
   if (status === 'failed') return 'rejected';
   return current;
 }
+
+/**
+ * Who may open a game's page: anyone for published stages; only the owner for their own
+ * pending/rejected game (so they can check it while validation runs). Everyone else gets a 404.
+ */
+export function canViewGame(game: { stage: Stage; ownerId: string | null } | null, viewerId?: string | null): boolean {
+  if (!game) return false;
+  if (isPublicStage(game.stage)) return true;
+  return !!viewerId && !!game.ownerId && game.ownerId === viewerId;
+}
+
+/** createGame reads back the row it just inserted, which may be 'pending' (SP-5 default). */
+export const CREATED_GAME_LOOKUP = { includeUnpublished: true } as const;
