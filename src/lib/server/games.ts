@@ -183,6 +183,13 @@ export async function rateGame(gameId: string, voter: string, stars: number) {
   await evaluateGraduation(gameId);
 }
 
+/** Removes a user's rating (no-op if they never rated). Returns true if a rating was deleted. */
+export async function unrateGame(gameId: string, voter: string): Promise<boolean> {
+  const rows = await sql`delete from ratings where game_id = ${gameId} and voter = ${voter} returning game_id`;
+  if (rows.length) await evaluateGraduation(gameId);
+  return rows.length > 0;
+}
+
 export async function getUserRating(gameId: string, voter: string | undefined): Promise<number | null> {
   if (!voter) return null;
   const [row] = await sql<{ stars: number }[]>`select stars from ratings where game_id = ${gameId} and voter = ${voter}`;

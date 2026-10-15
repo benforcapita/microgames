@@ -20,6 +20,7 @@ const loggedIn = !!Astro.locals.user;
       ))
     }
   </div>
+  <button type="button" class="clear" data-clear hidden={!loggedIn || mine === null} aria-label="Clear my rating">Clear</button>
   <span class="summary mono muted">{avg === null ? 'No ratings yet' : `${avg.toFixed(1)} · ${count} votes`}</span>
 </div>
 
@@ -41,27 +42,42 @@ const loggedIn = !!Astro.locals.user;
   .stars button:hover ~ button { color: #3a3f52; }
   button:hover { transform: scale(1.15); }
   .summary { font-size: 0.8rem; }
+  button.clear { font: 600 0.78rem var(--mono); color: var(--muted); padding: 0.2rem 0.5rem; border: 1px solid var(--line); border-radius: 999px; }
+  button.clear:hover { color: var(--text); transform: none; }
   .login { color: var(--accent); font-size: 0.9rem; font-weight: 600; }
 </style>
 
 <script>
-  document.addEventListener('click', async (e) => {
-    const btn = (e.target as HTMLElement).closest<HTMLButtonElement>('[data-rate] button[data-stars]');
-    if (!btn) return;
-    const root = btn.closest<HTMLElement>('[data-rate]')!;
-    const stars = Number(btn.dataset.stars);
-    const res = await fetch(`/api/games/${root.dataset.rate}/rate`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ stars }),
-    });
-    if (!res.ok) return;
-    const data = (await res.json()) as { avgRating: number; ratingCount: number };
+  const summary = (d: { avgRating: number | null; ratingCount: number }, note: string) =>
+    `${d.avgRating === null ? 'No ratings yet' : `${d.avgRating.toFixed(1)} · ${d.ratingCount} votes`} · ${note}`;
+  const paint = (root: HTMLElement, stars: number) => {
     root.querySelectorAll<HTMLButtonElement>('button[data-stars]').forEach((b) => {
       const n = Number(b.dataset.stars);
       b.classList.toggle('on', n <= stars);
       b.setAttribute('aria-checked', String(n === stars));
     });
-    root.querySelector('.summary')!.textContent = `${data.avgRating.toFixed(1)} · ${data.ratingCount} votes · thanks!`;
+    root.dataset.mine = stars ? String(stars) : '';
+    root.querySelector<HTMLButtonElement>('[data-clear]')!.hidden = !stars;
+  };
+
+  document.addEventListener('click', async (e) => {
+    const target = e.target as HTMLElement;
+    const btn = target.closest<HTMLButtonElement>('[data-rate] button[data-stars]');
+    const clear = target.closest<HTMLButtonElement>('[data-rate] button[data-clear]');
+    if (!btn && !clear) return;
+    const root = (btn ?? clear)!.closest<HTMLElement>('[data-rate]')!;
+    const url = `/api/games/${root.dataset.rate}/rate`;
+    if (clear) {
+      const res = await fetch(url, { method: 'DELETE' });
+      if (!res.ok) return;
+      paint(root, 0);
+      root.querySelector('.summary')!.textContent = summary(await res.json(), 'rating cleared');
+      return;
+    }
+    const stars = Number(btn!.dataset.stars);
+    const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ stars }) });
+    if (!res.ok) return;
+    paint(root, stars);
+    root.querySelector('.summary')!.textContent = summary(await res.json(), 'thanks!');
   });
 </script>
