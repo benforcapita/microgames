@@ -386,6 +386,11 @@ deno_version = 2
 # [edge_runtime.secrets]
 # secret_key = "env(SECRET_VALUE)"
 
+# Local test stub for EF-2. The database hook sends a Vault secret, not a JWT.
+# EF-1 replaces this function; do not deploy the stub.
+[functions.validate-game]
+verify_jwt = false
+
 [analytics]
 enabled = false
 port = 54327
