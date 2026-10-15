@@ -18,3 +18,13 @@ window.Meshgrounds?.declare?.({ inputSupport: 'both' }); // 'mobile' | 'desktop'
 
 Values and parsing live in `src/lib/input-support.ts` (runtime-neutral, shared with the static check and the
 validate-game Edge Function). The static check (IS-2) compares the declaration with what the code actually listens to.
+
+## Detection and backfill (IS-2 / IS-4)
+
+The static check classifies every upload and validate-game stores the result in `games.input_support`. To classify games uploaded before that, run:
+
+    npm run backfill:input -- --dry-run      # report only, writes nothing
+    npm run backfill:input                   # fill rows still 'unknown' (local stack by default)
+    npm run backfill:input -- --force --ids a,b
+
+It always runs in REST mode (PostgREST + Storage). A non-local project needs `--allow-remote` and the typed project ref, or `--yes`. Hosted runs need Ben's approval.
