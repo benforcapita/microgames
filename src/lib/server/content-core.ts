@@ -1,10 +1,12 @@
-// CM-1: pure, dependency-free core for Supabase-managed site content (unit-tested without a DB).
+// CM-1: pure core (only depends on the pure game-rules) for Supabase-managed site content (unit-tested without a DB).
 // Everything coming out of here is plain strings meant for text interpolation. Nothing is ever
 // rendered as HTML, and image URLs are only accepted from the public site-media bucket.
+import { isListable } from './game-rules'; // pure too: the single PV-1 listing predicate
 
 export const DEFAULT_LOCALE = 'en';
 export const CONTENT_TTL_MS = 60_000;
-export const PUBLISHED_STAGES = ['proving', 'live'] as const;
+/** PV-1: featured games must be listable (see isListable in game-rules.ts). */
+export { LISTABLE_STAGES as PUBLISHED_STAGES } from './game-rules';
 /** Thresholds for skipping a broken featured game; the values live in config.ts (FEATURED_BROKEN_*). */
 export interface BrokenRules {
   minPlays: number;
@@ -152,7 +154,7 @@ export function isBroken(g: Pick<FeaturedCandidate, 'plays' | 'crashRate'>, rule
   return g.plays >= rules.minPlays && (g.crashRate ?? 0) > rules.maxCrashRate;
 }
 
-/** Active, inside its window, published (proving/live), not broken; ordered by position. */
+/** Active, inside its window, listable (PV-1: live + headless passed), not broken; ordered by position. */
 export function selectFeatured<G extends FeaturedCandidate>(rows: FeaturedRow[], games: G[], now: number, broken: BrokenRules): { game: G; label: string }[] {
   const byId = new Map(games.map((g) => [g.id, g]));
   return rows
@@ -160,7 +162,7 @@ export function selectFeatured<G extends FeaturedCandidate>(rows: FeaturedRow[],
     .sort((a, b) => a.position - b.position || a.game_id.localeCompare(b.game_id))
     .flatMap((r) => {
       const g = byId.get(r.game_id);
-      if (!g || !(PUBLISHED_STAGES as readonly string[]).includes(g.stage) || isBroken(g, broken)) return [];
+      if (!g || !isListable(g) || isBroken(g, broken)) return [];
       return [{ game: g, label: cleanText(r.label, 40) ?? '' }];
     });
 }

@@ -70,7 +70,7 @@ CHECKLIST
 12. Errors: list any code path that could throw uncaught (null access, missing WebGL, failed asset decode). FAIL if likely on load.
 13. Input: touch controls work on mobile and keyboard/mouse on desktop, for every platform the game declares; canvas resizes with the window.
 14. Safety: no eval of remote code, obfuscated blobs, mining, tracking, or attempts to reach parent/top.
-15. Input support declaration: declares inputSupport via window.Meshgrounds?.declare?.({ inputSupport }) (preferred) or <meta name="meshgrounds:input-support" content="…"> with 'mobile', 'desktop' or 'both' (WARN if missing — the game shows as "unknown"; FAIL for any other value; FAIL if the declared platforms don't match the controls in item 13).
+15. Input support declaration: declares inputSupport via window.Meshgrounds?.declare?.({ inputSupport }) (preferred) or <meta name="meshgrounds:input-support" content="…"> with 'mobile', 'desktop' or 'both' (WARN if missing — the game shows as "unknown"; WARN for any other value; WARN if the declared platforms don't match the controls in item 13).
 
 Finish with:
 VERDICT: READY or NOT READY

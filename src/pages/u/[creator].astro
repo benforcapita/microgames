@@ -5,7 +5,10 @@ import { listGames } from '../../lib/server/games';
 import { compact } from '../../lib/format';
 
 const creator = Astro.params.creator ?? '';
-const games = await listGames({ creator, sort: 'new', limit: 100, device: Astro.locals.device });
+// PV-1: visitors see only listable games; the creator viewing their own profile also sees their proving games.
+const { user, profile } = Astro.locals;
+const own = !!user && !!profile && profile.handle.toLowerCase() === creator.toLowerCase();
+const games = await listGames({ creator, sort: 'new', limit: 100, device: Astro.locals.device, ...(own ? { ownerId: user!.id, includeUnlisted: true } : {}) });
 if (!games.length) return Astro.rewrite('/404');
 const plays = games.reduce((n, g) => n + g.plays, 0);
 const live = games.filter((g) => g.stage === 'live').length;

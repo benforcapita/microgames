@@ -136,13 +136,32 @@ export const PUBLIC_STAGES = ['proving', 'live'] as const satisfies readonly Sta
 export const isPublicStage = (stage: string): boolean => (PUBLIC_STAGES as readonly string[]).includes(stage);
 
 /**
- * Which stages a list query may return. Public lists never include pending/rejected games; only an
- * owner-scoped query (the creator's own dashboard) may opt into them with `includeUnpublished`.
+ * PV-1 (Ben's product rule), the ONE place that decides what the site may show or recommend to other users:
+ *
+ *   listable = live AND passed the headless check
+ *
+ * Proving games (static check passed) stay playable by direct link (/play/<id> and the CDN, see canViewGame)
+ * but are never listed: not on the home feed, lists, tags, search, featured, related/"more from", other
+ * people's profile views or the public Proving Grounds. Only their owner sees them in their own lists.
+ * There is no headless runner yet, so `headlessPassed` is absent everywhere and a game can only become
+ * listable by graduating to 'live' (which itself requires real-play health checks). When the runner lands,
+ * set `headlessPassed` on the game and it gates live games too; an explicit `false` already unlists.
  */
-export function visibleStages(opts: { stage?: Stage; ownerId?: string; includeUnpublished?: boolean } = {}): Stage[] {
-  const unpublishedOk = !!(opts.includeUnpublished && opts.ownerId);
-  if (opts.stage) return unpublishedOk || isPublicStage(opts.stage) ? [opts.stage] : [];
-  return unpublishedOk ? [...STAGES] : [...PUBLIC_STAGES];
+export const LISTABLE_STAGES = ['live'] as const satisfies readonly Stage[];
+
+export function isListable(game: { stage: Stage | string; headlessPassed?: boolean | null }): boolean {
+  return (LISTABLE_STAGES as readonly string[]).includes(game.stage) && game.headlessPassed !== false;
+}
+
+/**
+ * Which stages a list query may return. Every public list is limited to LISTABLE_STAGES. Owner-scoped
+ * queries (require ownerId) may opt in to more: `includeUnlisted` adds their own proving games (profile,
+ * /proving), `includeUnpublished` adds pending/rejected too (the creator's dashboard).
+ */
+export function visibleStages(opts: { stage?: Stage; ownerId?: string; includeUnpublished?: boolean; includeUnlisted?: boolean } = {}): Stage[] {
+  const allowed: readonly Stage[] = opts.ownerId && opts.includeUnpublished ? STAGES : opts.ownerId && opts.includeUnlisted ? PUBLIC_STAGES : LISTABLE_STAGES;
+  if (opts.stage) return allowed.includes(opts.stage) ? [opts.stage] : [];
+  return [...allowed];
 }
 
 export type ValidationStatus = 'queued' | 'running' | 'passed' | 'failed' | 'error';

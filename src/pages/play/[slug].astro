@@ -6,10 +6,10 @@ import GameThumb from '../../components/GameThumb.astro';
 import { ratingLabel } from '../../lib/rating';
 import { getGame, getHealth, getUserRating, listGames } from '../../lib/server/games';
 import { CDN_ORIGIN, CDN_PREVIEW_SECRET, GRADUATION } from '../../lib/server/config';
-import { isPublicStage } from '../../lib/server/game-rules';
+import { isListable, isPublicStage } from '../../lib/server/game-rules';
 import { mintPreviewToken } from '../../../cdn/preview-token.mjs';
 import { ago, compact, formatCheck, kb } from '../../lib/format';
-import { desktopOnlyNotice, playSurface } from '../../lib/server/device';
+import { desktopOnlyNotice, forkParentLinked, playSurface } from '../../lib/server/device';
 
 const { user } = Astro.locals;
 const device = Astro.locals.device;
@@ -19,7 +19,9 @@ const game = await getGame(Astro.params.slug ?? '', { viewerId: Astro.locals.use
 if (!game) return Astro.rewrite('/404');
 if (Astro.params.slug !== game.slug) return Astro.redirect(`/play/${game.slug}`, 301);
 
-const [{ checks }, mine, parent, forks, byCreator] = await Promise.all([
+// PV-1: related lists (forks, more from this creator) only ever contain listable games; the "forked from" link is
+// hidden when the parent is unlisted, unless the viewer owns it.
+const [{ checks }, mine, parentGame, forks, byCreator] = await Promise.all([
   getHealth(game.id),
   getUserRating(game.id, user?.id),
   game.forkedFrom ? getGame(game.forkedFrom) : null,
@@ -27,6 +29,7 @@ const [{ checks }, mine, parent, forks, byCreator] = await Promise.all([
   listGames({ creator: game.creator, limit: 5, device }),
 ]);
 const more = byCreator.filter((g) => g.id !== game.id).slice(0, 4);
+const parent = parentGame && (isListable(parentGame) || (!!user && parentGame.ownerId === user.id)) ? parentGame : null;
 const desktopOnly = playSurface(device, game.inputSupport) === 'desktop-only';
 const notice = desktopOnlyNotice(game.title);
 const isOwner = !!user && user.id === game.ownerId;
@@ -35,11 +38,13 @@ const previewToken = isOwner && !isPublicStage(game.stage) ? mintPreviewToken(CD
 const ptQuery = previewToken ? `&pt=${encodeURIComponent(previewToken)}` : '';
 const remixable = game.license !== 'All rights reserved';
 const live = game.stage === 'live';
+// PV-1: non-live games stay reachable by direct link (200) but are kept out of search indexes (header + meta).
+if (!live) Astro.response.headers.set('X-Robots-Tag', 'noindex, nofollow');
 const passed = checks.filter((c) => c.pass).length;
 const uploaded = Astro.url.searchParams.has('uploaded');
 ---
 
-<Layout title={game.title} description={game.tagline || `Play ${game.title} instantly in your browser.`} ads={live && !desktopOnly}>
+<Layout title={game.title} description={game.tagline || `Play ${game.title} instantly in your browser.`} ads={live && !desktopOnly} noindex={!live}>
   <section class="wrap play">
     {
       uploaded && (
@@ -96,7 +101,7 @@ const uploaded = Astro.url.searchParams.has('uploaded');
         <h1>{game.title}</h1>
         <p class="byline muted">
           by <a href={`/u/${game.creator}`}>@{game.creator}</a> · {ago(game.createdAt)} · {compact(game.plays)} plays · {game.license}
-          {parent && <> · fork of <a href={`/play/${parent.slug}`}>{parent.title}</a></>}
+          {parent && <> · fork of {forkParentLinked(device, parent.inputSupport) ? <a href={`/play/${parent.slug}`}>{parent.title}</a> : parent.title}</>}
         </p>
         {game.tagline && <p class="tagline">{game.tagline}</p>}
         <div class="chips">{game.tags.map((t) => <a class="tag" href={`/games?tag=${t}`}>#{t}</a>)}</div>

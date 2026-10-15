@@ -80,7 +80,7 @@ describe('featured games', () => {
     assert.ok(!inWindow({ starts_at: null, ends_at: new Date(now).toISOString() }, now));
     assert.ok(inWindow({ starts_at: '2026-10-01T00:00:00Z', ends_at: '2026-11-01T00:00:00Z' }, now));
   });
-  it('keeps only active, in-window, published, non-broken games, ordered by position', () => {
+  it('keeps only active, in-window, listable, non-broken games, ordered by position', () => {
     const rows = [
       f('c', 3), f('a', 1, { label: 'Staff pick' }), f('off', 0, { active: false }),
       f('future', 0, { starts_at: '2027-01-01T00:00:00Z' }), f('past', 0, { ends_at: '2026-01-01T00:00:00Z' }),
@@ -88,7 +88,7 @@ describe('featured games', () => {
     ];
     const games = [g('a'), g('b', 'proving'), g('c'), g('off'), g('future'), g('past'), g('pending', 'pending'), g('broken', 'live', 20, 0.9)];
     const out = selectFeatured(rows, games, now, RULES);
-    assert.deepEqual(out.map((x) => x.game.id), ['a', 'b', 'c']);
+    assert.deepEqual(out.map((x) => x.game.id), ['a', 'c'], 'PV-1: proving game b is not listable, so never featured');
     assert.equal(out[0].label, 'Staff pick');
   });
   it('config.ts holds the thresholds as named constants (5 plays, 50%)', async () => {
