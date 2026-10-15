@@ -58,7 +58,7 @@ revoke all on table private.validation_dispatch from public, anon, authenticated
 
 -- Allow pending (so the trigger can fire) and rejected (so eight missed calls
 -- can leave the proving grounds). If an earlier migration already allows both
--- (SP-3), leave that check alone.
+-- (EF-1 / SP-3), leave that check alone.
 do $$
 declare
   def text;
@@ -77,31 +77,9 @@ begin
   end if;
 end $$;
 
--- SP-5 reads public.game_validations. EF-1 / SP-3 create that table when they
--- are on the branch. Create the same shape only when it is absent, so a sweeper
--- rejection still has a row to show. Inserts below no-op if the table is missing.
-create table if not exists public.game_validations (
-  id uuid primary key default gen_random_uuid(),
-  game_id text not null references public.games (id) on delete cascade,
-  version int not null default 1,
-  bundle_sha256 text check (bundle_sha256 ~ '^[0-9a-f]{64}$'),
-  status text not null check (status in ('queued', 'running', 'passed', 'failed', 'error')),
-  static_report jsonb not null default '{}',
-  run_report jsonb,
-  screenshot_paths text[] not null default '{}',
-  created_at timestamptz not null default now(),
-  finished_at timestamptz
-);
-
-alter table public.game_validations enable row level security;
-revoke all on table public.game_validations from anon, authenticated;
-
-create index if not exists game_validations_game_idx
-  on public.game_validations (game_id, created_at desc);
-
-create unique index if not exists game_validations_bundle_key
-  on public.game_validations (game_id, bundle_sha256)
-  where bundle_sha256 is not null;
+-- public.game_validations belongs to EF-1 (#29). That work sorts before this
+-- file (20261015120300 runs first). The sweeper inserts the rejection row.
+-- This migration does not create the table.
 
 -- Local default hook secret. Stored encrypted in Vault; the request builder
 -- reads it back at call time. Replace on a hosted project with
@@ -203,9 +181,9 @@ create trigger games_enqueue_validate_game
   when (new.stage = 'pending')
   execute function private.games_enqueue_validate_game();
 
--- Eight unanswered calls is enough. Mark the game rejected and, when
--- game_validations exists, leave the row SP-5's /submissions/[id] page reads.
--- A missing table does not put the game back to pending.
+-- Eight unanswered calls is enough. Mark the game rejected and insert the
+-- game_validations row SP-5's /submissions/[id] page reads. EF-1 creates that
+-- table before this migration runs.
 create or replace function private.reject_unavailable_validation(p_game_id text)
 returns void
 language plpgsql
@@ -227,28 +205,18 @@ begin
     set last_reason = v_reason
     where game_id = p_game_id;
 
-  if to_regclass('public.game_validations') is null then
-    raise warning 'game_validations is absent; % marked rejected without a report row', p_game_id;
-    return;
-  end if;
+  select coalesce(max(v.version), 0) + 1 into v_version
+  from public.game_validations v
+  where v.game_id = p_game_id;
 
-  begin
-    select coalesce(max(v.version), 0) + 1 into v_version
-    from public.game_validations v
-    where v.game_id = p_game_id;
-
-    insert into public.game_validations (game_id, version, status, static_report, finished_at)
-    values (
-      p_game_id,
-      v_version,
-      'error',
-      jsonb_build_object('reason', v_reason, 'status', 'error'),
-      now()
-    );
-  exception
-    when undefined_table or undefined_column then
-      raise warning 'game_validations shape is absent; % stays rejected without a report row', p_game_id;
-  end;
+  insert into public.game_validations (game_id, version, status, static_report, finished_at)
+  values (
+    p_game_id,
+    v_version,
+    'error',
+    jsonb_build_object('reason', v_reason, 'status', 'error'),
+    now()
+  );
 end;
 $$;
 
