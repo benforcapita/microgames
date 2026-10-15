@@ -19,6 +19,7 @@
     "db:start": "npx -y supabase@2.120.0 start -x vector,logflare,edge-runtime,imgproxy,realtime",
     "db:stop": "npx -y supabase@2.120.0 stop",
     "check": "astro check",
+    "e2e": "playwright test",
     "smoke": "node scripts/smoke.mjs"
   },
   "dependencies": {
@@ -30,6 +31,7 @@
   },
   "devDependencies": {
     "@astrojs/check": "0.9.10",
+    "@playwright/test": "^1.64.1",
     "@types/node": "24.19.1",
     "typescript": "6.0.3"
   }
