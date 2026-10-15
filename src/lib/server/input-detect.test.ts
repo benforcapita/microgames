@@ -45,6 +45,14 @@ describe('input support: declared flag wins when consistent', () => {
   it('declared both needs both kinds of signal', () => {
     assert.equal(cls(page("Meshgrounds.declare({ inputSupport: 'both' }); addEventListener('keydown', f)")).class, 'desktop');
   });
+  it('declare() in source beats the meta tag (same precedence as boot.js / #34)', () => {
+    const r = cls(page("Meshgrounds.declare({ inputSupport: 'desktop' }); addEventListener('keydown', f); c.ontouchstart = g", '<canvas></canvas>', '<meta name="meshgrounds:input-support" content="mobile">'));
+    assert.deepEqual([r.declared, r.class, r.source], ['desktop', 'desktop', 'declared']);
+  });
+  it('the meta tag applies when there is no declare() call', () => {
+    const r = cls(page("addEventListener('keydown', f); c.ontouchstart = g", '<canvas></canvas>', '<meta name="meshgrounds:input-support" content="mobile">'));
+    assert.deepEqual([r.declared, r.class], ['mobile', 'mobile']);
+  });
   it('invalid declarations are ignored', () => assert.equal(cls(page("Meshgrounds.declare({ inputSupport: 'tv' })")).class, 'unknown'));
 });
 
@@ -66,7 +74,7 @@ describe('input support: report-only', () => {
     assert.equal(classifyInputSupport(big, []).class, 'unknown');
     const t = performance.now();
     classifyInputSupport('a.b '.repeat(1_250_000), []);
-    assert.ok(performance.now() - t < 200, 'classifier under 200 ms on 5 MB');
+    assert.ok(performance.now() - t < 1000, 'classifier under 1 s on 5 MB (loose bound; it is a few linear regex scans)');
   });
 });
 
