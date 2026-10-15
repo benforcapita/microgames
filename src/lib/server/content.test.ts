@@ -24,6 +24,10 @@ describe('getContent fallbacks: locale -> en -> hardcoded default', () => {
     assert.equal(r.eyebrow, CONTENT_DEFAULTS['home.hero'].eyebrow);
     assert.equal(r.title_accent, 'instant 3D');
   });
+  it('headline parts keep their edge spaces; other fields are trimmed', () => {
+    const r = resolveContent([row('home.hero', 'en', { title_before: 'Spooky ', title_after: ' games.', lede: '  hi  ' })], 'home.hero', 'en', PREFIX);
+    assert.deepEqual([r.title_before, r.title_after, r.lede], ['Spooky ', ' games.', 'hi']);
+  });
   it('non-object values fall back entirely', () => {
     for (const v of [null, 'str', [1, 2], 7]) assert.deepEqual(resolveContent([row('home.hero', 'en', v)], 'home.hero', 'en', PREFIX), CONTENT_DEFAULTS['home.hero']);
   });

@@ -53,11 +53,15 @@ export interface ContentRow {
 }
 
 /** Plain text only: strips control chars; markup stays literal because callers interpolate it as text. */
-export function cleanText(v: unknown, max = MAX_TEXT): string | undefined {
+export function cleanText(v: unknown, max = MAX_TEXT, trim = true): string | undefined {
   if (typeof v !== 'string') return undefined;
   // eslint-disable-next-line no-control-regex
-  return v.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '').trim().slice(0, max);
+  const t = v.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
+  return (trim ? t.trim() : t).slice(0, max);
 }
+
+/** Headline parts keep their edge spaces ("The open ground for " + accent + " web games."). */
+const UNTRIMMED = new Set(['title_before', 'title_after']);
 
 /** Only same-site paths ("/games") or https URLs; never javascript:, data:, protocol-relative, etc. */
 export function safeHref(v: unknown): string {
@@ -110,7 +114,7 @@ export function resolveContent<K extends ContentKey>(rows: ContentRow[], key: K,
     if (field === 'link_href') out[field] = v === undefined ? fallback : safeHref(v);
     else if (field === 'image_url') out[field] = v === undefined ? fallback : safeImageUrl(v, mediaPrefix);
     else if (field === 'tone') out[field] = typeof v === 'string' && TONES.has(v) ? v : fallback;
-    else out[field] = cleanText(v) ?? fallback;
+    else out[field] = cleanText(v, MAX_TEXT, !UNTRIMMED.has(field)) ?? fallback;
   }
   if (key === 'home.banner' && !out.link_href) out.link_label = '';
   return out as unknown as ContentShapes[K];
