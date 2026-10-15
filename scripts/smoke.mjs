@@ -5,7 +5,7 @@
 //
 // Exact non-200 statuses that are expected (they are the routes' designed behaviour, not failures):
 //   - POST /api/telemetry          -> 204  (fire-and-forget beacon, no body)
-//   - POST /api/games (upload)     -> 303  (redirect to the new game's /play page)
+//   - POST /api/games (upload)     -> 303  (redirect to the owner's /submissions/<id> page; the game starts pending)
 //   - GET  /play/<id>              -> 301  (canonical redirect to /play/<slug>, which must be 200)
 //   - POST /api/auth/*, /api/profile, /api/games/<slug>/delete -> 303 (form posts redirect back to a page)
 //   - POST /api/saves/<gameId>     -> 204  (save stored, no body)
@@ -155,11 +155,15 @@ try {
   await check(`/api/games/${game.id}/rate`, `${WEB}/api/games/${game.id}/rate`, 200, { method: 'POST', json: { stars: 5 } });
   await check('/api/telemetry', `${WEB}/api/telemetry`, 204, { method: 'POST', auth: false, json: { sessionId: crypto.randomUUID(), gameId: game.id, type: 'session_start' } });
   const html = new File(['<!doctype html><html><body><canvas></canvas><script>1</script></body></html>'], 'g.html', { type: 'text/html' });
-  const up = await check('/api/games (upload)', `${WEB}/api/games`, 303, { method: 'POST', form: { title: 'Smoke Game', license: 'MIT', agree: 'on', game: html }, verify: expectLoc(/^\/play\//) });
+  // Uploads require a thumbnail (TH-1): a valid 1x1 PNG.
+  const thumb = new File([Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64')], 't.png', { type: 'image/png' });
+  const up = await check('/api/games (upload)', `${WEB}/api/games`, 303, { method: 'POST', form: { title: 'Smoke Game', license: 'MIT', agree: 'on', game: html, thumb }, verify: expectLoc(/^\/submissions\//) });
   const newPath = new URL(up?.headers.get('location') ?? '/play/none', WEB).pathname;
   const slug = newPath.split('/')[2];
   await check(newPath, WEB + newPath, 200);
-  await check(`/u/${handle} (has a game)`, `${WEB}/u/${handle}`, 200);
+  // SP-5: new uploads start as `pending` (owner-only /submissions/<id>) until validate-game publishes them,
+  // which doesn't run in smoke, so the creator page still has no public games.
+  await check(`/u/${handle} (upload still pending)`, `${WEB}/u/${handle}`, 404);
   await check(`/api/games/${slug}/delete`, `${WEB}/api/games/${slug}/delete`, 303, { method: 'POST', verify: expectLoc(/^\/me\?deleted=1/) });
   await check(`${newPath} (after delete)`, WEB + newPath, 404);
   await check('/api/auth/logout', `${WEB}/api/auth/logout`, 303, { method: 'POST' });
