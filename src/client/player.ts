@@ -128,6 +128,9 @@ export function mountPlayer(host: HTMLElement, game: PlayerGame, opts: PlayerOpt
       case '__MG_READY':
         if (!ready) (ready = true), track('ready', Number(data.ms) || 0);
         break;
+      case '__MG_SNAPSHOT':
+        // Canvas snapshots belong to the upload preview. Live play drops them.
+        return;
       case '__MG_INPUT':
         if (!started) (started = true), track('start');
         break;
