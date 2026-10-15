@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import { GRADUATION } from './config';
 import { sql } from './db';
-import { assessHealth, clampDurationMs, clampFirstFrameMs, slugify, uniqueSlug, type HealthCheck } from './game-rules';
+import { BAYES_PRIOR_VOTES, assessHealth, clampDurationMs, clampFirstFrameMs, slugify, uniqueSlug, type HealthCheck } from './game-rules';
 import { insertSessionStart, postgresSchemaClient } from './schema-rollout';
 import { bucket } from './supabase';
 
@@ -98,7 +98,8 @@ export interface ListOptions {
 const ORDER = {
   top: 'plays desc, created_at desc',
   new: 'created_at desc',
-  rated: 'coalesce(avg_rating, 0) desc, rating_count desc',
+  // Bayesian average (see bayesianRating in game-rules.ts): (C*m + sum) / (C + n), m = global mean of all stars.
+  rated: `(${BAYES_PRIOR_VOTES} * (select coalesce(avg(stars)::float8, 3) from ratings) + coalesce(avg_rating, 0) * rating_count) / (${BAYES_PRIOR_VOTES} + rating_count) desc, rating_count desc, created_at desc`,
 } as const;
 
 export async function listGames({ stage, sort = 'top', tag, creator, ownerId, forkedFrom, limit = 60 }: ListOptions = {}) {
