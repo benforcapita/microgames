@@ -77,7 +77,7 @@ export async function validateGame(store: Store, gameId: string): Promise<Valida
   return {
     httpStatus: 200,
     body: {
-      gameId, sha256, status, stage: recorded.stage, previousStage: stage, validationId: recorded.row.id, version: recorded.row.version, reused: false,
+      gameId, sha256, status, stage: recorded.stage, previousStage: stage, validationId: recorded.row.id, version: recorded.row.version, reused: false, inputSupport: report.inputSupport?.class ?? 'unknown',
       level: report.status, failed: report.checks.filter((c) => c.level === 'fail').map((c) => c.id),
       warned: report.checks.filter((c) => c.level === 'warn').map((c) => c.id),
     },
