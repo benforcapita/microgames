@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import { GRADUATION } from './config';
 import { sql } from './db';
 import { BAYES_PRIOR_VOTES, PUBLIC_STAGES, assessHealth, clampDurationMs, clampFirstFrameMs, slugify, stagesForList, uniqueSlug, type HealthCheck, type Stage } from './game-rules';
+import { saveUploadedBundle } from './bundle-store';
 import { bucket } from './supabase';
 
 export type { Stage };
@@ -160,19 +161,23 @@ export async function createGame(input: NewGame): Promise<Game> {
   const [clash] = await sql`select 1 from games where slug = ${base}`;
   const slug = uniqueSlug(input.title, Boolean(clash), id);
 
-  const upload = async (path: string, bytes: Uint8Array, contentType: string) => {
-    const { error } = await bucket().upload(path, bytes, { contentType, upsert: true });
-    if (error) throw new Error(`Storage upload failed: ${error.message}`);
-  };
-  await upload(`${id}/index.html`, input.html, 'text/html; charset=utf-8');
-  const thumb = input.thumb ? `thumb.${input.thumb.ext}` : null;
-  if (input.thumb && thumb) await upload(`${id}/${thumb}`, input.thumb.bytes, input.thumb.type);
-
   const stage = input.stage ?? 'pending';
-  await sql`
-    insert into games (id, slug, owner_id, creator, title, tagline, description, tags, license, forked_from, size_bytes, hue, thumb, stage)
-    values (${id}, ${slug}, ${input.ownerId}, ${input.creator}, ${input.title}, ${input.tagline}, ${input.description},
-            ${input.tags}, ${input.license}, ${input.forkedFrom}, ${input.html.byteLength}, ${crypto.randomInt(0, 360)}, ${thumb}, ${stage})`;
+  const thumb = input.thumb ? `thumb.${input.thumb.ext}` : null;
+  const objects = [
+    { path: `${id}/index.html`, bytes: input.html, contentType: 'text/html; charset=utf-8' },
+    ...(input.thumb && thumb ? [{ path: `${id}/${thumb}`, bytes: input.thumb.bytes, contentType: input.thumb.type }] : []),
+  ];
+  await saveUploadedBundle({
+    objects,
+    storage: {
+      upload: (path, bytes, contentType) => bucket().upload(path, bytes, { contentType, upsert: true }),
+      remove: (paths) => bucket().remove(paths),
+    },
+    insert: () => sql`
+      insert into games (id, slug, owner_id, creator, title, tagline, description, tags, license, forked_from, size_bytes, hue, thumb, stage)
+      values (${id}, ${slug}, ${input.ownerId}, ${input.creator}, ${input.title}, ${input.tagline}, ${input.description},
+              ${input.tags}, ${input.license}, ${input.forkedFrom}, ${input.html.byteLength}, ${crypto.randomInt(0, 360)}, ${thumb}, ${stage})`,
+  });
   return (await getGame(id, { includeUnpublished: true }))!;
 }
 
