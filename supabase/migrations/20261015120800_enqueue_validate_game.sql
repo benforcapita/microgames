@@ -1,6 +1,7 @@
 -- EF-2: when a game becomes stage = 'pending', ask the validate-game Edge Function
--- to run. The function itself is EF-1 (migration 20261015120300). This file is
--- 20261015120400 so it sorts after SP-3, RT-2, PG-3, and EF-1.
+-- to run. EF-1 owns that function (migration 20261015120700). This file is
+-- 20261015120800 so it sorts after SP-3 120500, RT-2 120600, and EF-1 120700.
+-- Hosted already applied 20261015120200, so this timestamp stays after it.
 --
 -- pg_net ships as a shared library on the Supabase image. Enable it only when
 -- the extension row is missing. Never drop it and never ALTER EXTENSION.
@@ -77,8 +78,8 @@ begin
   end if;
 end $$;
 
--- public.game_validations belongs to EF-1 (#29). That work sorts before this
--- file (20261015120300 runs first). The sweeper inserts the rejection row.
+-- public.game_validations belongs to EF-1 (#29), which sorts before this file
+-- (20261015120700). The sweeper inserts the rejection row.
 -- This migration does not create the table.
 
 -- Local default hook secret. Stored encrypted in Vault; the request builder
