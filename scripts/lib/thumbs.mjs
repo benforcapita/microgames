@@ -2,6 +2,8 @@
 
 export const LOOPBACK = /^(https?|postgres(ql)?):\/\/([^@/]*@)?(127\.0\.0\.1|localhost|\[::1\])(:\d+)?(\/|$)/;
 export const REMOTE_ENV = ['PUBLIC_SUPABASE_URL', 'DATABASE_URL', 'SUPABASE_SECRET_KEY'];
+/** Always required once any connection var is set; DATABASE_URL is optional (absent = REST mode). */
+export const REST_ENV = ['PUBLIC_SUPABASE_URL', 'SUPABASE_SECRET_KEY'];
 
 /** Below this per-channel standard deviation (0–255) a frame counts as blank / near-single-colour. */
 export const BLANK_STDEV = 6;
@@ -16,6 +18,7 @@ export function parseArgs(argv) {
     yes: has('yes'),
     allowRemote: has('allow-remote'),
     build: has('build'),
+    rest: has('rest'),
     ids: opt('ids')?.split(',').map((s) => s.trim()).filter(Boolean),
     out: opt('out'),
     settleMs: Number(opt('settle') ?? 3000),
@@ -35,21 +38,25 @@ export function projectRef(url) {
 }
 
 /**
- * Decides where the script connects. Returns { mode: 'local' } (use `supabase status`),
- * { mode: 'remote', env, ref, needConfirm } or { error }.
- * Any of the remote env vars set means "remote intent": then all must be set, no silent local fallback.
+ * Decides where the script connects and how it reaches the games table.
+ * Returns { mode: 'local' | 'env' | 'remote', db: 'pg' | 'rest', env?, ref?, needConfirm? } or { error }.
+ *   - none of the env vars set: the local stack from `supabase status` (pg, or rest with --rest)
+ *   - PUBLIC_SUPABASE_URL + SUPABASE_SECRET_KEY are always required once any var is set (no silent fallback)
+ *   - DATABASE_URL present: direct Postgres; absent (or --rest): REST mode over HTTPS (PostgREST + Storage)
+ *   - a non-loopback target needs --allow-remote, then the typed project ref unless --yes
  */
 export function resolveTarget(env, args) {
   if (args.force && args.all && !args.yes) return { error: '--force with --all overwrites every thumbnail; add --yes to confirm.' };
   const set = REMOTE_ENV.filter((k) => env[k]);
-  if (!set.length) return { mode: 'local' };
-  const missing = REMOTE_ENV.filter((k) => !env[k]);
-  if (missing.length) return { error: `missing required env: ${missing.join(', ')} (set all of ${REMOTE_ENV.join(', ')} or none for the local stack)` };
-  const picked = Object.fromEntries([...REMOTE_ENV, 'PUBLIC_SUPABASE_PUBLISHABLE_KEY'].map((k) => [k, env[k]]));
-  const remote = !LOOPBACK.test(env.PUBLIC_SUPABASE_URL) || !LOOPBACK.test(env.DATABASE_URL);
-  if (!remote) return { mode: 'env', env: picked };
+  if (!set.length) return { mode: 'local', db: args.rest ? 'rest' : 'pg' };
+  const missing = REST_ENV.filter((k) => !env[k]);
+  if (missing.length) return { error: `missing required env: ${missing.join(', ')} (REST mode needs ${REST_ENV.join(' + ')}; add DATABASE_URL for direct Postgres; set none for the local stack)` };
+  const db = env.DATABASE_URL && !args.rest ? 'pg' : 'rest';
+  const picked = Object.fromEntries([...REST_ENV, 'PUBLIC_SUPABASE_PUBLISHABLE_KEY', ...(db === 'pg' ? ['DATABASE_URL'] : [])].map((k) => [k, env[k]]));
+  const remote = !LOOPBACK.test(env.PUBLIC_SUPABASE_URL) || (db === 'pg' && !LOOPBACK.test(env.DATABASE_URL));
+  if (!remote) return { mode: 'env', db, env: picked };
   if (!args.allowRemote) return { error: 'refusing non-local Supabase; pass --allow-remote to target it.' };
-  return { mode: 'remote', env: picked, ref: projectRef(env.PUBLIC_SUPABASE_URL), needConfirm: !args.yes };
+  return { mode: 'remote', db, env: picked, ref: projectRef(env.PUBLIC_SUPABASE_URL), needConfirm: !args.yes };
 }
 
 /** sharp `stats()` -> blank verdict. Ignores alpha; blank when every colour channel is near-constant. */
