@@ -1,0 +1,9 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "buildCommand": "",
+  "outputDirectory": ".",
+  "cleanUrls": false,
+  "rewrites": [{ "source": "/g/:p*", "destination": "/api/g?__p=:p*" }],
+  "functions": { "api/g.mjs": { "includeFiles": "{boot.js,handler.mjs}" } }
+}
