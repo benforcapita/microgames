@@ -1,5 +1,6 @@
 import type { APIRoute } from 'astro';
-import { safeNext, siteOrigin, withParams } from '../../../lib/server/auth';
+import { safeNext, withParams } from '../../../lib/server/auth';
+import { authEmailRedirect } from '../../../lib/server/email-redirect';
 
 type Mode = 'password' | 'signup' | 'magic';
 const MODES = new Set<Mode>(['password', 'signup', 'magic']);
@@ -16,12 +17,22 @@ export const POST: APIRoute = async ({ request, locals, redirect, url }) => {
   if (mode !== 'magic' && password.length < 8) return back({ error: 'Password must be at least 8 characters.' });
 
   const auth = locals.supabase.auth;
-  const emailRedirectTo = `${siteOrigin(url)}/auth/callback?next=${encodeURIComponent(next)}`;
 
   if (mode === 'password') {
     const { error } = await auth.signInWithPassword({ email, password });
     return error ? back({ error: error.message }) : redirect(next, 303);
   }
+
+  // Sign-up and magic link. There is no reset-password route; if one is added it
+  // must pass this same allowlisted emailRedirectTo and must not use the shared
+  // project's Auth Site URL.
+  const emailRedirectTo = authEmailRedirect({
+    requestUrl: url,
+    next,
+    originHeader: request.headers.get('origin'),
+  });
+  if (!emailRedirectTo) return back({ error: "Sign-in email can't be sent from this address." });
+
   if (mode === 'signup') {
     const { data, error } = await auth.signUp({ email, password, options: { emailRedirectTo } });
     if (error) return back({ error: error.message });
