@@ -191,11 +191,21 @@ export async function getUserRating(gameId: string, voter: string | undefined): 
 
 export type TelemetryType = 'session_start' | 'first_frame' | 'start' | 'complete' | 'crash' | 'heartbeat';
 
-export async function recordTelemetry(sessionId: string, gameId: string, type: TelemetryType, value: unknown = 0) {
+export async function recordTelemetry(
+  sessionId: string,
+  gameId: string,
+  type: TelemetryType,
+  value: unknown = 0,
+  userId: string | null = null,
+) {
   const where = sql`where id = ${sessionId} and game_id = ${gameId}`;
   switch (type) {
     case 'session_start':
-      await sql`insert into sessions (id, game_id) values (${sessionId}, ${gameId}) on conflict do nothing`;
+      // Subquery drops an unknown id (deleted account, stale JWT) to null so the play still records.
+      await sql`
+        insert into sessions (id, game_id, user_id)
+        values (${sessionId}, ${gameId}, (select id from auth.users where id = ${userId}))
+        on conflict do nothing`;
       return;
     case 'first_frame': {
       const ms = clampFirstFrameMs(value);
