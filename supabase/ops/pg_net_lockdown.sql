@@ -3,10 +3,12 @@
 -- Run this as the CURRENT role. Do not SET ROLE. Do not assume supabase_admin.
 -- On hosted project kmigfqhtvmvwopvpjlca the SQL role is postgres (pg_net 0.20.4).
 -- postgres does not own these grants, so the statements below warn and leave
--- them in place. That is a GAP, not a crash. The hosted lockdown cannot be
--- applied from our side. The guard is that schema net is not exposed through
--- the API (Settings > API / pgrst.db_schemas). Engineering Lead is raising the
--- hosted fix with Ben.
+-- them in place. That is a GAP, not a crash.
+--
+-- Hosted remediation: Supabase support runs this file as supabase_admin.
+-- Then `npm run check:pg-net -- --strict` is a required post-deploy step.
+-- It exits non-zero while any row is GAP. Also confirm schema net is not
+-- exposed through the API (Settings > API / pgrst.db_schemas).
 --
 -- When the current role is the grantor (local supabase_admin), this grants
 -- postgres and service_role what dispatch needs, then revokes the rest:

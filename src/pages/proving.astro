@@ -9,8 +9,9 @@ import { ago, compact } from '../lib/format';
 const userId = Astro.locals.user?.id;
 // PV-1: proving games are unlisted (isListable in game-rules.ts). This page only shows the signed-in owner's own
 // proving games; nobody else's are listed anywhere until they pass the headless check.
+const device = Astro.locals.device;
 const games = await Promise.all(
-  (userId ? await listGames({ stage: 'proving', ownerId: userId, includeUnlisted: true, sort: 'new', limit: 40 }) : []).map(async (g) => ({
+  (userId ? await listGames({ stage: 'proving', ownerId: userId, includeUnlisted: true, sort: 'new', limit: 40, device }) : []).map(async (g) => ({
     game: g,
     mine: await getUserRating(g.id, userId),
     passed: (await getHealth(g.id)).checks.filter((c) => c.pass).length,

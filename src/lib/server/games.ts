@@ -3,10 +3,12 @@ import { GRADUATION } from './config';
 import { sql } from './db';
 import { BAYES_PRIOR_VOTES, CREATED_GAME_LOOKUP, LISTABLE_STAGES, PUBLIC_STAGES, assessHealth, canViewGame, visibleStages, clampDurationMs, clampFirstFrameMs, ratingUserId, slugify, uniqueSlug, type HealthCheck, type Stage } from './game-rules';
 import { saveUploadedBundle } from './bundle-store';
+import { filterForDevice, readWithInputSupport, type DeviceKind } from './device';
 import { insertSessionStart, postgresSchemaClient } from './schema-rollout';
 import { bucket } from './supabase';
+import { toInputSupport, type InputSupport } from '../input-support';
 
-export type { Stage };
+export type { Stage, InputSupport };
 
 export { normalizeTags } from './game-rules';
 export type { HealthCheck };
@@ -25,6 +27,8 @@ export interface Game {
   sizeBytes: number;
   hue: number;
   thumb: string | null;
+  /** IS-1: 'mobile' | 'desktop' | 'both' | 'unknown' (declared by the game or detected by the static check). */
+  inputSupport: InputSupport;
   createdAt: number;
   graduatedAt: number | null;
   plays: number;
@@ -47,6 +51,7 @@ interface GameRow {
   size_bytes: number;
   hue: number;
   thumb: string | null;
+  input_support: string | null;
   created_at: Date;
   graduated_at: Date | null;
   plays: number;
@@ -77,6 +82,7 @@ function toGame(r: GameRow): Game {
     sizeBytes: r.size_bytes,
     hue: r.hue,
     thumb: r.thumb,
+    inputSupport: toInputSupport(r.input_support),
     createdAt: r.created_at.getTime(),
     graduatedAt: r.graduated_at?.getTime() ?? null,
     plays: r.plays,
@@ -97,6 +103,8 @@ export interface ListOptions {
   includeUnpublished?: boolean;
   /** Owner-scoped views only (requires ownerId): also return the owner's own unlisted (proving) games. PV-1. */
   includeUnlisted?: boolean;
+  /** Mobile hides input_support = desktop. Omit on the owner dashboard so creators can still manage those games. */
+  device?: DeviceKind;
 }
 
 const ORDER = {
@@ -106,10 +114,12 @@ const ORDER = {
   rated: `(${BAYES_PRIOR_VOTES} * (select coalesce(avg(stars)::float8, 3) from ratings) + coalesce(avg_rating, 0) * rating_count) / (${BAYES_PRIOR_VOTES} + rating_count) desc, rating_count desc, created_at desc`,
 } as const;
 
-export async function listGames({ stage, sort = 'top', tag, creator, ownerId, forkedFrom, limit = 60, includeUnpublished, includeUnlisted }: ListOptions = {}) {
+const hideDesktopOnly = (filter: boolean) => (filter ? sql`and input_support is distinct from 'desktop'` : sql``);
+
+export async function listGames({ stage, sort = 'top', tag, creator, ownerId, forkedFrom, limit = 60, includeUnpublished, includeUnlisted, device }: ListOptions = {}) {
   const stages = visibleStages({ stage, ownerId, includeUnpublished, includeUnlisted });
   if (!stages.length) return [];
-  const rows = await sql<GameRow[]>`
+  const rows = await readWithInputSupport(device === 'mobile', (filter) => sql<GameRow[]>`
     select * from (${gameSelect()}) g
     where true
       and stage in ${sql(stages)}
@@ -117,18 +127,21 @@ export async function listGames({ stage, sort = 'top', tag, creator, ownerId, fo
       ${ownerId ? sql`and owner_id = ${ownerId}` : sql``}
       ${forkedFrom ? sql`and forked_from = ${forkedFrom}` : sql``}
       ${tag ? sql`and ${tag} = any(tags)` : sql``}
+      ${hideDesktopOnly(filter)}
     order by ${sql.unsafe(ORDER[sort] ?? ORDER.top)}
-    limit ${limit}`;
-  return rows.map(toGame);
+    limit ${limit}`);
+  return filterForDevice(rows.map(toGame), device ?? 'desktop');
 }
 
 /** Listable games by id (CM-1 featured row). PV-1: never returns unlisted games. */
-export async function listGamesByIds(ids: string[]): Promise<Game[]> {
+export async function listGamesByIds(ids: string[], device?: DeviceKind): Promise<Game[]> {
   const stages = [...LISTABLE_STAGES];
   if (!ids.length) return [];
-  const rows = await sql<GameRow[]>`
-    select * from (${gameSelect()}) g where id in ${sql(ids)} and stage in ${sql(stages)}`;
-  return rows.map(toGame);
+  const rows = await readWithInputSupport(device === 'mobile', (filter) => sql<GameRow[]>`
+    select * from (${gameSelect()}) g
+    where id in ${sql(ids)} and stage in ${sql(stages)}
+    ${hideDesktopOnly(filter)}`);
+  return filterForDevice(rows.map(toGame), device ?? 'desktop');
 }
 
 /**
@@ -147,17 +160,20 @@ export async function getGame(
   return includeUnpublished || canViewGame(game, viewerId) ? game : null;
 }
 
-export async function listTags(): Promise<{ tag: string; count: number }[]> {
-  return sql<{ tag: string; count: number }[]>`
-    select t as tag, count(*)::int as count from games, unnest(tags) t where stage in ${sql([...LISTABLE_STAGES])} group by t order by count desc, t limit 30`;
+export async function listTags(device?: DeviceKind): Promise<{ tag: string; count: number }[]> {
+  return readWithInputSupport(device === 'mobile', (filter) => sql<{ tag: string; count: number }[]>`
+    select t as tag, count(*)::int as count from games, unnest(tags) t
+    where stage in ${sql([...LISTABLE_STAGES])}
+    ${hideDesktopOnly(filter)}
+    group by t order by count desc, t limit 30`);
 }
 
-export async function platformStats() {
-  const [row] = await sql<{ games: number; live: number; plays: number; creators: number }[]>`
-    select (select count(*)::int from games where stage in ${sql([...LISTABLE_STAGES])}) as games,
-           (select count(*)::int from games where stage = 'live') as live,
-           (select count(*)::int from sessions s join games g on g.id = s.game_id where g.stage in ${sql([...LISTABLE_STAGES])}) as plays,
-           (select count(distinct creator)::int from games where stage in ${sql([...LISTABLE_STAGES])}) as creators`;
+export async function platformStats(device?: DeviceKind) {
+  const [row] = await readWithInputSupport(device === 'mobile', (filter) => sql<{ games: number; live: number; plays: number; creators: number }[]>`
+    select (select count(*)::int from games where stage in ${sql([...LISTABLE_STAGES])} ${hideDesktopOnly(filter)}) as games,
+           (select count(*)::int from games where stage = 'live' ${hideDesktopOnly(filter)}) as live,
+           (select count(*)::int from sessions s join games g on g.id = s.game_id where g.stage in ${sql([...LISTABLE_STAGES])} ${filter ? sql`and g.input_support is distinct from 'desktop'` : sql``}) as plays,
+           (select count(distinct creator)::int from games where stage in ${sql([...LISTABLE_STAGES])} ${hideDesktopOnly(filter)}) as creators`);
   return row;
 }
 

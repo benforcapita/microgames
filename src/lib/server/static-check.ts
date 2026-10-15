@@ -25,6 +25,73 @@ export interface StaticReport {
   status: CheckLevel;
   bytes: number;
   checks: StaticCheck[];
+  /** IS-2: report-only input-support classification (never affects status). */
+  inputSupport?: InputSupportReport;
+}
+
+/* ------------------------------------------------------------------ input support (IS-2) */
+
+export type InputClass = 'mobile' | 'desktop' | 'both' | 'unknown';
+export interface InputSignals { touch: boolean; pointer: boolean; controls: boolean; keyboard: boolean; mouse: boolean }
+export interface InputSupportReport {
+  class: InputClass;
+  detected: InputClass;
+  declared: 'mobile' | 'desktop' | 'both' | null;
+  source: 'declared' | 'detected';
+  signals: InputSignals;
+}
+
+// Simple alternations only (no nested quantifiers): each test is a single linear scan.
+const RE_TOUCH = /\b(?:on)?touch(?:start|move|end|cancel)\b|\bTouchEvent\b|\bchangedTouches\b|\.touches\b|\bmaxTouchPoints\b/;
+const RE_POINTER = /\b(?:on)?pointer(?:down|move|up|cancel)\b|\bPointerEvent\b/i;
+const RE_KEYS = /\b(?:on)?key(?:down|up|press)\b/i;
+const RE_MOUSE = /\b(?:on)?(?:mouse(?:down|up|move)|wheel)\b/i;
+const RE_CONTROLS = /(?:^|[^a-z])(?:d-?pad|joystick|touch-?(?:controls?|buttons?|pad)|virtual-?(?:pad|joystick|buttons?|controls?)|on-?screen-?(?:controls?|buttons?)|mobile-?(?:controls?|buttons?))(?:$|[^a-z])/i;
+const RE_DECLARE = /\binputSupport\s*:\s*['"`](mobile|desktop|both)['"`]/i;
+/** Cap on how much text the input scan reads, so huge files stay inside the time budget. */
+export const INPUT_SCAN_CAP = 2 * 1024 * 1024;
+
+const asDeclared = (v: string | undefined | null): 'mobile' | 'desktop' | 'both' | null => {
+  const x = (v ?? '').trim().toLowerCase();
+  return x === 'mobile' || x === 'desktop' || x === 'both' ? (x as 'mobile' | 'desktop' | 'both') : null;
+};
+
+/**
+ * Classifies which devices a game supports from its markup and JS.
+ * mobile signals: touch events, pointer events, on-screen controls. desktop signals: key events, mouse-only events
+ * (mousedown/up/move, wheel). click is neutral: it fires on tap too.
+ * Mobile + desktop -> 'both'; keys/mouse only -> 'desktop'; mobile only -> 'mobile'; nothing -> 'unknown'.
+ * A declaration (Meshgrounds.declare({ inputSupport }), else the meta tag; same order as boot.js) wins when the code is consistent with it
+ * (its signals are present, or the code shows no input signals at all).
+ */
+export function classifyInputSupport(js: string, tags: { name: string; attrs: Map<string, string> }[]): InputSupportReport {
+  const code = js.length > INPUT_SCAN_CAP ? js.slice(0, INPUT_SCAN_CAP) : js;
+  let attrNames = '', attrIds = '';
+  let meta: 'mobile' | 'desktop' | 'both' | null = null;
+  for (const t of tags) {
+    if (t.name === 'meta' && (t.attrs.get('name') ?? '').trim().toLowerCase() === 'meshgrounds:input-support') meta ??= asDeclared(t.attrs.get('content'));
+    for (const [k, v] of t.attrs) {
+      if (k.startsWith('on')) attrNames += ' ' + k.slice(2);
+      if (k === 'id' || k === 'class' || k.startsWith('data-')) attrIds += ' ' + v;
+    }
+    if (attrNames.length + attrIds.length > INPUT_SCAN_CAP) break;
+  }
+  const evts = code + ' ' + attrNames;
+  const signals: InputSignals = {
+    touch: RE_TOUCH.test(evts),
+    pointer: RE_POINTER.test(evts),
+    controls: RE_CONTROLS.test(attrIds) || RE_CONTROLS.test(code),
+    keyboard: RE_KEYS.test(evts),
+    mouse: RE_MOUSE.test(evts),
+  };
+  const mobile = signals.touch || signals.pointer || signals.controls;
+  const desktop = signals.keyboard || signals.mouse;
+  const detected: InputClass = mobile && desktop ? 'both' : mobile ? 'mobile' : desktop ? 'desktop' : 'unknown';
+  // Same precedence as the runtime (cdn/boot.js, #34): Meshgrounds.declare() beats the meta tag.
+  const declared = asDeclared(RE_DECLARE.exec(code)?.[1]) ?? meta;
+  const consistent = declared !== null && (detected === 'unknown'
+    || (declared === 'mobile' && mobile) || (declared === 'desktop' && desktop) || (declared === 'both' && mobile && desktop));
+  return consistent ? { class: declared!, detected, declared, source: 'declared', signals } : { class: detected, detected, declared, source: 'detected', signals };
 }
 
 const hostsOf = (sources: readonly string[]) => sources.map((s) => new URL(s).hostname.toLowerCase());
@@ -850,6 +917,13 @@ export function analyzeGame(input: string | Uint8Array): StaticReport {
     missing.length ? `Not calling ${missing.map((h) => `Meshgrounds.${h}`).join(', ')} (runtime contract v1.1; guard with ?.).` : 'Calls ready, onPause and onResume.',
     missing.map((h) => `Meshgrounds.${h}`));
 
+  // Input support (IS-2): report-only, always 'pass'. Lexical, capped, so it never blows the time budget.
+  const inputSupport = classifyInputSupport(doc.scripts.map((x) => x.text).join('\n') + '\n' + doc.handlers.join('\n'), doc.tags);
+  const on = (Object.keys(inputSupport.signals) as (keyof InputSignals)[]).filter((k) => inputSupport.signals[k]);
+  add('input-support', 'Input support', 'pass',
+    `${inputSupport.class}${inputSupport.source === 'declared' ? ' (declared)' : ''}. Signals: ${on.length ? on.join(', ') : 'none'}.` +
+      (inputSupport.declared && inputSupport.source === 'detected' ? ` Declared '${inputSupport.declared}' does not match the code.` : ''));
+
   if (budget.skipped) {
     // Only the hooks reminder is softened: a text scan can miss a hook call, and it is never a safety signal.
     // eval, popups, top-navigation, dialogs and syntax keep whatever level they earned.
@@ -859,7 +933,7 @@ export function analyzeGame(input: string | Uint8Array): StaticReport {
         c.message = `Text scan only (deep analysis skipped): ${c.message}`;
     }
   }
-  return finish(checks, bytes);
+  return { ...finish(checks, bytes), inputSupport };
 }
 
 function finish(checks: StaticCheck[], bytes: number): StaticReport {

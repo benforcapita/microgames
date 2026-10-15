@@ -7,12 +7,13 @@ import { compact } from '../lib/format';
 import { getContent, getFeatured } from '../lib/server/content';
 
 // PV-1: only listable games (isListable in game-rules.ts) appear here; proving games are share-by-link only.
+const device = Astro.locals.device;
 const [live, stats, copy, banner, featured] = await Promise.all([
-  listGames({ stage: 'live', sort: 'top', limit: 8 }),
-  platformStats(),
+  listGames({ stage: 'live', sort: 'top', limit: 8, device }),
+  platformStats(device),
   getContent('home.hero'),
   getContent('home.banner'),
-  getFeatured(),
+  getFeatured(8, device),
 ]);
 // Featured games come from featured_games; without any, the hero falls back to the current ordering (top live game).
 const hero = featured[0]?.game ?? live[0];

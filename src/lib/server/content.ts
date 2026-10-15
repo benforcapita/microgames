@@ -6,6 +6,7 @@ import {
   type ContentKey, type ContentRow, type ContentShapes, type FeaturedRow,
 } from './content-core';
 import { sql } from './db';
+import { visibleOnDevice, type DeviceKind } from './device';
 import { listGamesByIds, type Game } from './games';
 import { admin } from './supabase';
 
@@ -27,19 +28,21 @@ export async function getContent<K extends ContentKey>(key: K, locale = 'en'): P
   return resolveContent(await caches.content(), key, locale, MEDIA_PREFIX);
 }
 
-export async function getFeatured(limit = 8): Promise<{ game: Game; label: string }[]> {
+export async function getFeatured(limit = 8, device: DeviceKind = 'desktop'): Promise<{ game: Game; label: string }[]> {
   const rows = (await caches.featured()).filter((r) => r.active);
   if (!rows.length) return [];
   try {
     const ids = rows.map((r) => r.game_id);
     const [games, crash] = await Promise.all([
-      listGamesByIds(ids),
+      listGamesByIds(ids, device),
       sql<{ game_id: string; crash_rate: number | null }[]>`
         select game_id, avg(crashed::int)::float8 as crash_rate from sessions where game_id in ${sql(ids)} group by game_id`,
     ]);
     const rate = new Map(crash.map((c) => [c.game_id, c.crash_rate]));
     const candidates = games.map((x) => ({ ...x, crashRate: rate.get(x.id) ?? null }));
-    return selectFeatured(rows, candidates, Date.now(), { minPlays: FEATURED_BROKEN_MIN_PLAYS, maxCrashRate: FEATURED_BROKEN_MAX_CRASH_RATE }).slice(0, limit);
+    return selectFeatured(rows, candidates, Date.now(), { minPlays: FEATURED_BROKEN_MIN_PLAYS, maxCrashRate: FEATURED_BROKEN_MAX_CRASH_RATE })
+      .filter((item) => visibleOnDevice(item.game.inputSupport, device))
+      .slice(0, limit);
   } catch (e) {
     console.warn('[content] featured games unavailable:', (e as Error)?.message ?? e);
     return [];

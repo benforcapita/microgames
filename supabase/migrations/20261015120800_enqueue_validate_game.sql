@@ -17,18 +17,33 @@ create extension if not exists pg_net with schema extensions;
 -- Harmless attempt to take anon and authenticated off the queue and off
 -- http_post. Migrations run as postgres. supabase_admin owns the pg_net
 -- grants, and postgres is not a member of that role, so these statements warn
--- and change nothing on hosted (and on the local stack). They stay so a future
--- role that can revoke still runs them. They do not drop or alter pg_net.
+-- and change nothing. They stay so a future role that can revoke still runs
+-- them. They do not drop or alter pg_net. This block only names http_post.
 --
--- The privileges that remain — USAGE on schema net, SELECT and INSERT on
--- net.http_request_queue, EXECUTE on net.http_post — are reported by
--- supabase/ops/check_pg_net_privileges.sql. supabase/ops/pg_net_lockdown.sql
--- retries the grants and revokes as whoever is connected, then that check
--- prints PASS or GAP. On hosted our SQL role is postgres, not supabase_admin,
--- so the lockdown cannot be applied from our side. The guard is that net is
--- not in the PostgREST exposed schemas. Confirm that before and after apply
--- (Settings > API, or pgrst.db_schemas). Engineering Lead is raising the
--- hosted fix with Ben.
+-- After apply, anon and authenticated can still EXECUTE all 12 functions in
+-- schema net (pg_net 0.20.4), not only http_post:
+--   net._await_response(request_id bigint)
+--   net._encode_url_with_params_array(url text, params_array text[])
+--   net._http_collect_response(request_id bigint, async boolean)
+--   net._urlencode_string(string character varying)
+--   net.check_worker_is_up()
+--   net.http_collect_response(request_id bigint, async boolean)
+--   net.http_delete(url text, params jsonb, headers jsonb, timeout_milliseconds integer, body jsonb)
+--   net.http_get(url text, params jsonb, headers jsonb, timeout_milliseconds integer)
+--   net.http_post(url text, body jsonb, params jsonb, headers jsonb, timeout_milliseconds integer)
+--   net.wait_until_running()
+--   net.wake()
+--   net.worker_restart()
+-- They also still have USAGE on schema net, and SELECT and INSERT on
+-- net.http_request_queue (those table privileges are granted to PUBLIC).
+-- supabase/ops/check_pg_net_privileges.sql reports each one as GAP until the
+-- lockdown below is applied by the grantor.
+--
+-- Hosted remediation: Supabase support runs supabase/ops/pg_net_lockdown.sql
+-- as supabase_admin. Then `npm run check:pg-net -- --strict` is a required
+-- post-deploy step (it exits non-zero while any row is GAP). Our postgres
+-- role cannot apply that script. Confirm net is absent from Settings > API
+-- (pgrst.db_schemas) before and after apply.
 do $$
 declare
   fn regprocedure;
@@ -123,8 +138,9 @@ end $$;
 -- This migration does not create the table.
 
 -- Posts one game id to validate-game. Returns the pg_net request id, or null
--- when the call could not be queued. A missing URL, a missing Vault secret, or
--- the known default secret skips the call and does not reject the game.
+-- when the call could not be queued. A missing URL, a blank URL, a missing
+-- Vault secret, or the known default secret skips the call and does not
+-- reject the game.
 -- Never raises into the caller's transaction: a down function must not block
 -- saving the game.
 create or replace function private.dispatch_validate_game(p_game_id text, p_reason text)
@@ -140,8 +156,12 @@ declare
   v_known_default constant text := 'local-dev-validate-game';
 begin
   select value into v_url from private.settings where key = 'validate_game_url';
-  if v_url is null or length(btrim(v_url)) = 0 then
-    raise warning 'validate-game dispatch skipped for %: validate_game_url is unset', p_game_id;
+  if v_url is null then
+    raise warning 'validate-game dispatch skipped for %: private.settings validate_game_url is not set', p_game_id;
+    return null;
+  end if;
+  if length(btrim(v_url)) = 0 then
+    raise warning 'validate-game dispatch skipped for %: private.settings validate_game_url is blank (empty or whitespace only)', p_game_id;
     return null;
   end if;
 

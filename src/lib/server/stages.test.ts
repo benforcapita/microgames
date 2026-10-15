@@ -112,7 +112,7 @@ describe('PV-1: every list surface uses the predicate (no scattered stage filter
     const getGameFn = listing.slice(listing.indexOf('export async function getGame'), listing.indexOf('export async function listTags'));
     assert.doesNotMatch(listing.replace(getGameFn, ''), /PUBLIC_STAGES/);
     assert.match(src, /listTags[\s\S]*?LISTABLE_STAGES/);
-    assert.match(src, /export async function listGamesByIds\(ids: string\[\]\)[\s\S]*?LISTABLE_STAGES/);
+    assert.match(src, /export async function listGamesByIds\(ids: string\[\], device\?: DeviceKind\)[\s\S]*?LISTABLE_STAGES/);
   });
   it('pages: home has no proving row, /proving is owner-only, profile/related lists are listable-only, /play is noindex unless live', () => {
     const home = read('../../pages/index.astro');
@@ -125,8 +125,8 @@ describe('PV-1: every list surface uses the predicate (no scattered stage filter
     const play = read('../../pages/play/[slug].astro');
     assert.match(play, /noindex=\{!live\}/);
     assert.match(play, /if \(!live\) Astro\.response\.headers\.set\('X-Robots-Tag', 'noindex, nofollow'\)/);
-    assert.match(play, /listGames\(\{ forkedFrom: game\.id, limit: 50 \}\)/);
-    assert.match(play, /listGames\(\{ creator: game\.creator, limit: 5 \}\)/);
+    assert.match(play, /listGames\(\{ forkedFrom: game\.id, limit: 50, device \}\)/);
+    assert.match(play, /listGames\(\{ creator: game\.creator, limit: 5, device \}\)/);
     assert.match(play, /isListable\(parentGame\)/);
     assert.match(read('../../layouts/Layout.astro'), /noindex && <meta name="robots" content="noindex, nofollow" \/>/);
   });
