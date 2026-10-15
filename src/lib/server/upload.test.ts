@@ -13,7 +13,7 @@ function htmlFile(size: number, name = 'game.html'): File {
 }
 
 function thumbFile(bytes: Uint8Array, type: string, name: string): File {
-  return new File([bytes], name, { type });
+  return new File([new Uint8Array(bytes)], name, { type });
 }
 
 function form(fields: {
@@ -119,11 +119,20 @@ describe('upload validation', { concurrency: false }, () => {
     });
 
     test('rejects disallowed thumbnail MIME types', async () => {
-      for (const type of ['image/gif', 'image/svg+xml', 'image/jpg', 'image/PNG', 'text/plain', 'application/octet-stream', '']) {
+      for (const type of ['image/gif', 'image/svg+xml', 'image/jpg', 'text/plain', 'application/octet-stream', '']) {
         const result = await run({ thumb: thumbFile(new Uint8Array([1, 2, 3]), type, 'shot.png') });
         assert.equal(result.upload, null, type);
         assert.deepEqual(result.errors, ['Thumbnail must be PNG, JPEG or WebP.']);
       }
+    });
+
+    test('keeps the MIME allow-list case-sensitive after File lowercases the type', async () => {
+      assert.equal(UPLOAD.thumbTypes['image/PNG'], undefined);
+      const file = thumbFile(new Uint8Array([1, 2, 3]), 'image/PNG', 'shot.png');
+      assert.equal(file.type, 'image/png');
+      const upload = ok(await run({ thumb: file }));
+      assert.equal(upload.thumb?.type, 'image/png');
+      assert.equal(upload.thumb?.ext, 'png');
     });
 
     test('rejects an allowed extension when the MIME type is not allowed', async () => {
