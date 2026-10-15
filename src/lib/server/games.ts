@@ -116,6 +116,14 @@ export async function listGames({ stage, sort = 'top', tag, creator, ownerId, fo
   return rows.map(toGame);
 }
 
+/** Games by id restricted to the given stages (CM-1 featured row). */
+export async function listGamesByIds(ids: string[], stages: string[]): Promise<Game[]> {
+  if (!ids.length || !stages.length) return [];
+  const rows = await sql<GameRow[]>`
+    select * from (${gameSelect()}) g where id in ${sql(ids)} and stage in ${sql(stages)}`;
+  return rows.map(toGame);
+}
+
 export async function getGame(slugOrId: string): Promise<Game | null> {
   const [row] = await sql<GameRow[]>`${gameSelect()} where g.slug = ${slugOrId} or g.id = ${slugOrId}`;
   return row ? toGame(row) : null;
