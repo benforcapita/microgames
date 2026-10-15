@@ -10,9 +10,16 @@ describe('findMoneyClaims', () => {
     assert.equal(findMoneyClaims('<b>$25</b><span class="muted">minimum payout</span>').length, 1);
     assert.equal(findMoneyClaims('creators get 70 percent of ad revenue').length, 1);
   });
+  it('flags % or $ near income, earn or plays', () => {
+    assert.equal(findMoneyClaims('Creators keep 70% of ad income.').length, 1);
+    assert.equal(findMoneyClaims('Earn $5 per 1,000 plays').length, 1);
+    assert.equal(findMoneyClaims('$0.01 per play').length, 1);
+    assert.equal(findMoneyClaims('you earn 50% from every game').length, 1);
+  });
   it('ignores the soft copy and unrelated numbers', () => {
     assert.deepEqual(findMoneyClaims('We plan to share revenue with creators; details to come.'), []);
     assert.deepEqual(findMoneyClaims('Crash rate ≤ 5% · first frame under 3s for ≥ 90% of plays'), []);
+    assert.deepEqual(findMoneyClaims('Plays measured ≥ 100 · start rate ≥ 40% of plays'), []);
   });
 });
 
