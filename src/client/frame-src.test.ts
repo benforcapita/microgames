@@ -28,3 +28,10 @@ describe('gameFrameSrc', () => {
     );
   });
 });
+
+describe('gameFrameSrc preview token (SP-6)', () => {
+  it('appends pt only when a token is given', () => {
+    assert.equal(gameFrameSrc('http://c', 'g1', 'http://p', '{}', 'abc.def'), 'http://c/g/g1/index.html?embed=http%3A%2F%2Fp&pt=abc.def#mgs=%7B%7D');
+    assert.equal(gameFrameSrc('http://c', 'g1', 'http://p', '{}', null), gameFrameSrc('http://c', 'g1', 'http://p', '{}'));
+  });
+});

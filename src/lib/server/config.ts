@@ -8,6 +8,9 @@ function required(name: string): string {
   return value;
 }
 
+/** SP-6: shared with the game CDN to mint owner preview tokens for pending/rejected games (cdn/preview-token.mjs). */
+export const CDN_PREVIEW_SECRET = env.CDN_PREVIEW_SECRET ?? '';
+
 export const SUPABASE_URL = required('PUBLIC_SUPABASE_URL').replace(/\/$/, '');
 export const SUPABASE_ANON_KEY = required('PUBLIC_SUPABASE_PUBLISHABLE_KEY');
 export const SUPABASE_SERVICE_KEY = required('SUPABASE_SECRET_KEY');

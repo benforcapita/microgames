@@ -40,6 +40,9 @@ describe('getContent fallbacks: locale -> en -> hardcoded default', () => {
     assert.equal(safeHref('/games?sort=new'), '/games?sort=new');
     assert.equal(safeHref('https://example.com/x'), 'https://example.com/x');
     for (const bad of ['javascript:alert(1)', '//evil.com', '/\\evil.com', 'http://plain.com', 'data:text/html,x', ' JaVaScRiPt:1']) assert.equal(safeHref(bad), '', bad);
+    for (const bad of ['/\t/evil.com', '/\n/evil.com', '/\r/evil.com', '/\t\\evil.com', '\t//evil.com', 'java\tscript:alert(1)', '/\r\n\t/evil.com'])
+      assert.equal(safeHref(bad), '', JSON.stringify(bad));
+    assert.equal(safeHref('/ga\tmes'), '/games', 'whitespace inside a same-site path is dropped like the browser would');
     const r = resolveContent([row('home.banner', 'en', { text: 'Hi', link_label: 'Go', link_href: 'javascript:1', tone: 'red' })], 'home.banner', 'en', PREFIX);
     assert.deepEqual([r.link_href, r.link_label, r.tone], ['', '', 'info']);
   });

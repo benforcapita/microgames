@@ -68,7 +68,8 @@ const UNTRIMMED = new Set(['title_before', 'title_after']);
 
 /** Only same-site paths ("/games") or https URLs; never javascript:, data:, protocol-relative, etc. */
 export function safeHref(v: unknown): string {
-  const s = cleanText(v, 500) ?? '';
+  // Browsers drop tab/LF/CR anywhere in a URL, so "/\t/evil.com" would navigate to //evil.com: strip them first.
+  const s = (cleanText(v, 500) ?? '').replace(/[\t\n\r]/g, '');
   if (/^\/(?![/\\])/.test(s)) return s;
   try {
     const u = new URL(s);
