@@ -54,3 +54,24 @@ export async function recordSiteEvent(event: SiteEventInput, userId: string | nu
   await sql`insert into public.site_events (event_type, user_id, game_id, path, details)
     values (${event.type}, ${userId}, (select id from public.games where id = ${event.gameId}), ${event.path}, ${sql.json(event.details as never)})`;
 }
+
+export const SITE_EVENT_WRITE_TIMEOUT_MS = 1500;
+
+/**
+ * Awaits the write, bounded by a timer. Never throws and never hangs past timeoutMs:
+ * on timeout or DB error the event is dropped quietly (a late write may still land).
+ */
+export async function recordSiteEventBounded(
+  event: SiteEventInput,
+  userId: string | null,
+  { write = recordSiteEvent, timeoutMs = SITE_EVENT_WRITE_TIMEOUT_MS }: { write?: typeof recordSiteEvent; timeoutMs?: number } = {},
+): Promise<'ok' | 'timeout' | 'error'> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<'timeout'>((resolve) => { timer = setTimeout(() => resolve('timeout'), timeoutMs); });
+  const written = write(event, userId).then(() => 'ok' as const, () => 'error' as const);
+  try {
+    return await Promise.race([written, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
