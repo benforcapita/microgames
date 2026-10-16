@@ -2,7 +2,7 @@
 
 Rules every game uploaded to Meshground must follow. Source: `docs/FEATURES-v2.md` §3 "Runtime contract".
 
-1. Single self-contained `.html` file, UTF-8, ≤ 5 MB (target ≤ 1 MB). External scripts/styles/fonts only from the hosts the game CDN's CSP allows: scripts, styles and fonts from cdn.jsdelivr.net, unpkg.com, esm.sh, cdnjs.cloudflare.com, ga.jspm.io; plus fonts.googleapis.com (stylesheets only) and fonts.gstatic.com (font files only); no other network (`fetch`, XHR, WebSocket, images) — blocked by CSP anyway.
+1. Single self-contained `.html` file, UTF-8. The whole game, code plus assets, must stay under 4 MB (target ≤ 1 MB). External scripts/styles/fonts only from the hosts the game CDN's CSP allows: scripts, styles and fonts from cdn.jsdelivr.net, unpkg.com, esm.sh, cdnjs.cloudflare.com, ga.jspm.io; plus fonts.googleapis.com (stylesheets only) and fonts.gstatic.com (font files only); no other network (`fetch`, XHR, WebSocket, images) — blocked by CSP anyway.
 2. No reliance on real `localStorage`/cookies/IndexedDB semantics beyond the shim: use `localStorage` for saves (persisted by the portal); keep it ≤ 100 KB JSON.
 3. Drive the loop with `requestAnimationFrame` and `performance.now()` (so automatic pause works); audio via WebAudio/HTMLMediaElement. Optionally listen to `Meshground.onPause/onResume`. The portal pauses during ads, while the tab is hidden, and while the game is scrolled off-screen. Inside the game `window.devicePixelRatio` reports at most 2.
 4. **Recommended (a warning, not required, in v1):** call `Meshground.ready()` once the first playable frame is shown (portal receives `__MG_READY`). Call `Meshground.gameOver(score)` / `levelComplete(level, score)` at loop end (feeds completion-rate telemetry).
@@ -24,7 +24,7 @@ Paste one of these into your AI coding tool together with your game. They are al
 You are helping me prepare a browser game for Meshground (meshground.com). Rewrite the game I paste below so it follows the Meshground runtime contract v1 exactly. Keep the gameplay, art and feel the same; only change what's needed.
 
 THE CONTRACT
-1. Output ONE self-contained HTML file (UTF-8), starting with <!doctype html>. All game code, CSS, and assets inline (images/audio as data: URIs or generated in code). Total size under 5 MB, ideally under 1 MB.
+1. Output ONE self-contained HTML file (UTF-8), starting with <!doctype html>. All game code, CSS, and assets inline (images/audio as data: URIs or generated in code). The whole game, code plus assets, must stay under 4 MB, ideally under 1 MB.
 2. External scripts/styles/fonts are allowed ONLY from: cdn.jsdelivr.net, unpkg.com, esm.sh, cdnjs.cloudflare.com, ga.jspm.io; plus fonts.googleapis.com (stylesheets only) and fonts.gstatic.com (font files only). Pin exact versions. No other network access at all: no fetch/XHR/WebSocket/analytics/ads/backends, no remote images.
 3. The game runs inside a sandboxed iframe (scripts + pointer lock only). Do NOT use: alert/confirm/prompt, window.open, popups, forms that submit, top/parent navigation, real cookies, IndexedDB, service workers, or anything that needs a real origin.
 4. Saving: store progress with localStorage only (Meshground persists it for the player). Keep saved data small (under 100 KB of JSON). Wrap reads in try/catch and handle missing data.
@@ -59,7 +59,7 @@ For EACH item output exactly one line: [PASS], [FAIL] or [WARN], the item name, 
 
 CHECKLIST
 1. Single file: one HTML document, UTF-8, starts with <!doctype html>, no references to local files.
-2. Size: estimate the file size; FAIL if over 5 MB, WARN if over 1 MB.
+2. Size: the whole game, code plus assets, must stay under 4 MB; FAIL if over 4 MB, WARN if over 1 MB.
 3. Network allowlist: list every URL/host in the code. FAIL for any host other than cdn.jsdelivr.net, unpkg.com, esm.sh, cdnjs.cloudflare.com, ga.jspm.io; plus fonts.googleapis.com (stylesheets only) and fonts.gstatic.com (font files only) — FAIL if those two are used for anything else. FAIL for any fetch/XHR/WebSocket/sendBeacon to a server.
 4. Sandbox-safe: FAIL for alert/confirm/prompt, window.open, form submission, top/parent navigation, document.cookie reliance, IndexedDB, service workers.
 5. Loop & timing: uses requestAnimationFrame + performance.now(); WARN if setInterval/setTimeout drive the main loop.

@@ -2,7 +2,8 @@ import crypto from 'node:crypto';
 import { GRADUATION } from './config';
 import { sql } from './db';
 import { BAYES_PRIOR_VOTES, CREATED_GAME_LOOKUP, LISTABLE_STAGES, PUBLIC_STAGES, assessHealth, canViewGame, visibleStages, clampDurationMs, clampFirstFrameMs, ratingUserId, slugify, uniqueSlug, type HealthCheck, type Stage } from './game-rules';
-import { saveUploadedBundle } from './bundle-store';
+import { recordScannedGameAssets } from './asset-manifest';
+import { saveUploadedBundle, type BundleStorage } from './bundle-store';
 import { filterForDevice, readWithInputSupport, type DeviceKind } from './device';
 import { insertSessionStart, postgresSchemaClient } from './schema-rollout';
 import { bucket } from './supabase';
@@ -177,6 +178,13 @@ export async function platformStats(device?: DeviceKind) {
   return row;
 }
 
+function bundleStorage(): BundleStorage {
+  return {
+    upload: (path, bytes, contentType) => bucket().upload(path, bytes, { contentType, upsert: true }),
+    remove: (paths) => bucket().remove(paths),
+  };
+}
+
 export interface NewGame {
   ownerId: string;
   creator: string;
@@ -192,7 +200,7 @@ export interface NewGame {
   stage: 'pending';
 }
 
-export async function createGame(input: NewGame): Promise<Game> {
+export async function createGame(input: NewGame, storage: BundleStorage = bundleStorage()): Promise<Game> {
   const id = crypto.randomBytes(6).toString('base64url');
   const base = slugify(input.title);
   const [clash] = await sql`select 1 from games where slug = ${base}`;
@@ -206,15 +214,13 @@ export async function createGame(input: NewGame): Promise<Game> {
   ];
   await saveUploadedBundle({
     objects,
-    storage: {
-      upload: (path, bytes, contentType) => bucket().upload(path, bytes, { contentType, upsert: true }),
-      remove: (paths) => bucket().remove(paths),
-    },
+    storage,
     insert: () => sql`
       insert into games (id, slug, owner_id, creator, title, tagline, description, tags, license, forked_from, size_bytes, hue, thumb, stage)
       values (${id}, ${slug}, ${input.ownerId}, ${input.creator}, ${input.title}, ${input.tagline}, ${input.description},
               ${input.tags}, ${input.license}, ${input.forkedFrom}, ${input.html.byteLength}, ${crypto.randomInt(0, 360)}, ${thumb}, ${stage})`,
   });
+  await recordScannedGameAssets(sql, id, input.html);
   return (await getGame(id, CREATED_GAME_LOOKUP))!;
 }
 

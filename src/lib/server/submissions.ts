@@ -332,7 +332,7 @@ export function previewSubmissionView(): SubmissionView {
       status: 'running',
       staticReport: {
         checks: [
-          { id: 'size', label: 'File size', level: 'pass', message: '48 KB, under the 5 MB limit.' },
+          { id: 'size', label: 'File size', level: 'pass', message: '48 KB, under the 4 MB limit.' },
           { id: 'canvas', label: 'Draws to a canvas', level: 'pass', message: 'Found a canvas element.' },
           { id: 'hosts', label: 'Network allowlist', level: 'warn', message: 'Scripts stay on cdn.jsdelivr.net. One font host is fonts.googleapis.com.' },
           { id: 'sandbox', label: 'Sandbox-safe APIs', level: 'pass', message: 'No alert, window.open, or form submit.' },
