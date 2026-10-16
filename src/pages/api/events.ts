@@ -1,9 +1,9 @@
 import type { APIRoute } from 'astro';
 import { clientIp } from '../../lib/server/abuse';
-import { parseSiteEvent, recordSiteEvent, siteEventsByIp, SITE_EVENT_MAX_DETAILS_BYTES } from '../../lib/server/site-events';
+import { parseSiteEvent, recordSiteEventBounded, siteEventsByIp, SITE_EVENT_MAX_DETAILS_BYTES } from '../../lib/server/site-events';
 import { sessionUserId } from '../../lib/server/session-user';
 
-/** POST /api/events: page_view | game_launch | error. 204 before the write; logging never blocks or fails a page. */
+/** POST /api/events: page_view | game_launch | error. awaits the insert (bounded at ~1.5s), then 204; a slow or failed write is dropped, never surfaced. */
 export const POST: APIRoute = async (context) => {
   const { request, locals } = context;
   let socketAddress: string | undefined;
@@ -28,6 +28,7 @@ export const POST: APIRoute = async (context) => {
 
   // Session only (middleware verified the claims); the body can never set user_id.
   const userId = sessionUserId(locals.user?.id);
-  recordSiteEvent(parsed.event, userId).catch((err) => console.warn('[events] write failed:', err?.message ?? err));
+  const outcome = await recordSiteEventBounded(parsed.event, userId);
+  if (outcome !== 'ok') console.warn(`[events] dropped (${outcome})`);
   return new Response(null, { status: 204 });
 };
