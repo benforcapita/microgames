@@ -169,6 +169,8 @@ const forkable = fork && fork.license !== 'All rights reserved' ? fork : null;
     watch.stop();
     if (!file) { snap.hidden = true; return; }
     snap.hidden = false;
+    // Off-screen cross-origin iframes may get no animation frames, which capture relies on.
+    snap.scrollIntoView({ block: 'nearest' });
     snapMsg.textContent = 'Capturing a preview from the first frames…';
     watch.start(() => {
       if (snapshot || (thumbInput.files?.length ?? 0) > 0) return;
