@@ -11,7 +11,7 @@ const CSP = `frame-src ${CDN_ORIGIN}${AD_FRAMES}; frame-ancestors 'self'; object
 const UPLOAD_CSP = `frame-src ${CDN_ORIGIN} blob:${AD_FRAMES}; frame-ancestors 'self'; object-src 'none'; base-uri 'self'`;
 
 // Routes that don't need the visitor's identity (hot path: called every few seconds by every player).
-const ANONYMOUS = new Set(['/api/telemetry', '/api/events']);
+const ANONYMOUS = new Set(['/api/telemetry']);
 // Routes a signed-in user without a handle may still visit.
 const ONBOARDING_OK = /^\/(onboarding|auth\/|api\/auth\/|api\/profile)/;
 
