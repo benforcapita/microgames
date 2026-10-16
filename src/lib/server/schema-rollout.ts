@@ -73,7 +73,7 @@ export async function insertSessionStart(
   if (!MISSING_COLUMN.has(errorCode(withUser) ?? '')) throw withUser;
   warnOnce(
     'sessions.user_id',
-    `[meshgrounds] sessions.user_id is not available yet (${errorCode(withUser)}); recording session_start without a user id`,
+    `[meshground] sessions.user_id is not available yet (${errorCode(withUser)}); recording session_start without a user id`,
   );
   const plain = await insertRow(client, 'sessions', { id: input.sessionId, game_id: input.gameId });
   if (plain) throw plain;
@@ -88,7 +88,7 @@ export async function recordGateEvent(
   if (!MISSING_TABLE.has(errorCode(err) ?? '')) throw err;
   warnOnce(
     'gate_events',
-    `[meshgrounds] gate_events is not available yet (${errorCode(err)}); skipping gate event`,
+    `[meshground] gate_events is not available yet (${errorCode(err)}); skipping gate event`,
   );
 }
 

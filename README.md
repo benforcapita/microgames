@@ -1,6 +1,6 @@
-# Meshgrounds
+# Meshground
 
-Meshgrounds is an open exchange for single-file browser games (Three.js, Canvas, WebGL, etc.). It is built with Astro 7 SSR (`@astrojs/node`) on Supabase: Postgres (via `postgres.js` + `DATABASE_URL`), Auth (`@supabase/ssr` cookies), and Storage (private `games` bucket).
+Meshground is an open exchange for single-file browser games (Three.js, Canvas, WebGL, etc.). It is built with Astro 7 SSR (`@astrojs/node`) on Supabase: Postgres (via `postgres.js` + `DATABASE_URL`), Auth (`@supabase/ssr` cookies), and Storage (private `games` bucket).
 
 The platform architecture separates the main portal from a dedicated, cookieless game CDN. User-submitted game bundles are served from a distinct origin inside sandboxed iframes (`sandbox="allow-scripts allow-pointer-lock"`) with strict Content Security Policies (CSP), preventing game code from accessing portal cookies, authentication, local storage, or DOM.
 
@@ -37,7 +37,7 @@ The platform architecture separates the main portal from a dedicated, cookieless
    ```bash
    npm run seed
    ```
-   Loads sample games and synthetic play/rating data into the local database and Storage bucket. To replace existing seed data, pass `-- --force`:
+   Loads the sample games into the local database and Storage bucket with **no** plays or ratings, so every stat on the site is real. Add `-- --synthetic-plays` to also create fake sessions and ratings for testing graduation locally (never on a project real players see). To replace existing seed games (this also deletes their plays and ratings), pass `-- --force`:
    ```bash
    npm run seed -- --force
    ```

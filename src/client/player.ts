@@ -25,6 +25,23 @@ const MAX_SAVE_BYTES = 1024 * 1024;
 const HEARTBEAT_MS = 15_000;
 const CLOUD_SAVE_DEBOUNCE_MS = 1500;
 
+/** Last save each game reported this page load. Restart reuses it, so there's no round trip and no race with the in-flight cloud write. */
+const recentSaves = new Map<string, string>();
+const preloadedSaves = new Map<string, Promise<string>>();
+
+/** Start fetching the cloud save before the player clicks Play, so the launch doesn't wait on it. */
+export function preloadSave(gameId: string, cloud: boolean) {
+  if (cloud && !preloadedSaves.has(gameId)) preloadedSaves.set(gameId, loadSave(gameId, `mg:save:${gameId}`, true));
+}
+
+function takeSave(gameId: string, saveKey: string, cloud: boolean): Promise<string> {
+  const recent = recentSaves.get(gameId);
+  if (recent !== undefined) return Promise.resolve(recent);
+  const preloaded = preloadedSaves.get(gameId);
+  preloadedSaves.delete(gameId);
+  return preloaded ?? loadSave(gameId, saveKey, cloud);
+}
+
 async function loadSave(gameId: string, saveKey: string, cloud: boolean): Promise<string> {
   const local = localStorage.getItem(saveKey) ?? '{}';
   if (!cloud) return local;
@@ -69,6 +86,8 @@ export function mountPlayer(host: HTMLElement, game: PlayerGame, opts: PlayerOpt
 
   const onLoad = () => {
     frame.focus();
+    // A PAUSE posted before boot.js was listening is lost; re-send the current state to the fresh document.
+    if (pauses.size) post('PAUSE');
     if (!destroyed && srcSet && !sessionStartTracked) {
       sessionStartTracked = true;
       track('session_start');
@@ -76,7 +95,7 @@ export function mountPlayer(host: HTMLElement, game: PlayerGame, opts: PlayerOpt
   };
   frame.addEventListener('load', onLoad);
 
-  loadSave(game.id, saveKey, !!opts.cloudSaves).then((save) => {
+  takeSave(game.id, saveKey, !!opts.cloudSaves).then((save) => {
     if (!destroyed) {
       srcSet = true;
       frame.src = gameFrameSrc(opts.cdnOrigin, game.id, location.origin, save, opts.previewToken);
@@ -93,6 +112,7 @@ export function mountPlayer(host: HTMLElement, game: PlayerGame, opts: PlayerOpt
     fetch(`/api/saves/${game.id}`, { method: 'POST', body, headers: { 'Content-Type': 'application/json' }, keepalive: true }).catch(() => {});
   };
   const persist = (json: string) => {
+    recentSaves.set(game.id, json);
     if (!opts.cloudSaves) return localStorage.setItem(saveKey, json);
     pendingSave = json;
     clearTimeout(saveTimer);
@@ -101,21 +121,36 @@ export function mountPlayer(host: HTMLElement, game: PlayerGame, opts: PlayerOpt
 
   const post = (type: string, data: Record<string, unknown> = {}) => frame.contentWindow?.postMessage({ type, ...data }, '*');
 
-  let started = false, completed = false, crashed = false, ready = false, adInFlight = false;
+  let started = false, completed = false, crashed = false, ready = false;
   let activeMs = 0, lastTick = performance.now();
 
+  // The game is paused while any reason holds: an ad is showing, the tab is hidden, or the stage is scrolled
+  // off-screen. boot.js freezes rAF, the game clock and audio, so an unwatched game burns no GPU and doesn't
+  // die off-screen. Active time only counts while nothing pauses it.
+  const pauses = new Set<'ad' | 'hidden' | 'offscreen'>();
+  const tick = () => {
+    const now = performance.now();
+    if (!pauses.size) activeMs += now - lastTick;
+    lastTick = now;
+  };
+  const setPaused = (reason: 'ad' | 'hidden' | 'offscreen', on: boolean) => {
+    if (pauses.has(reason) === on) return;
+    tick();
+    const was = pauses.size > 0;
+    if (on) pauses.add(reason);
+    else pauses.delete(reason);
+    if (was !== pauses.size > 0) post(was ? 'RESUME' : 'PAUSE');
+  };
+
   const runAd = async <T>(show: () => Promise<T>, fallback: T): Promise<T> => {
-    if (!monetized || adInFlight) return fallback;
-    adInFlight = true;
-    post('PAUSE');
+    if (!monetized || pauses.has('ad')) return fallback;
+    setPaused('ad', true);
     try {
       return await show();
     } catch {
       return fallback;
     } finally {
-      adInFlight = false;
-      lastTick = performance.now();
-      post('RESUME');
+      setPaused('ad', false);
     }
   };
 
@@ -177,11 +212,6 @@ export function mountPlayer(host: HTMLElement, game: PlayerGame, opts: PlayerOpt
     opts.onEvent?.('SCORE', { score, best: Math.max(score, best) });
   };
 
-  const tick = () => {
-    const now = performance.now();
-    if (document.visibilityState === 'visible' && !adInFlight) activeMs += now - lastTick;
-    lastTick = now;
-  };
   const heartbeat = setInterval(() => {
     tick();
     if (started) track('heartbeat', activeMs);
@@ -191,7 +221,14 @@ export function mountPlayer(host: HTMLElement, game: PlayerGame, opts: PlayerOpt
     flushSave();
     if (started) track('heartbeat', activeMs, true);
   };
-  const onVisibility = () => (document.visibilityState === 'hidden' ? flush() : (lastTick = performance.now()));
+  const onVisibility = () => {
+    const hidden = document.visibilityState === 'hidden';
+    if (hidden) flush();
+    setPaused('hidden', hidden);
+  };
+  onVisibility();
+  const visibility = new IntersectionObserver(([entry]) => setPaused('offscreen', !entry.isIntersecting));
+  visibility.observe(host);
 
   window.addEventListener('message', onMessage);
   window.addEventListener('pagehide', flush);
@@ -204,6 +241,7 @@ export function mountPlayer(host: HTMLElement, game: PlayerGame, opts: PlayerOpt
       frame.removeEventListener('load', onLoad);
       flush();
       clearInterval(heartbeat);
+      visibility.disconnect();
       window.removeEventListener('message', onMessage);
       window.removeEventListener('pagehide', flush);
       document.removeEventListener('visibilitychange', onVisibility);

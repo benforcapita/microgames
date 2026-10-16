@@ -9,3 +9,4 @@ data/
 .vercel
 test-results/
 playwright-report/
+launch/out/

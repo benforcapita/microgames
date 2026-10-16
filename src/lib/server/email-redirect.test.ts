@@ -27,6 +27,12 @@ describe('auth email redirect allowlist', () => {
     );
   });
 
+  it('allows the meshground.com domain (apex and www) and keeps the Vercel domain working', () => {
+    for (const origin of ['https://meshground.com', 'https://www.meshground.com', PROD]) {
+      assert.equal(redirect(origin, '/me'), `${origin}/auth/callback?next=%2Fme`, origin);
+    }
+  });
+
   it('allows localhost only in dev and never uses SITE_URL', () => {
     const previous = process.env.SITE_URL;
     process.env.SITE_URL = 'http://localhost:3000';
@@ -60,6 +66,10 @@ describe('auth email redirect allowlist', () => {
       'https://meshgrounds-cdn-git-foo-benteam2.vercel.app',
       'https://meshgrounds-x-benteam3.vercel.app',
       'https://MESHGROUNDS.vercel.app',
+      'http://meshground.com',
+      'https://meshground.com.evil.com',
+      'https://evilmeshground.com',
+      'https://meshgrounds.com',
       'https://user@meshgrounds.vercel.app',
       'javascript:alert(1)',
       'http://localhost.evil.com',

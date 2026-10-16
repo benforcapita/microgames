@@ -86,7 +86,7 @@ describe('findMoneyClaims', () => {
     assert.ok(findMoneyClaims("Don't make money from ads").length >= 1);
   });
   it('FINDER-3 extras: make cash, get a cut, earn $$$, earn rewards, money-making', () => {
-    for (const t of ['Make cash from your games', 'Get a cut of every sale', 'Earn $$$ with Meshgrounds', 'Players earn rewards in games and creators too', 'money-making games for indie devs', 'Make-cash games'])
+    for (const t of ['Make cash from your games', 'Get a cut of every sale', 'Earn $$$ with Meshground', 'Players earn rewards in games and creators too', 'money-making games for indie devs', 'Make-cash games'])
       assert.ok(findMoneyClaims(t).length >= 1, t);
   });
   it('keeps the clawback line and monetized status copy unflagged', () => {

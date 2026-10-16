@@ -42,13 +42,13 @@ describe('inputSupport declaration', () => {
   it('contract, Prompt A and Prompt B all name the meta tag and the three values', () => {
     for (const [where, text] of [['contract', contract], ...CREATOR_PROMPTS.map((p) => [`Prompt ${p.id}`, p.text])]) {
       assert.ok(text.includes(`name="${INPUT_SUPPORT_META}"`), `${where}: meta name`);
-      assert.ok(text.includes('Meshgrounds?.declare?.({ inputSupport'), `${where}: declare() form`);
+      assert.ok(text.includes('Meshground?.declare?.({ inputSupport'), `${where}: declare() form`);
       assert.match(text, /(Preferred: [^\n]*declare[^\n]*alternative: [^\n]*meta|declare\?\.\(\{ inputSupport \}\) \(preferred\) or <meta)/, `${where}: declare preferred, meta alternative`);
       assert.doesNotMatch(text, /meshgrounds:inputSupport/, `${where}: old camelCase meta name`);
       for (const v of values) assert.ok(text.includes(v), `${where}: ${v}`);
     }
   });
-  it('meta name matches IS-1 (#34) exactly', () => assert.equal(INPUT_SUPPORT_META, 'meshgrounds:input-support'));
+  it('meta name matches IS-1 (#34) exactly', () => assert.equal(INPUT_SUPPORT_META, 'meshground:input-support'));
   it('contract names the DB column and states mobile=touch, desktop=keyboard/mouse', () => {
     assert.match(contract, /`inputSupport`/);
     assert.match(contract, /`input_support`/);

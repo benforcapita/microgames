@@ -8,7 +8,7 @@ import { getGame, getHealth, getUserRating, listGames } from '../../lib/server/g
 import { CDN_ORIGIN, CDN_PREVIEW_SECRET, GRADUATION } from '../../lib/server/config';
 import { isListable, isPublicStage } from '../../lib/server/game-rules';
 import { mintPreviewToken } from '../../../cdn/preview-token.mjs';
-import { ago, compact, formatCheck, kb } from '../../lib/format';
+import { ago, compact, count, formatCheck, kb } from '../../lib/format';
 import { desktopOnlyNotice, forkParentLinked, playSurface } from '../../lib/server/device';
 
 const { user } = Astro.locals;
@@ -100,7 +100,7 @@ const uploaded = Astro.url.searchParams.has('uploaded');
       <div class="main-col">
         <h1>{game.title}</h1>
         <p class="byline muted">
-          by <a href={`/u/${game.creator}`}>@{game.creator}</a> · {ago(game.createdAt)} · {compact(game.plays)} plays · {game.license}
+          by <a href={`/u/${game.creator}`}>@{game.creator}</a> · {ago(game.createdAt)} · {count(game.plays, "play")} · {game.license}
           {parent && <> · fork of {forkParentLinked(device, parent.inputSupport) ? <a href={`/play/${parent.slug}`}>{parent.title}</a> : parent.title}</>}
         </p>
         {game.tagline && <p class="tagline">{game.tagline}</p>}
@@ -169,6 +169,8 @@ const uploaded = Astro.url.searchParams.has('uploaded');
     border: 1px solid var(--line);
     border-radius: var(--radius);
     overflow: hidden;
+    /* Keep the running game's layout and paint isolated from the rest of the page. */
+    contain: layout paint;
   }
   .stage:fullscreen { border-radius: 0; max-height: none; border: 0; }
   .launch {
@@ -241,7 +243,7 @@ const uploaded = Astro.url.searchParams.has('uploaded');
 </style>
 
 <script>
-  import { mountPlayer, type PlayerHandle } from '../../client/player';
+  import { mountPlayer, preloadSave, type PlayerHandle } from '../../client/player';
 
   // Desktop-only visits render the notice instead of #stage, so this script no-ops there.
   const stage = document.getElementById('stage');
@@ -251,6 +253,10 @@ const uploaded = Astro.url.searchParams.has('uploaded');
     const best = document.getElementById('best')!;
     const showBest = (n: number) => (best.textContent = Number.isFinite(n) ? `Your best: ${n}` : '');
     showBest(Number(localStorage.getItem(`mg:best:${game.id}`) ?? NaN));
+
+    // Warm the cloud save on hover/focus/touch (intent to play) so the click launches straight away.
+    const warm = () => preloadSave(game.id, !!cloud);
+    ['pointerenter', 'focusin', 'touchstart'].forEach((t) => stage.addEventListener(t, warm, { once: true, passive: true }));
 
     let player: PlayerHandle | null = null;
     const start = () => {

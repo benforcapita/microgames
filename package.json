@@ -1,5 +1,5 @@
 {
-  "name": "meshgrounds",
+  "name": "meshground",
   "type": "module",
   "version": "0.1.0",
   "private": true,
@@ -23,7 +23,8 @@
     "e2e": "playwright test",
     "smoke": "node scripts/smoke.mjs",
     "thumbs": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/capture-thumbs.mjs",
-    "backfill:input": "node --experimental-strip-types --disable-warning=ExperimentalWarning --import ./scripts/register-ts.mjs scripts/backfill-input-support.mjs"
+    "backfill:input": "node --experimental-strip-types --disable-warning=ExperimentalWarning --import ./scripts/register-ts.mjs scripts/backfill-input-support.mjs",
+    "launch:video": "node launch/render.mjs"
   },
   "dependencies": {
     "@astrojs/node": "11.1.6",

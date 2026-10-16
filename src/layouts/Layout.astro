@@ -11,11 +11,11 @@ interface Props {
 }
 const {
   title,
-  description = 'Meshgrounds — the open ground for instant 3D web games. Play free browser games, and upload your own single-file Three.js game. Revenue sharing for creators is planned.',
+  description = 'Meshground — the open ground for instant 3D web games. Play free browser games, and upload your own single-file Three.js game. Revenue sharing for creators is planned.',
   ads = false,
   noindex = false,
 } = Astro.props;
-const fullTitle = title ? `${title} · Meshgrounds` : 'Meshgrounds — The Open Ground for Instant 3D Web Games';
+const fullTitle = title ? `${title} · Meshground` : 'Meshground — The Open Ground for Instant 3D Web Games';
 const path = Astro.url.pathname;
 const { profile } = Astro.locals;
 // Send people back where they were after auth, but never bounce them back onto an auth page.
@@ -54,9 +54,9 @@ const nav = [
   <body>
     <header class="site-header">
       <div class="wrap spread">
-        <a href="/" class="logo" aria-label="Meshgrounds home">
+        <a href="/" class="logo" aria-label="Meshground home">
           <img src="/favicon.svg" alt="" width="28" height="28" />
-          <span>mesh<b>grounds</b></span>
+          <span>mesh<b>ground</b></span>
         </a>
         <nav class="row">
           {nav.map((n) => <a href={n.href} aria-current={path.startsWith(n.href) ? 'page' : undefined}>{n.label}</a>)}
@@ -70,7 +70,7 @@ const nav = [
               </>
             )
           }
-          <a class="btn sm" href="/upload">Upload a game</a>
+          <a class="btn sm" href="/upload"><span>Upload<span class="xs-hide"> a game</span></span></a>
         </nav>
       </div>
     </header>
@@ -79,7 +79,7 @@ const nav = [
     </main>
     <footer class="site-footer">
       <div class="wrap spread">
-        <span class="muted">© {new Date().getFullYear()} Meshgrounds · The open ground for instant 3D web games.</span>
+        <span class="muted">© {new Date().getFullYear()} Meshground · The open ground for instant 3D web games.</span>
         <span class="row">
           <a href="/creators#rules" class="muted">Content rules</a>
           <a href="/EXCHANGE_SDK.md" class="muted">EXCHANGE_SDK.md</a>
@@ -98,10 +98,11 @@ const nav = [
     background: #090a0fcc;
     border-bottom: 1px solid var(--line);
   }
-  .site-header .wrap { height: 62px; }
-  .logo { display: flex; align-items: center; gap: 0.55rem; text-decoration: none; font: 500 1.15rem var(--mono); letter-spacing: -0.02em; }
+  .site-header .wrap { height: 62px; flex-wrap: nowrap; }
+  .logo { flex-shrink: 0; display: flex; align-items: center; gap: 0.55rem; text-decoration: none; font: 500 1.15rem var(--mono); letter-spacing: -0.02em; }
   .logo b { color: var(--accent); }
-  nav { gap: 1.25rem; }
+  nav { gap: 1.25rem; flex-wrap: nowrap; min-width: 0; }
+  nav .btn { white-space: nowrap; }
   nav a:not(.btn) { text-decoration: none; color: var(--muted); font-weight: 600; font-size: 0.92rem; }
   nav a:not(.btn):hover, nav a[aria-current='page'] { color: var(--text); }
   nav a.me { font-family: var(--mono); color: var(--accent); }
@@ -109,5 +110,10 @@ const nav = [
   .site-footer a { text-decoration: none; }
   @media (max-width: 640px) {
     nav a:not(.btn):not(.me) { display: none; }
+    nav { gap: 0.6rem; }
+    nav a.me { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  }
+  @media (max-width: 420px) {
+    .xs-hide { display: none; }
   }
 </style>

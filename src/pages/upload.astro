@@ -43,7 +43,7 @@ const forkable = fork && fork.license !== 'All rights reserved' ? fork : null;
       <CreatorPrompts />
     </div>
 
-    <form id="upload-form" class="panel form" method="post" action="/api/games" enctype="multipart/form-data">
+    <form id="upload-form" class="panel form" method="post" action="/api/games" enctype="multipart/form-data" data-max-html={UPLOAD.maxHtmlBytes} data-max-thumb={UPLOAD.maxThumbBytes}>
       {forkable && <input type="hidden" name="forkOf" value={forkable.slug} />}
       <div id="errors" class="errors" role="alert" hidden></div>
       <label>Game file <small>single .html, everything inlined except CDN libraries</small>
@@ -219,8 +219,42 @@ const forkable = fork && fork.license !== 'All rights reserved' ? fork : null;
     showSnapshotChoice();
   });
 
+  const showErrors = (list: string[]) => {
+    const ul = document.createElement('ul');
+    list.forEach((msg) => ul.append(Object.assign(document.createElement('li'), { textContent: msg })));
+    errors.replaceChildren(ul);
+    errors.hidden = false;
+    errors.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  };
+
+  // Cheap checks the server would reject anyway, so a too-big file fails instantly instead of after a full upload.
+  const maxHtml = Number(form.dataset.maxHtml), maxThumb = Number(form.dataset.maxThumb);
+  const precheck = (): string[] => {
+    const out: string[] = [];
+    const game = gameInput.files?.[0], thumb = thumbInput.files?.[0];
+    if (game && !/\.html?$/i.test(game.name)) out.push('Game file must be .html.');
+    if (game && game.size > maxHtml) out.push(`Game file must be under ${maxHtml / 1024 / 1024} MB (yours is ${(game.size / 1024 / 1024).toFixed(1)} MB).`);
+    if (thumb && thumb.size > maxThumb) out.push(`Thumbnail must be under ${Math.round(maxThumb / 1024)} KB.`);
+    if (!thumb && !(usingPreview && snapshot)) out.push('A thumbnail is required. Pick a file or use the captured preview.');
+    return out;
+  };
+
+  /** XHR rather than fetch so we can show upload progress for multi-MB games. */
+  const send = (body: FormData, onProgress: (pct: number) => void) =>
+    new Promise<{ url: string; status: number; text: string }>((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', form.action);
+      xhr.upload.onprogress = (ev) => ev.lengthComputable && onProgress(Math.round((ev.loaded / ev.total) * 100));
+      xhr.onload = () => resolve({ url: xhr.responseURL, status: xhr.status, text: xhr.responseText });
+      xhr.onerror = () => reject(new Error('network'));
+      xhr.send(body);
+    });
+
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
+    const pre = precheck();
+    if (pre.length) return showErrors(pre);
+    errors.hidden = true;
     const btn = form.querySelector<HTMLButtonElement>('button[type="submit"]')!;
     btn.disabled = true;
     btn.textContent = 'Uploading…';
@@ -228,13 +262,14 @@ const forkable = fork && fork.license !== 'All rights reserved' ? fork : null;
       const body = new FormData(form);
       const hasFile = (thumbInput.files?.length ?? 0) > 0;
       if (!hasFile && usingPreview && snapshot) body.set('thumb', dataUrlToFile(snapshot.dataUrl, snapshot.type));
-      const res = await fetch(form.action, { method: 'POST', body });
-      if (res.redirected) return void location.assign(res.url);
-      const data = (await res.json().catch(() => ({ errors: ['Upload failed.'] }))) as { errors: string[] };
-      errors.replaceChildren(Object.assign(document.createElement('ul'), {}));
-      data.errors.forEach((msg) => errors.firstElementChild!.append(Object.assign(document.createElement('li'), { textContent: msg })));
-      errors.hidden = false;
-      errors.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      const res = await send(body, (pct) => (btn.textContent = pct < 100 ? `Uploading… ${pct}%` : 'Checking your game…'));
+      const target = new URL(res.url || form.action, location.href);
+      if (res.status < 400 && target.pathname !== new URL(form.action, location.href).pathname) return void location.assign(target.href);
+      let data: { errors?: string[]; error?: string } = {};
+      try { data = JSON.parse(res.text); } catch {}
+      showErrors(data.errors ?? (data.error ? [data.error] : [`Upload failed (HTTP ${res.status}).`]));
+    } catch {
+      showErrors(['Upload failed. Check your connection and try again.']);
     } finally {
       btn.disabled = false;
       btn.textContent = 'Submit for validation';

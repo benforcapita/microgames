@@ -19,6 +19,7 @@ const { game, class: className, eager = false } = Astro.props;
       alt=""
       aria-hidden="true"
       loading={eager ? 'eager' : 'lazy'}
+      decoding="async"
       fetchpriority={eager ? 'high' : undefined}
     />
   ) : (

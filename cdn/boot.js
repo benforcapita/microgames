@@ -1,4 +1,4 @@
-/* Meshgrounds runtime — injected into every game bundle by the game CDN.
+/* Meshground runtime — injected into every game bundle by the game CDN.
  * Runs before any game code inside a sandboxed, opaque-origin iframe and gives
  * vibe-coded games zero-code platform features:
  *  - telemetry (first frame, explicit ready, first input, crashes) for the Proving Grounds
@@ -6,7 +6,8 @@
  *    (set by the upload page, never by the CDN). Live plays do not capture and do not change WebGL attributes.
  *  - automatic pause (requestAnimationFrame, game clock, WebAudio, media) during ads
  *  - localStorage / sessionStorage / cookie shims (blocked in opaque origins), persisted by the portal
- *  - window.Meshgrounds helper wrapping the postMessage protocol from EXCHANGE_SDK.md
+ *  - window.Meshground helper wrapping the postMessage protocol from EXCHANGE_SDK.md
+ *    (window.Meshgrounds is kept as an alias for games written before the rebrand)
  */
 (function () {
   if (window.__mgBoot) return;
@@ -192,6 +193,21 @@
     });
   } catch (e) {}
 
+  /* ---------- render budget ---------- */
+  // Most games do renderer.setPixelRatio(devicePixelRatio). On 3x phones that is 2.25x the pixels of 2x for no
+  // visible gain, and the GPU fill cost is what drops frames. Report at most 2; screens at <= 2x are untouched.
+  try {
+    var MAX_DPR = 2;
+    var dprDesc = Object.getOwnPropertyDescriptor(window, 'devicePixelRatio') || Object.getOwnPropertyDescriptor(Window.prototype, 'devicePixelRatio');
+    if (dprDesc && dprDesc.get && dprDesc.get.call(window) > MAX_DPR) {
+      var nativeDpr = dprDesc.get;
+      Object.defineProperty(window, 'devicePixelRatio', {
+        configurable: true,
+        get: function () { return Math.min(MAX_DPR, nativeDpr.call(window)); },
+      });
+    }
+  } catch (e) {}
+
   /* ---------- clock + animation-frame control ---------- */
   var nativeNow = performance.now.bind(performance);
   var rAF = window.requestAnimationFrame.bind(window);
@@ -230,13 +246,18 @@
     return nativePlay.call(this);
   };
 
+  // Both event names fire: meshground:* is current, meshgrounds:* is the pre-rebrand name older games listen for.
+  var emit = function (name) {
+    window.dispatchEvent(new Event('meshground:' + name));
+    window.dispatchEvent(new Event('meshgrounds:' + name));
+  };
   function pause() {
     if (paused) return;
     paused = true;
     pausedAt = nativeNow();
     contexts.forEach(function (c) { if (c.state === 'running') { c.__mgResume = true; c.suspend(); } });
     media.forEach(function (el) { if (!el.paused) { el.__mgResume = true; el.pause(); } });
-    window.dispatchEvent(new Event('meshgrounds:pause'));
+    emit('pause');
   }
   function resume() {
     if (!paused) return;
@@ -247,7 +268,7 @@
     var cbs = Array.from(held.values());
     held.clear();
     cbs.forEach(function (cb) { window.requestAnimationFrame(cb); });
-    window.dispatchEvent(new Event('meshgrounds:resume'));
+    emit('resume');
   }
 
   /* ---------- telemetry ---------- */
@@ -284,8 +305,9 @@
 
   var readySent = false;
   // IS-1 input support: a game declares 'mobile' | 'desktop' | 'both' with
-  //   <meta name="meshgrounds:input-support" content="both">   or   Meshgrounds.declare({ inputSupport: 'both' })
-  // (mirrors src/lib/input-support.ts). Undeclared reads as 'unknown'.
+  //   <meta name="meshground:input-support" content="both">   or   Meshground.declare({ inputSupport: 'both' })
+  // (mirrors src/lib/input-support.ts; the pre-rebrand meta name meshgrounds:input-support is still read).
+  // Undeclared reads as 'unknown'.
   var INPUT_SUPPORT = ['mobile', 'desktop', 'both'];
   var parseInputSupport = function (v) {
     v = typeof v === 'string' ? v.trim().toLowerCase() : '';
@@ -294,11 +316,11 @@
   var declaredInput = null;
   var metaInput = function () {
     try {
-      var m = document.querySelector('meta[name="meshgrounds:input-support"]');
+      var m = document.querySelector('meta[name="meshground:input-support"]') || document.querySelector('meta[name="meshgrounds:input-support"]');
       return m ? parseInputSupport(m.getAttribute('content')) : null;
     } catch (e) { return null; }
   };
-  window.Meshgrounds = {
+  window.Meshground = window.Meshgrounds = {
     version: 1,
     // Contract metadata. Unknown keys and invalid values are ignored; returns what is now in effect.
     declare: function (meta) {
@@ -331,8 +353,8 @@
       post('REQUEST_AD_BREAK');
       return p;
     },
-    onPause: function (fn) { window.addEventListener('meshgrounds:pause', fn); },
-    onResume: function (fn) { window.addEventListener('meshgrounds:resume', fn); },
+    onPause: function (fn) { window.addEventListener('meshground:pause', fn); },
+    onResume: function (fn) { window.addEventListener('meshground:resume', fn); },
     get paused() { return paused; },
   };
 })();

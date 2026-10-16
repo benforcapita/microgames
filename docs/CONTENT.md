@@ -25,7 +25,7 @@ Both tables have RLS on with no policies and no `anon`/`authenticated` grants. O
   "title_before": "The open ground for ",
   "title_accent": "instant 3D",
   "title_after": " web games.",
-  "lede": "Hundreds of tiny, strange, brilliant browser games, …"
+  "lede": "Tiny, strange, brilliant browser games, …"
 }
 ```
 `title_accent` is the highlighted part of the headline. Every field is optional, and any field you leave out keeps its default.

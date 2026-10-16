@@ -2,7 +2,7 @@
 import Layout from '../../layouts/Layout.astro';
 import GameCard from '../../components/GameCard.astro';
 import { listGames } from '../../lib/server/games';
-import { compact } from '../../lib/format';
+import { compact, count } from '../../lib/format';
 
 const creator = Astro.params.creator ?? '';
 // PV-1: visitors see only listable games; the creator viewing their own profile also sees their proving games.
@@ -18,7 +18,7 @@ const live = games.filter((g) => g.stage === 'live').length;
   <section class="section wrap">
     <span class="eyebrow">Creator</span>
     <h1>@{creator}</h1>
-    <p class="muted mono">{games.length} games · {live} graduated · {compact(plays)} plays</p>
+    <p class="muted mono">{count(games.length, "game")} · {live} graduated · {count(plays, "play")}</p>
     <div class="grid">{games.map((g) => <GameCard game={g} />)}</div>
   </section>
 </Layout>

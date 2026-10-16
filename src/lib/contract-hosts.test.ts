@@ -41,7 +41,7 @@ for (const [where, text] of docs) {
     assert.deepEqual(lib, [...script].sort(), 'script/style/font hosts = script-src');
     assert.deepEqual([styleOnly], minus(style, script), 'stylesheet-only host = style-src extra');
     assert.deepEqual([fontOnly], minus(font, script), 'font-file-only host = font-src extra');
-    const mentioned = new Set(text.match(HOST)!.filter((h) => !h.endsWith('vercel.app')));
+    const mentioned = new Set(text.match(HOST)!.filter((h) => !h.endsWith('vercel.app') && h !== 'meshground.com'));
     assert.deepEqual([...mentioned].sort(), [...new Set([...script, ...style, ...font])].sort(), 'no other hosts mentioned');
   });
 }

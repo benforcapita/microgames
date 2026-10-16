@@ -1,6 +1,8 @@
 const compactFmt = new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 });
 
 export const compact = (n: number) => compactFmt.format(n);
+/** "1 play", "0 plays", "1.2K plays". */
+export const count = (n: number, one: string, many = `${one}s`) => `${compact(n)} ${n === 1 ? one : many}`;
 export const pct = (n: number | null) => (n === null ? '—' : `${Math.round(n * 100)}%`);
 export const stars = (n: number | null) => (n === null ? '—' : n.toFixed(1));
 export const kb = (bytes: number) => (bytes >= 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : `${Math.ceil(bytes / 1024)} KB`);

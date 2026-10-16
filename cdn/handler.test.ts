@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { createHandler } from './handler.mjs';
+import zlib from 'node:zlib';
+import { createHandler, pickEncoding } from './handler.mjs';
 import { mintPreviewToken, verifyPreviewToken, PREVIEW_MAX_TTL_S } from './preview-token.mjs';
 
 const SECRET = 'test-preview-secret';
@@ -22,14 +23,14 @@ function harness(opts: { previewSecret?: string; now?: () => number } = {}) {
   };
   const handle = createHandler({ supabaseUrl: 'http://sb.local', secret: 'sb_secret_x', webOrigins: PORTAL, previewSecret: opts.previewSecret ?? SECRET, fetch: fakeFetch as typeof fetch, now: opts.now });
   const get = async (path: string, headers: Record<string, string> = {}) => {
-    let status = 0, body = '';
+    let status = 0, body = '', raw: unknown;
     const out: Record<string, string> = {};
     const res = {
       writeHead(s: number, h: Record<string, string>) { status = s; for (const [k, v] of Object.entries(h)) out[k.toLowerCase()] = String(v); },
-      end(b?: unknown) { body = b === undefined ? '' : String(b); },
+      end(b?: unknown) { raw = b; body = b === undefined ? '' : String(b); },
     };
     await handle({ method: 'GET', url: path, headers } as never, res as never);
-    return { status, body, headers: out };
+    return { status, body, raw, headers: out };
   };
   return { get, calls };
 }
@@ -92,7 +93,7 @@ describe('SP-6 CDN stage gate', () => {
     const fromPortal = await get('/g/live0001/index.html?source', { origin: PORTAL });
     assert.equal(fromPortal.status, 200);
     assert.equal(fromPortal.headers['access-control-allow-origin'], PORTAL);
-    assert.equal(fromPortal.headers.vary, 'Origin');
+    assert.equal(fromPortal.headers.vary, 'Origin, Accept-Encoding');
     for (const origin of ['https://evil.example', 'null', 'http://127.0.0.1:9999']) {
       const r = await get('/g/live0001/index.html?source', { origin });
       assert.equal(r.status, 200);
@@ -117,6 +118,106 @@ describe('SP-6 CDN stage gate', () => {
     t += 31_000;
     await get('/g/live0001/index.html');
     assert.equal(calls.filter((c) => c.includes('/rest/v1/games')).length, 2);
+  });
+});
+
+describe('CDN delivery performance', () => {
+  const BIG = `<!doctype html><html><head></head><body><canvas></canvas><script>${'const block = "stack";\n'.repeat(400)}</script></body></html>`;
+  function bigHarness() {
+    const calls: string[] = [];
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => (release = r));
+    const fakeFetch = async (url: string) => {
+      calls.push(url);
+      if (url.includes('/rest/v1/games')) return new Response(JSON.stringify([{ stage: 'live' }]));
+      await gate;
+      return new Response(url.endsWith('index.html') ? BIG : 'IMG');
+    };
+    const handle = createHandler({ supabaseUrl: 'http://sb.local', secret: 'sb_secret_x', webOrigins: PORTAL, fetch: fakeFetch as typeof fetch });
+    const get = async (path: string, headers: Record<string, string> = {}) => {
+      let status = 0, raw: unknown;
+      const out: Record<string, string> = {};
+      const res = {
+        writeHead(s: number, h: Record<string, string>) { status = s; for (const [k, v] of Object.entries(h)) out[k.toLowerCase()] = String(v); },
+        end(b?: unknown) { raw = b; },
+      };
+      await handle({ method: 'GET', url: path, headers } as never, res as never);
+      return { status, raw: raw as Buffer | undefined, headers: out };
+    };
+    return { get, calls, release };
+  }
+
+  it('compresses game HTML with brotli or gzip per Accept-Encoding, and varies on it', async () => {
+    const { get, release } = bigHarness();
+    release();
+    const br = await get('/g/live0001/index.html', { 'accept-encoding': 'gzip, deflate, br' });
+    assert.equal(br.headers['content-encoding'], 'br');
+    assert.match(br.headers.vary, /Accept-Encoding/);
+    const html = zlib.brotliDecompressSync(br.raw!).toString('utf8');
+    assert.match(html, /window\.__mgBoot/);
+    assert.ok(br.raw!.length < html.length / 4, `${br.raw!.length} vs ${html.length}`);
+
+    const gz = await get('/g/live0001/index.html', { 'accept-encoding': 'gzip' });
+    assert.equal(gz.headers['content-encoding'], 'gzip');
+    assert.equal(zlib.gunzipSync(gz.raw!).toString('utf8'), html);
+
+    const plain = await get('/g/live0001/index.html', { 'accept-encoding': 'br;q=0, identity' });
+    assert.equal(plain.headers['content-encoding'], undefined);
+    assert.equal(plain.raw!.toString('utf8'), html);
+    assert.equal(Number(plain.headers['content-length']), plain.raw!.length);
+  });
+
+  it('never compresses images', async () => {
+    const { get, release } = bigHarness();
+    release();
+    const r = await get('/g/live0001/thumb.webp', { 'accept-encoding': 'br' });
+    assert.equal(r.headers['content-encoding'], undefined);
+    assert.match(r.headers['cache-control'], /max-age=3600/);
+  });
+
+  it('answers If-None-Match with 304 and no body (game HTML and thumbnails)', async () => {
+    const { get, release } = bigHarness();
+    release();
+    for (const path of ['/g/live0001/index.html', '/g/live0001/thumb.webp']) {
+      const first = await get(path);
+      assert.ok(first.headers.etag, path);
+      const again = await get(path, { 'if-none-match': first.headers.etag });
+      assert.equal(again.status, 304, path);
+      assert.equal(again.raw, undefined);
+      assert.equal(again.headers.etag, first.headers.etag);
+      assert.equal((await get(path, { 'if-none-match': '"stale"' })).status, 200);
+    }
+    // The CSP still rides on the 304 so the browser refreshes it for this embedder.
+    const html = await get('/g/live0001/index.html');
+    const revalidated = await get('/g/live0001/index.html', { 'if-none-match': html.headers.etag });
+    assert.match(revalidated.headers['content-security-policy'], /frame-ancestors/);
+  });
+
+  it('game HTML ETag differs from the raw source ETag (boot.js is part of the document)', async () => {
+    const { get, release } = bigHarness();
+    release();
+    const game = await get('/g/live0001/index.html');
+    const source = await get('/g/live0001/index.html?source');
+    assert.notEqual(game.headers.etag, source.headers.etag);
+  });
+
+  it('coalesces concurrent cache misses into one Storage fetch', async () => {
+    const { get, calls, release } = bigHarness();
+    const pending = Array.from({ length: 5 }, () => get('/g/live0001/index.html', { 'accept-encoding': 'br' }));
+    await new Promise((r) => setTimeout(r, 10));
+    release();
+    const results = await Promise.all(pending);
+    assert.ok(results.every((r) => r.status === 200));
+    assert.equal(calls.filter((c) => c.includes('/storage/')).length, 1);
+    assert.equal(calls.filter((c) => c.includes('/rest/v1/games')).length, 1);
+  });
+
+  it('pickEncoding prefers br, then gzip, and honours q=0', () => {
+    assert.equal(pickEncoding('gzip, br'), 'br');
+    assert.equal(pickEncoding('gzip'), 'gzip');
+    assert.equal(pickEncoding('br;q=0, gzip;q=0.5'), 'gzip');
+    assert.equal(pickEncoding('identity'), null);
+    assert.equal(pickEncoding(undefined), null);
   });
 });
 
