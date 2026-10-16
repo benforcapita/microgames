@@ -58,6 +58,8 @@ const NEGATABLE: RegExp[] = [
 //    others ('No royalty paperwork') are treated as a plain negation and skipped.
 //  - 'take' is the only verb allowed between negation and term ("We don't take royalties"); 'never offer royalties' flags.
 //  - Rules from before FINDER-3 ignore negation (except the monetize verb, which honours it).
+//  - QA-reported phrasings not handled precisely (accepted for now): 'we pay them', 'creators get a share',
+//    'no payouts withheld'.
 const NEGATED_TAIL = /\b(?:no|never|not|don'?t|won'?t)\s+(?:(?:ever|take)\s+)*$/i;
 const NEGATED_SUBJECT_TAIL = /\bno\s+(?:money|cash|revenue|income|earnings|payouts?)\s+(?:is|are|was|were|gets?|will\s+be)\s+$/i;
 const QUALIFIER = /^\s*(?:caps?|fees?|limits?|delays?|late|later|thresholds?|minimums?|ceilings?|restrictions?|cuts?)\b/i;
