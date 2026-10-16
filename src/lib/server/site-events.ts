@@ -1,4 +1,4 @@
-import { isIP } from 'node:net';
+import { containsPii, truncateText, utf8Bytes, wellFormed } from '../pii';
 import { createLimiter } from './abuse';
 
 /** Client-reportable types. sign_up and upload are written by DB triggers only. */
@@ -10,7 +10,6 @@ export const SITE_EVENT_MAX_DETAILS_BYTES = 4000;
 /** Whole request body, in bytes. Reading stops as soon as this is passed. */
 export const SITE_EVENT_MAX_BODY_BYTES = 6144;
 export const SITE_EVENT_WRITE_TIMEOUT_MS = 1500;
-const DECODE_PASSES = 3;
 
 /** Keyed by client IP in memory only (per server instance). The IP is never stored. */
 export const siteEventsByIp = createLimiter({ windowMs: 60_000, max: 60 });
@@ -22,69 +21,14 @@ export interface SiteEventInput {
   details: Record<string, unknown>;
 }
 
-/* ---------- PII detection ---------- */
+/* PII detection and UTF-8-safe text live in ../pii (shared with the browser sender). */
 
-/** Up to DECODE_PASSES rounds of percent-decoding; a malformed sequence is left as is, never thrown. */
-export function decodeVariants(s: string): string[] {
-  const out = [s];
-  let cur = s;
-  for (let i = 0; i < DECODE_PASSES && /%[0-9a-f]{2}/i.test(cur); i++) {
-    let next: string;
-    try {
-      next = decodeURIComponent(cur);
-    } catch {
-      next = cur.replace(/(?:%[0-9a-f]{2})+/gi, (m) => {
-        try {
-          return decodeURIComponent(m);
-        } catch {
-          return m.replace(/%([0-9a-f]{2})/gi, (_, h) => String.fromCharCode(parseInt(h, 16)));
-        }
-      });
-    }
-    if (next === cur) break;
-    out.push(next);
-    cur = next;
-  }
-  return out;
-}
-
-const EMAIL = /[^\s@"'<>()[\]{},;:]+@[^\s@"'<>()[\]{},;:]+\.[^\s@"'<>()[\]{},;:.]{2,}/u;
-// Obfuscated "@". Bracketed forms ("ben[at]example.com", "(at)", "{at}", "<at>") match any domain.
-// A bare " at " also appears in stack traces ("at main.js:3"), so it needs " dot " or a common email TLD.
-const DOT = String.raw`(?:\s*\.\s*|\s+dot\s+|\s*[[({<]\s*dot\s*[\])}>]\s*)`;
-const EMAIL_BRACKET_AT = new RegExp(String.raw`[\p{L}\p{N}._%+-]+\s*[[({<]\s*at\s*[\])}>]\s*[\p{L}\p{N}-]+(?:${DOT}[\p{L}\p{N}-]+)+`, 'iu');
-const EMAIL_WORD_AT = new RegExp(
-  String.raw`[\p{L}\p{N}._%+-]+\s+at\s+[\p{L}\p{N}-]+(?:\s+dot\s+[\p{L}\p{N}-]+|(?:${DOT}[\p{L}\p{N}-]+)*\.(?:com|net|org|io|co|me|dev|app|ai|edu|gov|info|biz|il|uk|de|fr|es|it|nl|ru|in|jp|ca|au|us|br)\b)`,
-  'iu',
-);
-const IPV4_DOTTED = /(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])/;
-// A whole run of 8-10 digits in the IPv4 integer range (16777216 = 1.0.0.0 ... 4294967295).
-const IPV4_INT = /(?<!\d)\d{8,10}(?!\d)/g;
-
-function hasIpv6(s: string): boolean {
-  // Candidate tokens: hex digits, colons, dots (for ::ffff:1.2.3.4), with an optional %zone or [brackets] stripped.
-  for (const raw of s.split(/[^0-9a-f:.%]+/i)) {
-    if (!raw.includes(':')) continue;
-    const token = raw.replace(/%.*$/, '').replace(/^\.+|\.+$/g, '');
-    // Require a digit: words like "Foo::bar" parse as hex-only IPv6 ("::ba") but are not addresses.
-    if (/\d/.test(token) && isIP(token) === 6) return true;
-  }
-  return false;
-}
-
-function hasIpv4Int(s: string): boolean {
-  for (const m of s.matchAll(IPV4_INT)) {
-    const n = Number(m[0]);
-    if (n >= 16_777_216 && n <= 4_294_967_295) return true;
-  }
-  return false;
-}
-
-/** True if the string, raw or after up to 3 percent-decodes, holds an email (incl. "at" forms) or an IPv4/IPv6 address. */
-export function containsPii(s: string): boolean {
-  return decodeVariants(s).some(
-    (v) => EMAIL.test(v) || EMAIL_BRACKET_AT.test(v) || EMAIL_WORD_AT.test(v) || IPV4_DOTTED.test(v) || hasIpv4Int(v) || hasIpv6(v),
-  );
+/** Lone surrogates anywhere (keys and values) become U+FFFD, so jsonb accepts the row instead of failing it. */
+function wellFormedDeep(v: unknown): unknown {
+  if (typeof v === 'string') return wellFormed(v);
+  if (Array.isArray(v)) return v.map(wellFormedDeep);
+  if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [wellFormed(k), wellFormedDeep(x)]));
+  return v;
 }
 
 function strings(v: unknown, out: string[] = []): string[] {
@@ -103,7 +47,7 @@ export function parseSiteEvent(body: unknown): { ok: true; event: SiteEventInput
   let path: string | null = null;
   if (b.path !== undefined && b.path !== null) {
     if (typeof b.path !== 'string' || b.path.length > SITE_EVENT_MAX_PATH) return { ok: false, reason: 'path' };
-    path = b.path;
+    path = wellFormed(b.path);
   }
   let gameId: string | null = null;
   if (b.gameId !== undefined && b.gameId !== null) {
@@ -113,9 +57,9 @@ export function parseSiteEvent(body: unknown): { ok: true; event: SiteEventInput
   let details: Record<string, unknown> = {};
   if (b.details !== undefined && b.details !== null) {
     if (typeof b.details !== 'object' || Array.isArray(b.details)) return { ok: false, reason: 'details' };
-    details = b.details as Record<string, unknown>;
+    details = wellFormedDeep(b.details) as Record<string, unknown>;
   }
-  if (Buffer.byteLength(JSON.stringify(details), 'utf8') > SITE_EVENT_MAX_DETAILS_BYTES) return { ok: false, reason: 'details-size' };
+  if (utf8Bytes(JSON.stringify(details)) > SITE_EVENT_MAX_DETAILS_BYTES) return { ok: false, reason: 'details-size' };
   // No emails or IPs at rest, in any stored field.
   if ([path ?? '', gameId ?? '', ...strings(details)].some(containsPii)) return { ok: false, reason: 'pii' };
   return { ok: true, event: { type: b.type as SiteEventType, path, gameId, details } };
@@ -147,7 +91,7 @@ export async function recordSiteEventBounded(
     () => 'ok' as const,
     (err: { code?: string; message?: string }) => {
       // DB messages carry no row values for these errors; the event itself is never logged.
-      console.warn(`[events] insert failed: ${err?.code ?? ''} ${String(err?.message ?? err).slice(0, 200)}`);
+      console.warn(`[events] insert failed: ${err?.code ?? ''} ${truncateText(String(err?.message ?? err), 200)}`);
       return err?.code === '23514' ? ('invalid' as const) : ('error' as const);
     },
   );

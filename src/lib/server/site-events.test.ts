@@ -85,6 +85,15 @@ describe('POST /api/events: size caps', () => {
   });
 });
 
+describe('POST /api/events: unicode', () => {
+  it('a lone surrogate is stored as U+FFFD instead of being dropped by jsonb', async () => {
+    const h = harness();
+    assert.equal((await h.send(JSON.stringify({ type: 'error', path: '/p\uD83D', details: { m: 'x\uD83D', ['k\uDE00']: 1 } }))).status, 204);
+    assert.equal(h.rows[0].event.path, '/p\uFFFD');
+    assert.deepEqual(h.rows[0].event.details, { m: 'x\uFFFD', ['k\uFFFD']: 1 });
+  });
+});
+
 describe('POST /api/events: no emails or IPs stored', () => {
   const PII: Record<string, string> = {
     email: 'a.b@example.com', plus: 'ben+qa@example.com', upper: 'BEN@EXAMPLE.COM', idn: 'ben@exämple.de',
