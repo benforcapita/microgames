@@ -36,6 +36,20 @@ const email = p.get('email') ?? '';
             {sent === 'magic' ? 'Check your inbox. We sent you a sign-in link.' : 'Almost there. Confirm your email using the link we just sent.'}
           </p>
         ) : (
+          <>
+          <form method="post" action="/api/auth/google" class="google-form">
+            <input type="hidden" name="next" value={next} />
+            <button class="gsi-btn" type="submit">
+              <svg class="gsi-logo" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="20" height="20" aria-hidden="true" focusable="false">
+                <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
+                <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
+                <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>
+                <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
+              </svg>
+              <span>Continue with Google</span>
+            </button>
+          </form>
+          <p class="or" aria-hidden="true"><span>or use email</span></p>
           <form method="post" action="/api/auth/login" class="form">
             <input type="hidden" name="mode" value={mode} />
             <input type="hidden" name="next" value={next} />
@@ -50,6 +64,7 @@ const email = p.get('email') ?? '';
             }
             <button class="btn" type="submit">{mode === 'magic' ? 'Email me a link' : modes[mode]}</button>
           </form>
+          </>
         )
       }
       <p class="muted small">
@@ -69,4 +84,17 @@ const email = p.get('email') ?? '';
   .bad { background: #ff5d5d1a; border: 1px solid #ff5d5d66; color: #ffb3b3; }
   .good { background: #c4ff3d14; border: 1px solid #c4ff3d55; }
   .small { font-size: 0.82rem; margin: 0; }
+  /* Google sign-in button, light theme per Google's branding guidelines: white fill, #747775 1px border,
+     #1F1F1F label in Roboto Medium 14px, the standard multi-colour G logo, 40px tall. */
+  .google-form { margin: 0; }
+  .gsi-btn {
+    display: flex; align-items: center; justify-content: center; gap: 12px; width: 100%; height: 40px;
+    padding: 0 12px; background: #fff; color: #1f1f1f; border: 1px solid #747775; border-radius: 20px;
+    font: 500 14px/20px Roboto, Arial, sans-serif; letter-spacing: 0.25px; cursor: pointer;
+  }
+  .gsi-btn:hover { background: #f8f9fa; box-shadow: 0 1px 2px #3c40434d, 0 1px 3px 1px #3c404326; }
+  .gsi-btn:focus-visible { outline: 2px solid #4285f4; outline-offset: 2px; }
+  .gsi-logo { flex: none; }
+  .or { display: flex; align-items: center; gap: 0.75rem; margin: 0; font-size: 0.8rem; color: var(--muted, #9aa); }
+  .or::before, .or::after { content: ''; flex: 1; border-top: 1px solid #ffffff22; }
 </style>
