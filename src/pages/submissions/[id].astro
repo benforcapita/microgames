@@ -24,7 +24,10 @@ if (result.status !== 200) return Astro.rewrite('/404');
 const view: SubmissionView = result.view;
 const staticChecks = view.validation?.checks.filter((c) => c.source === 'static') ?? [];
 const runChecks = view.validation?.checks.filter((c) => c.source === 'run') ?? [];
-const stageLabel = { pending: 'Pending', proving: 'Proving Grounds', live: 'Monetized', rejected: 'Rejected' }[view.game.stage];
+// NM-1: the shared submission view (src/lib/server/submissions.ts, unchanged) words the published+live detail in
+// money terms; the page renders money-free copy for that case instead.
+const detail = view.headline === 'Published' && view.game.stage === 'live' ? 'This game has graduated to the main arcade.' : view.detail;
+const stageLabel = { pending: 'Pending', proving: 'Proving Grounds', live: 'Live', rejected: 'Rejected' }[view.game.stage];
 ---
 
 <Layout title={`${view.game.title} · Submission`} description={`Validation status for ${view.game.title}.`}>
@@ -44,7 +47,7 @@ const stageLabel = { pending: 'Pending', proving: 'Proving Grounds', live: 'Mone
         <span class:list={['badge', 'phase', view.phase]} aria-live="polite">{view.headline}</span>
       </span>
     </div>
-    <p class="muted lead">{view.detail}</p>
+    <p class="muted lead">{detail}</p>
 
     {view.published && (
       <p class="row">

@@ -106,3 +106,19 @@ export function findPaymentPromises(text: string): string[] {
   const flat = text.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ');
   return [...flat.matchAll(PROMISE)].map((m) => m[0]);
 }
+
+// NM-1 (Ben, Oct 16): STRICT site-copy mode. The site must not mention payment, payouts, revenue, earnings,
+// monetization or money AT ALL: no negation handling and no allow-list (the old 'Live and monetized.', clawback and
+// 'revenue sharing is planned' exceptions are gone). findMoneyClaims/findPaymentPromises above stay as the finder
+// for creator prompts and docs. Plain 'ad(s)' is not a money term (ads are a player-facing feature: pause during ads).
+export const SITE_MONEY_TERM =
+  /\b(?:pay|pays|paid|paying|payments?|payouts?|paywall|revenue|earn|earns|earned|earning|earnings|moneti[sz]\w*|unmoneti[sz]\w*|money|cash|income|royalt(?:y|ies)|profits?|profitable|dollars?|usd|cents|clawback|clawed|wages?|salary|salaries|pric(?:e|es|ed|ing))\b|(?<![\w$])[$€£]\s?\d/gi;
+
+/** Every money/payment term in `text` (tags stripped), with a little context. Empty = clean. */
+export function findSiteMoneyTerms(text: string): string[] {
+  const flat = text.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ');
+  return [...flat.matchAll(SITE_MONEY_TERM)].map((m) => {
+    const i = m.index ?? 0;
+    return `${m[0]}: …${flat.slice(Math.max(0, i - 40), i + m[0].length + 40).trim()}…`;
+  });
+}
