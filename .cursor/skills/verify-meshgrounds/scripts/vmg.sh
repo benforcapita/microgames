@@ -197,6 +197,9 @@ cmd_down() {
   local d; d=$(evdir)
   # e2e specs rewrite committed screenshots: restore only what this run changed, from the up snapshot.
   restore_assets "$d"
+  # e2e screenshots land in gitignored test-results/screenshots/ (#58): copy them (left in place) into evidence.
+  if [ -d test-results/screenshots ]; then mkdir -p "$d/screenshots"; cp -r test-results/screenshots/. "$d/screenshots/"
+    echo "[vmg] test-results/screenshots: $(find test-results/screenshots -type f | wc -l) file(s) copied to $d/screenshots"; fi
   [ -d "$STATE" ] && cp "$STATE"/*.log "$d/" 2>/dev/null || true
   rm -rf "$STATE"
   docker ps --format '{{.Names}}' | grep "_${PID_}\$" && echo "[vmg] warning: containers remain" || echo "[vmg] no $PID_ containers left"
