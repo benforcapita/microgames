@@ -13,6 +13,7 @@ const FILES: Record<string, string> = {
   'v1/fonts/pixel.woff2': 'WOFF2',
   'v1/data/level.json': '{"a":1}',
   'v1/readme.txt': 'hi',
+  'v1/sprites/hidden.png': 'SECRET',
   'v1/evil.php': '<?php',
   'v1/page.svgz': 'x',
 };
@@ -25,6 +26,13 @@ function harness() {
     if (u.pathname === '/rest/v1/games') {
       const id = (u.searchParams.get('id') ?? '').replace(/^eq\./, '');
       return new Response(JSON.stringify(STAGES[id] ? [{ stage: STAGES[id] }] : []));
+    }
+    if (u.pathname === '/rest/v1/game_assets') {
+      const id = (u.searchParams.get('game_id') ?? '').replace(/^eq\./, '');
+      const version = (u.searchParams.get('version') ?? '').replace(/^eq\./, '');
+      const assetPath = decodeURIComponent((u.searchParams.get('path') ?? '').replace(/^eq\./, ''));
+      const status = id === 'live0001' && version === 'v1' && assetPath === 'sprites/hidden.png' ? 'rejected' : null;
+      return new Response(JSON.stringify(status ? [{ status }] : []), { status: 200 });
     }
     const m = /\/storage\/v1\/object\/authenticated\/games\/([^/]+)\/(.+)$/.exec(u.pathname);
     if (m && STAGES[m[1]] && FILES[m[2]] !== undefined) return new Response(FILES[m[2]]);
@@ -59,6 +67,16 @@ describe('AS-3 versioned asset serving', () => {
       assert.equal(r.status, 200, p);
       assert.equal(r.headers['content-type'], type, p);
     }
+  });
+  it('does not serve an object whose manifest row is rejected', async () => {
+    const { get, calls } = harness();
+    const hidden = await get('/g/live0001/v1/sprites/hidden.png');
+    assert.equal(hidden.status, 404);
+    assert.equal(hidden.body, 'Not found');
+    assert.ok(!calls.some((c) => c.includes('hidden.png') && c.includes('/storage/')));
+    const shown = await get('/g/live0001/v1/sprites/hero.png');
+    assert.equal(shown.status, 200);
+    assert.equal(shown.body, 'PNGDATA');
   });
   it('404s extensions outside the allowlist (even if the object exists)', async () => {
     const { get, calls } = harness();

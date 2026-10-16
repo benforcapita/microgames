@@ -1,0 +1,120 @@
+---
+import Layout from '../../../layouts/Layout.astro';
+import { gameBundleVersion } from '../../../lib/server/asset-manifest';
+import {
+  GAME_VERSION_MAX_BYTES,
+  MAX_ASSET_FILES,
+  assetFlashMessage,
+  assetUsage,
+  formatBytes,
+  listGameAssets,
+} from '../../../lib/server/asset-upload';
+import { sql } from '../../../lib/server/db';
+import { getGame } from '../../../lib/server/games';
+
+const NO_STORE = 'private, no-store';
+Astro.response.headers.set('Cache-Control', NO_STORE);
+const slug = Astro.params.slug ?? '';
+const page = `/games/${encodeURIComponent(slug)}/assets`;
+if (!Astro.locals.user) {
+  const login = Astro.redirect(`/login?next=${encodeURIComponent(page)}`);
+  login.headers.set('Cache-Control', NO_STORE);
+  return login;
+}
+
+const game = await getGame(slug, { includeUnpublished: true });
+if (!game || game.ownerId !== Astro.locals.user.id) return Astro.rewrite('/404');
+
+const version = await gameBundleVersion(sql, game.id);
+const rows = await listGameAssets(sql, game.id, version);
+const usage = await assetUsage(sql, game.id, version);
+const flash = assetFlashMessage(Astro.url.searchParams, rows.map((row) => row.path));
+const total = usage.codeBytes + usage.uploadedBytes;
+const action = `/api/games/${encodeURIComponent(slug)}/assets`;
+---
+
+<Layout title={`${game.title} files`} noindex>
+  <section class="section wrap assets">
+    <span class="eyebrow">Game files</span>
+    <h1>{game.title}</h1>
+    <p class="muted">
+      Version {version}. Code {formatBytes(usage.codeBytes)}, assets {formatBytes(usage.uploadedBytes)}, together {formatBytes(total)} of {formatBytes(GAME_VERSION_MAX_BYTES)}. {usage.fileCount} of {MAX_ASSET_FILES} files.
+      Whole game, code plus assets, under 4 MB; assets over 100 KB get a warning.
+    </p>
+    <p><a href="/me">Back to your games</a></p>
+
+    {flash.error && <p class="panel flash bad" role="alert">{flash.error}</p>}
+    {flash.notice && <p class:list={['panel', 'flash', 'ok', Astro.url.searchParams.get('warn') === '1' && 'warn']} role="status">{flash.notice}</p>}
+
+    <div class="panel table-wrap">
+      {
+        rows.length ? (
+          <table>
+            <thead>
+              <tr>
+                <th>Path</th>
+                <th>Type</th>
+                <th>Status</th>
+                <th>Size</th>
+                <th>Reject reason</th>
+                <th>Upload</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row) => (
+                <tr>
+                  <td class="path">{row.path}</td>
+                  <td>{row.expectedType}</td>
+                  <td>{row.status}</td>
+                  <td>{row.sizeBytes === null ? '—' : formatBytes(row.sizeBytes)}</td>
+                  <td>{row.rejectReason ?? '—'}</td>
+                  <td>
+                    <form method="post" action={action} enctype="multipart/form-data">
+                      <input type="hidden" name="path" value={row.path} />
+                      <input type="file" name="file" required />
+                      <button class="btn sm" type="submit">Upload</button>
+                    </form>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <p class="muted">No files for this version yet.</p>
+        )
+      }
+    </div>
+
+    <form class="panel add" method="post" action={action} enctype="multipart/form-data">
+      <h2>Add file</h2>
+      <input type="hidden" name="source" value="creator" />
+      <label>
+        Path <small>for example sprites/extra.png</small>
+        <input name="path" required maxlength="512" />
+      </label>
+      <label>
+        File
+        <input type="file" name="file" required />
+      </label>
+      <button class="btn" type="submit">Add file</button>
+    </form>
+  </section>
+</Layout>
+
+<style>
+  .assets { display: grid; gap: 1rem; }
+  .assets h1 { margin: 0; }
+  .assets p { margin: 0; }
+  .flash { padding: 0.75rem 1rem; }
+  .flash.bad { background: #ff5d5d1a; border-color: #ff5d5d66; color: #ffb3b3; }
+  .flash.ok { border-color: #c4ff3d55; }
+  .flash.warn { border-color: #ffb340; }
+  .table-wrap { overflow-x: auto; padding: 0.5rem 1rem 1rem; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 0.6rem 0.4rem; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  th { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+  .path { font-family: var(--mono); font-size: 0.85rem; word-break: break-all; }
+  td form { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+  .add { display: grid; gap: 0.9rem; padding: 1.25rem; }
+  .add h2 { margin: 0; font-size: 1.2rem; }
+</style>

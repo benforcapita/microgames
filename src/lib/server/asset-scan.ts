@@ -146,18 +146,24 @@ function isSkippedUrl(value: string): boolean {
   return /^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(value);
 }
 
-function extensionOf(path: string): string {
+export function extensionOf(path: string): string {
   const base = path.slice(path.lastIndexOf('/') + 1);
   const dot = base.lastIndexOf('.');
   if (dot <= 0) return '';
   return base.slice(dot + 1).toLowerCase();
 }
 
+export type CanonicalPath =
+  | { kind: 'path'; path: string }
+  | { kind: 'reject'; raw: string; reason: RejectReason }
+  | { kind: 'skip' };
+
 /**
  * Strip `./`, query, and hash, then percent-decode.
  * Unsafe paths match the game_assets check: leading slash, `..`, backslash, or over 512 characters.
+ * The extension is not consulted; callers decide which suffixes are assets.
  */
-export function classifyAssetPath(raw: string): Classified {
+export function canonicalAssetPath(raw: string): CanonicalPath {
   const original = raw.trim();
   if (!original) return { kind: 'skip' };
   if (isSkippedUrl(original)) return { kind: 'skip' };
@@ -179,10 +185,16 @@ export function classifyAssetPath(raw: string): Classified {
   if (normalized.startsWith('/')) return { kind: 'reject', raw: original, reason: 'absolute' };
   if (normalized.includes('..')) return { kind: 'reject', raw: original, reason: 'dotdot' };
   if (charLength(normalized) > PATH_MAX) return { kind: 'reject', raw: original, reason: 'too_long' };
+  return { kind: 'path', path: normalized };
+}
 
-  const kind = TYPE_BY_EXT[extensionOf(normalized)];
+/** Same path rules as `canonicalAssetPath`, then the scan extension table. Bundle files (html/js/css) are skipped. */
+export function classifyAssetPath(raw: string): Classified {
+  const canonical = canonicalAssetPath(raw);
+  if (canonical.kind !== 'path') return canonical;
+  const kind = TYPE_BY_EXT[extensionOf(canonical.path)];
   if (!kind || kind === 'bundle') return { kind: 'skip' };
-  return { kind: 'asset', path: normalized, expectedType: kind };
+  return { kind: 'asset', path: canonical.path, expectedType: kind };
 }
 
 function cssUrls(css: string): string[] {
