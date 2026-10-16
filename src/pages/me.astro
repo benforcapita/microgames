@@ -45,6 +45,7 @@ const deleted = Astro.url.searchParams.has('deleted');
                   <span class:list={['badge', g.stage]}>{{ live: 'Monetized', proving: 'Proving Grounds', pending: 'Validating…', rejected: 'Rejected' }[g.stage]}</span>{' '}
                   {count(g.plays, "play")} · ★ {stars(g.avgRating)} ({g.ratingCount}) · uploaded {ago(g.createdAt)}
                 </p>
+                <a href={`/games/${g.slug}/assets`}>Assets</a>
               </div>
               <form method="post" action={`/api/games/${g.slug}/delete`} class="del" data-confirm={`Delete “${g.title}” permanently? Plays, ratings and player saves will be removed.`}>
                 <button class="btn ghost sm" type="submit">Delete</button>

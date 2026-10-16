@@ -1,0 +1,73 @@
+import type { APIRoute } from 'astro';
+import { classifyAssetPath } from '../../../../lib/server/asset-scan';
+import { gameBundleVersion } from '../../../../lib/server/asset-manifest';
+import {
+  assessAssetUpload,
+  assetUploadsByUser,
+  assetUploadQuery,
+  assetUsage,
+  findGameAsset,
+  saveAssetDecision,
+} from '../../../../lib/server/asset-upload';
+import { sql } from '../../../../lib/server/db';
+import { getGame } from '../../../../lib/server/games';
+import { bucket } from '../../../../lib/server/supabase';
+
+export const POST: APIRoute = async ({ request, params, locals, redirect }) => {
+  const slug = params.slug ?? '';
+  const page = `/games/${encodeURIComponent(slug)}/assets`;
+  const back = (query: Record<string, string>) => redirect(`${page}?${new URLSearchParams(query)}`, 303);
+
+  if (!locals.user) return redirect(`/login?next=${encodeURIComponent(page)}`, 303);
+  const game = await getGame(slug, { includeUnpublished: true });
+  if (!game || game.ownerId !== locals.user.id) return new Response('Not found', { status: 404 });
+
+  const rateAllowed = assetUploadsByUser.hit(locals.user.id);
+  const form = await request.formData().catch(() => null);
+  const file = form?.get('file');
+  const bytes = file instanceof File ? new Uint8Array(await file.arrayBuffer()) : new Uint8Array();
+  const version = await gameBundleVersion(sql, game.id);
+  const rawPath = String(form?.get('path') ?? '');
+  const classified = classifyAssetPath(rawPath);
+  const [existing, usage] = await Promise.all([
+    classified.kind === 'asset' ? findGameAsset(sql, game.id, version, classified.path) : Promise.resolve(null),
+    assetUsage(sql, game.id, version),
+  ]);
+  const decision = assessAssetUpload({
+    userId: locals.user.id,
+    ownerId: game.ownerId,
+    rawPath,
+    adding: form?.get('source') === 'creator',
+    bytes,
+    existing,
+    codeBytes: usage.codeBytes,
+    uploadedBytes: usage.uploadedBytes,
+    fileCount: usage.fileCount,
+    rateAllowed,
+  });
+
+  if (decision.kind === 'login') return redirect(`/login?next=${encodeURIComponent(page)}`, 303);
+  if (decision.kind === 'not-found') return new Response('Not found', { status: 404 });
+  if (decision.kind === 'reject' || decision.kind === 'store') {
+    try {
+      const saved = await saveAssetDecision(
+        sql,
+        {
+          upload: async (path, body, contentType) => {
+            const put = await bucket().upload(path, body, { contentType, upsert: true });
+            return { error: put.error ? { message: put.error.message } : null };
+          },
+        },
+        game.id,
+        version,
+        decision,
+        bytes,
+      );
+      if (!saved.ok) return back({ error: saved.code });
+    } catch (error) {
+      console.error(`Asset upload failed for game ${game.id}`, error);
+      return back({ error: 'storage' });
+    }
+  }
+  return back(assetUploadQuery(decision));
+};
