@@ -96,10 +96,10 @@ const forkable = fork && fork.license !== 'All rights reserved' ? fork : null;
   .agree input { width: auto; margin-right: 0.4rem; }
   .errors { background: #ff5d5d1a; border: 1px solid #ff5d5d66; color: #ffb3b3; border-radius: 10px; padding: 0.75rem 1rem; }
   .errors ul { margin: 0; padding-left: 1.1rem; }
-  .snap { display: grid; grid-template-columns: 320px 1fr; gap: 1rem; align-items: center; }
+  .snap { display: grid; grid-template-columns: minmax(0, 320px) 1fr; gap: 1rem; align-items: center; }
   .snap[hidden], .snap [hidden] { display: none !important; }
-  .stage { position: relative; width: 320px; height: 180px; overflow: hidden; border-radius: 10px; background: #000; border: 1px solid var(--line); }
-  .stage iframe { width: 640px; height: 360px; border: 0; transform: scale(0.5); transform-origin: top left; }
+  .stage { position: relative; width: 100%; max-width: 320px; height: auto; aspect-ratio: 16 / 9; overflow: hidden; border-radius: 10px; background: #000; border: 1px solid var(--line); }
+  .stage iframe { width: 200%; height: 200%; border: 0; transform: scale(0.5); transform-origin: top left; }
   .stage img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; background: #000; }
   .snap-copy { display: grid; gap: 0.6rem; align-content: center; }
   .snap-copy p { margin: 0; }
