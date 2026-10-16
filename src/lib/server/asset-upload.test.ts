@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import { describe, it } from 'node:test';
+import { ASSET_MIME } from '../../../cdn/handler.mjs';
+import type { AssetDb } from './asset-manifest.ts';
 import {
   ASSET_SIZE_WARN_BYTES,
   ASSET_SIZE_WARNING,
@@ -8,23 +10,51 @@ import {
   ASSET_UPLOAD_WINDOW_MS,
   GAME_VERSION_MAX_BYTES,
   MAX_ASSET_FILES,
+  UPLOAD_MIME,
   assessAssetUpload,
   assetFlashMessage,
   assetObjectPath,
+  assetPathRejection,
   assetUploadQuery,
   createAssetUploadLimiter,
   gameTooBigMessage,
+  saveAssetDecision,
   type AssessAssetInput,
+  type AssetStorage,
   type ExistingAsset,
 } from './asset-upload.ts';
 
-const PNG = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
-
-function png(size: number): Uint8Array {
-  const bytes = new Uint8Array(size);
-  bytes.set(PNG);
-  return bytes;
+function chunk(type: string, data: Uint8Array): Uint8Array {
+  const out = new Uint8Array(12 + data.length);
+  new DataView(out.buffer).setUint32(0, data.length);
+  out.set(new TextEncoder().encode(type), 4);
+  out.set(data, 8);
+  return out;
 }
+
+const PNG_SIG = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const PNG_IHDR = chunk('IHDR', Uint8Array.from([0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0]));
+const PNG_IEND = chunk('IEND', new Uint8Array());
+const PNG_MIN = PNG_SIG.byteLength + PNG_IHDR.byteLength + PNG_IEND.byteLength;
+
+function png(size = PNG_MIN): Uint8Array {
+  const parts = [PNG_SIG, PNG_IHDR];
+  if (size !== PNG_MIN) {
+    const dataLen = size - PNG_MIN - 12;
+    if (dataLen < 0) throw new Error(`png size ${size} is too small`);
+    parts.push(chunk('tEXt', new Uint8Array(dataLen)));
+  }
+  parts.push(PNG_IEND);
+  const out = new Uint8Array(parts.reduce((n, part) => n + part.byteLength, 0));
+  let offset = 0;
+  for (const part of parts) {
+    out.set(part, offset);
+    offset += part.byteLength;
+  }
+  return out;
+}
+
+const PNG = png();
 
 const listed: ExistingAsset = {
   path: 'sprites/hero.png',
@@ -77,7 +107,7 @@ describe('asset upload ownership and rate limit', () => {
 
 describe('asset upload paths', () => {
   it('rejects unsafe paths and paths that are not listed, and accepts an added creator file', () => {
-    for (const rawPath of ['../secrets.png', '/etc/passwd.png', 'sprites\\hero.png', 'https://evil.test/a.png', 'index.html']) {
+    for (const rawPath of ['../secrets.png', '/etc/passwd.png', 'sprites\\hero.png', 'https://evil.test/a.png']) {
       const decision = assessAssetUpload(input({ rawPath, existing: null }));
       assert.equal(decision.kind, 'flash', rawPath);
       if (decision.kind === 'flash') assert.equal(decision.code, 'path');
@@ -132,8 +162,8 @@ describe('asset upload bytes', () => {
     }));
     assert.equal(audio.kind, 'reject');
     if (audio.kind === 'reject') {
-      assert.equal(audio.code, 'mismatch');
-      assert.equal(audio.message, 'This file is image, but the path expects audio.');
+      assert.equal(audio.code, 'extension');
+      assert.equal(audio.message, 'This file is png, but the path expects ogg.');
     }
   });
 
@@ -144,7 +174,7 @@ describe('asset upload bytes', () => {
       bytes: new TextEncoder().encode('{"level":1}'),
     }));
     assert.equal(json.kind, 'store');
-    if (json.kind === 'store') assert.equal(json.contentType, 'application/json');
+    if (json.kind === 'store') assert.equal(json.contentType, 'application/json; charset=utf-8');
 
     const asText = assessAssetUpload(input({
       rawPath: 'readme.txt',
@@ -230,5 +260,195 @@ describe('asset upload bytes', () => {
     assert.equal(notice.notice, 'Uploaded sprites/hero.png. This asset is over 100 KB.');
     const forged = assetFlashMessage(new URLSearchParams({ uploaded: '../secret.png', warn: '1' }), ['sprites/hero.png']);
     assert.equal(forged.notice, null);
+  });
+});
+
+describe('asset upload allowlist', () => {
+  it('accepts the same extensions the CDN serves', () => {
+    assert.deepEqual(UPLOAD_MIME, ASSET_MIME);
+  });
+
+  it('rejects xml, csv, and md, and a png stored under an svg path', () => {
+    for (const rawPath of ['notes.xml', 'scores.csv', 'readme.md']) {
+      const decision = assessAssetUpload(input({ rawPath, existing: null, adding: true, bytes: new TextEncoder().encode('hello') }));
+      assert.equal(decision.kind, 'flash', rawPath);
+      if (decision.kind === 'flash') assert.equal(decision.code, 'path');
+    }
+    const svg = assessAssetUpload(input({
+      rawPath: 'sprites/hero.svg',
+      existing: { path: 'sprites/hero.svg', expectedType: 'image', status: 'missing', sizeBytes: null, source: 'scan' },
+      bytes: PNG,
+    }));
+    assert.equal(svg.kind, 'reject');
+    if (svg.kind === 'reject') {
+      assert.equal(svg.message, 'This file is png, but the path expects svg.');
+      const flash = assetFlashMessage(new URLSearchParams(assetUploadQuery(svg)), ['sprites/hero.svg']);
+      assert.equal(flash.error, svg.message);
+    }
+  });
+
+  it('accepts js, mjs, css, and wasm, and still rejects an HTML document', () => {
+    const js = assessAssetUpload(input({
+      rawPath: 'game.js',
+      existing: null,
+      adding: true,
+      bytes: new TextEncoder().encode('const tag = "<script>";'),
+    }));
+    assert.equal(js.kind, 'store');
+    if (js.kind === 'store') {
+      assert.equal(js.expectedType, 'text');
+      assert.equal(js.contentType, 'text/javascript; charset=utf-8');
+    }
+    const mjs = assessAssetUpload(input({
+      rawPath: 'lib/add.mjs',
+      existing: null,
+      adding: true,
+      bytes: new TextEncoder().encode('export const n = 1;\n'),
+    }));
+    assert.equal(mjs.kind, 'store');
+    if (mjs.kind === 'store') assert.equal(mjs.contentType, 'text/javascript; charset=utf-8');
+
+    const css = assessAssetUpload(input({
+      rawPath: 'style.css',
+      existing: null,
+      adding: true,
+      bytes: new TextEncoder().encode('body { color: #111; }'),
+    }));
+    assert.equal(css.kind, 'store');
+    if (css.kind === 'store') assert.equal(css.contentType, 'text/css; charset=utf-8');
+
+    const wasm = assessAssetUpload(input({
+      rawPath: 'add.wasm',
+      existing: null,
+      adding: true,
+      bytes: Uint8Array.from([0x00, 0x61, 0x73, 0x6d, 1, 0, 0, 0]),
+    }));
+    assert.equal(wasm.kind, 'store');
+    if (wasm.kind === 'store') {
+      assert.equal(wasm.expectedType, 'wasm');
+      assert.equal(wasm.contentType, 'application/wasm');
+    }
+    assert.equal(assetObjectPath('abcdEF12', 1, 'game.js'), 'abcdEF12/1/game.js');
+
+    const document = assessAssetUpload(input({
+      rawPath: 'game.js',
+      existing: null,
+      adding: true,
+      bytes: new TextEncoder().encode('<!doctype html><html></html>'),
+    }));
+    assert.equal(document.kind, 'reject');
+    if (document.kind === 'reject') assert.equal(document.code, 'markup');
+
+    const styled = assessAssetUpload(input({
+      rawPath: 'style.css',
+      existing: null,
+      adding: true,
+      bytes: new TextEncoder().encode('body { content: "<script>"; }'),
+    }));
+    assert.equal(styled.kind, 'reject');
+    if (styled.kind === 'reject') assert.equal(styled.code, 'markup');
+  });
+
+  it('rejects a PNG that has <html><script> appended', () => {
+    const polyglot = new Uint8Array(PNG.byteLength + 20);
+    polyglot.set(PNG);
+    polyglot.set(new TextEncoder().encode('<html><script>'), PNG.byteLength);
+    const decision = assessAssetUpload(input({ bytes: polyglot }));
+    assert.equal(decision.kind, 'reject');
+    if (decision.kind === 'reject') assert.equal(decision.code, 'markup');
+  });
+});
+
+describe('asset path encoding', () => {
+  it('answers 400 for a NUL, a control character, or a bad percent-encoding', () => {
+    for (const rawPath of ['sprites/%00hero.png', 'sprites/%0a.png', 'sprites/%ZZ.png', 'sprites/%', 'sprites/\u0000hero.png']) {
+      const rejection = assetPathRejection(rawPath);
+      assert.equal(rejection?.status, 400, rawPath);
+      assert.match(rejection?.message ?? '', /NUL|control character|not encoded correctly/, rawPath);
+      const decision = assessAssetUpload(input({ rawPath }));
+      assert.equal(decision.kind, 'bad-request', rawPath);
+      if (decision.kind === 'bad-request') assert.equal(decision.status, 400);
+    }
+    assert.equal(assetPathRejection('sprites/hero.png'), null);
+  });
+});
+
+describe('rejected replacement stays consistent with storage', () => {
+  it('keeps the previous object and its counted size when the new bytes are rejected', async () => {
+    const previousBytes = png(1000);
+    const objects = new Map<string, Uint8Array>([['abcdEF12/1/sprites/hero.png', previousBytes]]);
+    let writes = 0;
+    let uploads = 0;
+    const storage: AssetStorage = {
+      async upload(path, bytes) {
+        uploads += 1;
+        objects.set(path, bytes);
+        return { error: null };
+      },
+      async remove(path) {
+        objects.delete(path);
+        return { error: null };
+      },
+    };
+    const sql = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
+      if (strings.join(' ').includes('insert into')) writes += 1;
+      void values;
+      return [];
+    }) as unknown as AssetDb;
+
+    const polyglot = new Uint8Array(PNG.byteLength + 20);
+    polyglot.set(PNG);
+    polyglot.set(new TextEncoder().encode('<html><script>'), PNG.byteLength);
+    const decision = assessAssetUpload(input({
+      bytes: polyglot,
+      existing: { ...listed, status: 'uploaded', sizeBytes: previousBytes.byteLength },
+      uploadedBytes: previousBytes.byteLength,
+    }));
+    assert.equal(decision.kind, 'reject');
+    if (decision.kind !== 'reject') return;
+    const saved = await saveAssetDecision(sql, storage, 'abcdEF12', 1, decision, polyglot, {
+      status: 'uploaded',
+      sizeBytes: previousBytes.byteLength,
+    });
+    assert.equal(saved.ok, true);
+    assert.equal(uploads, 0);
+    assert.equal(writes, 0);
+    const stored = objects.get('abcdEF12/1/sprites/hero.png');
+    assert.ok(stored);
+    const counted = previousBytes.byteLength;
+    assert.equal(stored?.byteLength, counted);
+    assert.notEqual(Buffer.from(stored ?? []).toString('hex'), Buffer.from(polyglot).toString('hex'));
+  });
+
+  it('does not drop the counted size when a replacement would pass 4 MB', async () => {
+    const previousBytes = png(1024);
+    const objects = new Map<string, Uint8Array>([['abcdEF12/1/sprites/hero.png', previousBytes]]);
+    const storage: AssetStorage = {
+      async upload(path, bytes) {
+        objects.set(path, bytes);
+        return { error: null };
+      },
+      async remove() {
+        throw new Error('the accepted object must stay');
+      },
+    };
+    const sql = (async () => {
+      throw new Error('the uploaded row must stay');
+    }) as unknown as AssetDb;
+    const decision = assessAssetUpload(input({
+      codeBytes: GAME_VERSION_MAX_BYTES - 100,
+      uploadedBytes: previousBytes.byteLength,
+      existing: { ...listed, status: 'uploaded', sizeBytes: previousBytes.byteLength },
+      bytes: png(1024 * 1024),
+    }));
+    assert.equal(decision.kind, 'reject');
+    if (decision.kind !== 'reject') return;
+    assert.equal(decision.code, 'too-big');
+    const saved = await saveAssetDecision(sql, storage, 'abcdEF12', 1, decision, png(1024 * 1024), {
+      status: 'uploaded',
+      sizeBytes: previousBytes.byteLength,
+    });
+    assert.equal(saved.ok, true);
+    assert.equal(objects.get('abcdEF12/1/sprites/hero.png')?.byteLength, previousBytes.byteLength);
   });
 });

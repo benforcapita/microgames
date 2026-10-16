@@ -220,6 +220,20 @@ export function createHandler(cfg) {
     return hit ? hit.value : loadStage(id);
   }
 
+  /** Row status for one versioned asset, or null when the manifest has no row. Throws on lookup errors. */
+  async function assetRowStatus(id, version, assetPath) {
+    const params = new URLSearchParams({
+      select: 'status',
+      game_id: `eq.${id}`,
+      version: `eq.${version}`,
+      path: `eq.${assetPath}`,
+    });
+    const res = await doFetch(`${SUPABASE_URL}/rest/v1/game_assets?${params}`, { headers });
+    if (!res.ok) throw new Error(`asset status lookup failed: HTTP ${res.status}`);
+    const rows = await res.json();
+    return Array.isArray(rows) && rows[0]?.status ? String(rows[0].status) : null;
+  }
+
   /** 304 if the client already has `etag`, else 200 with the (possibly compressed) body. */
   async function sendCacheable(req, res, entry, { etag, name, make, compress, headers: h }) {
     if (etagMatches(req.headers['if-none-match'], etag)) return send(res, 304, undefined, { ETag: etag, ...h });
@@ -248,6 +262,12 @@ export function createHandler(cfg) {
       const preview = !PUBLIC_STAGES.has(stage ?? '') && stage !== null && verifyPreviewToken(PREVIEW_SECRET, id, url.searchParams.get('pt'));
       if (!stage || (!PUBLIC_STAGES.has(stage) && !preview)) return send(res, 404, 'Not found');
       const privateCache = preview ? { 'Cache-Control': 'private, no-store' } : null;
+
+      if (asset) {
+        // A rejected upload must not stay downloadable just because its object is still in the bucket.
+        const assetPath = asset.key.slice(asset.version.length + 1);
+        if ((await assetRowStatus(id, asset.version, assetPath)) === 'rejected') return send(res, 404, 'Not found');
+      }
 
       const entry = await fetchObject(`${id}/${asset ? asset.key : file}`);
       if (!entry.value) return send(res, 404, 'Not found');

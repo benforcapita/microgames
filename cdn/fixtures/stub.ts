@@ -14,6 +14,7 @@ export function fixtureHandler(opts: { webOrigins?: string; cdnOrigin?: string }
       const id = (u.searchParams.get('id') ?? '').replace(/^eq\./, '');
       return new Response(JSON.stringify(STAGES[id] ? [{ stage: STAGES[id] }] : []));
     }
+    if (u.pathname === '/rest/v1/game_assets') return new Response('[]', { status: 200 });
     const m = /\/storage\/v1\/object\/authenticated\/games\/([^/]+)\/(.+)$/.exec(u.pathname);
     const file = m && DIRS[m[1]] ? new URL(`./${DIRS[m[1]]}/${m[2]}`, import.meta.url) : null;
     if (file && fs.existsSync(file)) return new Response(fs.readFileSync(file));

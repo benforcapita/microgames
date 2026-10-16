@@ -1,8 +1,9 @@
 import type { APIRoute } from 'astro';
-import { classifyAssetPath } from '../../../../lib/server/asset-scan';
+import { canonicalAssetPath } from '../../../../lib/server/asset-scan';
 import { gameBundleVersion } from '../../../../lib/server/asset-manifest';
 import {
   assessAssetUpload,
+  assetPathRejection,
   assetUploadsByUser,
   assetUploadQuery,
   assetUsage,
@@ -22,15 +23,23 @@ export const POST: APIRoute = async ({ request, params, locals, redirect }) => {
   const game = await getGame(slug, { includeUnpublished: true });
   if (!game || game.ownerId !== locals.user.id) return new Response('Not found', { status: 404 });
 
-  const rateAllowed = assetUploadsByUser.hit(locals.user.id);
   const form = await request.formData().catch(() => null);
+  const rawPath = String(form?.get('path') ?? '');
+  const pathError = assetPathRejection(rawPath);
+  if (pathError) {
+    return new Response(pathError.message, {
+      status: pathError.status,
+      headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'private, no-store' },
+    });
+  }
+
+  const rateAllowed = assetUploadsByUser.hit(locals.user.id);
   const file = form?.get('file');
   const bytes = file instanceof File ? new Uint8Array(await file.arrayBuffer()) : new Uint8Array();
   const version = await gameBundleVersion(sql, game.id);
-  const rawPath = String(form?.get('path') ?? '');
-  const classified = classifyAssetPath(rawPath);
+  const canonical = canonicalAssetPath(rawPath);
   const [existing, usage] = await Promise.all([
-    classified.kind === 'asset' ? findGameAsset(sql, game.id, version, classified.path) : Promise.resolve(null),
+    canonical.kind === 'path' ? findGameAsset(sql, game.id, version, canonical.path) : Promise.resolve(null),
     assetUsage(sql, game.id, version),
   ]);
   const decision = assessAssetUpload({
@@ -48,6 +57,12 @@ export const POST: APIRoute = async ({ request, params, locals, redirect }) => {
 
   if (decision.kind === 'login') return redirect(`/login?next=${encodeURIComponent(page)}`, 303);
   if (decision.kind === 'not-found') return new Response('Not found', { status: 404 });
+  if (decision.kind === 'bad-request') {
+    return new Response(decision.message, {
+      status: decision.status,
+      headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'private, no-store' },
+    });
+  }
   if (decision.kind === 'reject' || decision.kind === 'store') {
     try {
       const saved = await saveAssetDecision(
@@ -57,11 +72,16 @@ export const POST: APIRoute = async ({ request, params, locals, redirect }) => {
             const put = await bucket().upload(path, body, { contentType, upsert: true });
             return { error: put.error ? { message: put.error.message } : null };
           },
+          remove: async (path) => {
+            const removed = await bucket().remove([path]);
+            return { error: removed.error ? { message: removed.error.message } : null };
+          },
         },
         game.id,
         version,
         decision,
         bytes,
+        existing,
       );
       if (!saved.ok) return back({ error: saved.code });
     } catch (error) {
