@@ -3,7 +3,7 @@ import { describe, it } from 'node:test';
 import {
   ASSET_SIZE_WARN_BYTES,
   GAME_VERSION_MAX_BYTES,
-  formatSize,
+  formatBytes,
   summarizeAssets,
 } from './asset-limits';
 
@@ -118,20 +118,20 @@ describe('summarizeAssets behavior', () => {
   });
 });
 
-describe('formatSize behavior', () => {
-  it('formats under 1 MB as "N KB" with 1 decimal', () => {
-    assert.equal(formatSize(0), '0.0 KB');
-    assert.equal(formatSize(1024), '1.0 KB');
-    assert.equal(formatSize(48 * 1024), '48.0 KB');
-    assert.equal(formatSize(100 * 1024), '100.0 KB');
-    assert.equal(formatSize(180 * 1024), '180.0 KB');
-    assert.equal(formatSize(500 * 1024 + 512), '500.5 KB');
+describe('formatBytes behavior', () => {
+  it('formats under 1 KB as bytes, under 1 MB as "N KB" with 1 decimal', () => {
+    assert.equal(formatBytes(0), '0 B');
+    assert.equal(formatBytes(1024), '1.0 KB');
+    assert.equal(formatBytes(48 * 1024), '48.0 KB');
+    assert.equal(formatBytes(100 * 1024), '100.0 KB');
+    assert.equal(formatBytes(180 * 1024), '180.0 KB');
+    assert.equal(formatBytes(500 * 1024 + 512), '500.5 KB');
   });
 
   it('formats 1 MB and above as "N.NN MB" with 2 decimals', () => {
-    assert.equal(formatSize(1024 * 1024), '1.00 MB');
-    assert.equal(formatSize(4 * 1024 * 1024), '4.00 MB');
-    assert.equal(formatSize(4.5 * 1024 * 1024), '4.50 MB');
-    assert.equal(formatSize(1.234 * 1024 * 1024), '1.23 MB');
+    assert.equal(formatBytes(1024 * 1024), '1.00 MB');
+    assert.equal(formatBytes(4 * 1024 * 1024), '4.00 MB');
+    assert.equal(formatBytes(4.5 * 1024 * 1024), '4.50 MB');
+    assert.equal(formatBytes(1.234 * 1024 * 1024), '1.23 MB');
   });
 });

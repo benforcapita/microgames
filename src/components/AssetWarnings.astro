@@ -1,5 +1,5 @@
 ---
-import { formatSize, type summarizeAssets } from '../lib/asset-limits';
+import { formatBytes, type summarizeAssets } from '../lib/asset-limits';
 
 interface Props {
   summary: ReturnType<typeof summarizeAssets>;
@@ -9,7 +9,7 @@ const { summary } = Astro.props;
 ---
 
 <div id="asset-warnings" class="panel">
-  <p class:list={[{ warn: summary.overTotal }]}>Whole game: {formatSize(summary.totalBytes)} of 4 MB</p>
+  <p class:list={[{ warn: summary.overTotal }]}>Whole game: {formatBytes(summary.totalBytes)} of 4 MB</p>
 
   {summary.missing.length > 0 && (
     <div role="status">
@@ -25,7 +25,7 @@ const { summary } = Astro.props;
   {summary.large.length > 0 && (
     <ul>
       {summary.large.map((asset) => (
-        <li class="warn">{asset.path} is over 100 KB ({formatSize(asset.sizeBytes)})</li>
+        <li class="warn">{asset.path} is over 100 KB ({formatBytes(asset.sizeBytes)})</li>
       ))}
     </ul>
   )}

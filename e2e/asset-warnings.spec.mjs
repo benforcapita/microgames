@@ -32,7 +32,7 @@ test('one missing file is warned on upload and on the submission page, and submi
   await expect(warn).toBeVisible();
   await expect(warn).toContainText('1 referenced file(s) not uploaded yet');
   await expect(warn.getByRole('listitem')).toHaveText(['sprites/hero.png']);
-  await expect(warn).toContainText(/Whole game: [\d.]+ KB of 4 MB/);
+  await expect(warn).toContainText(/Whole game: [\d.]+ (B|KB) of 4 MB/);
   await warn.scrollIntoViewIfNeeded();
   await warn.screenshot({ path: shotPath('as-4-upload-missing-asset.png') });
 
@@ -47,6 +47,6 @@ test('one missing file is warned on upload and on the submission page, and submi
   const subWarn = page.locator('#asset-warnings');
   await expect(subWarn).toContainText('1 referenced file(s) not uploaded yet');
   await expect(subWarn.getByRole('listitem')).toHaveText(['sprites/hero.png']);
-  await expect(subWarn).toContainText(/Whole game: [\d.]+ KB of 4 MB/);
+  await expect(subWarn).toContainText(/Whole game: [\d.]+ (B|KB) of 4 MB/);
   await page.screenshot({ path: shotPath('as-4-submission-missing-asset.png'), fullPage: true });
 });

@@ -119,7 +119,7 @@ const forkable = fork && fork.license !== 'All rights reserved' ? fork : null;
 <script>
   import boot from '../../cdn/boot.js?raw';
   import { PREVIEW_TIMEOUT_COPY, createPreviewWatch, injectPreview } from '../client/upload-preview';
-  import { formatSize, summarizeAssets } from '../lib/asset-limits';
+  import { formatBytes, summarizeAssets } from '../lib/asset-limits';
 
   const form = document.getElementById('upload-form') as HTMLFormElement;
   const errors = document.getElementById('errors')!;
@@ -168,7 +168,7 @@ const forkable = fork && fork.license !== 'All rights reserved' ? fork : null;
 
     const totalP = document.createElement('p');
     if (summary.overTotal) totalP.className = 'warn';
-    totalP.textContent = `Whole game: ${formatSize(summary.totalBytes)} of 4 MB`;
+    totalP.textContent = `Whole game: ${formatBytes(summary.totalBytes)} of 4 MB`;
     container.appendChild(totalP);
 
     if (summary.missing.length > 0) {

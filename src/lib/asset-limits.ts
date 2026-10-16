@@ -5,7 +5,9 @@
  * larger than 100 KB trigger creator warnings.
  */
 
+/** HTML/code plus every asset stored for the version. Single source: asset-upload.ts (#59) enforces it, AS-4 warns. */
 export const GAME_VERSION_MAX_BYTES = 4 * 1024 * 1024;
+/** Larger assets are stored; the owner sees a warning. */
 export const ASSET_SIZE_WARN_BYTES = 100 * 1024;
 
 export interface AssetInputItem {
@@ -66,11 +68,8 @@ export function summarizeAssets({
   };
 }
 
-const ONE_MB = 1024 * 1024;
-
-export function formatSize(bytes: number): string {
-  if (bytes < ONE_MB) {
-    return `${(bytes / 1024).toFixed(1)} KB`;
-  }
-  return `${(bytes / ONE_MB).toFixed(2)} MB`;
+export function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
 }
