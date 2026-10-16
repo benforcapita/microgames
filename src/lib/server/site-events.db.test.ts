@@ -23,8 +23,9 @@ let probeOk = false;
 if (isLocal) {
   const probe = postgres(url, { connect_timeout: 3, max: 1 });
   try {
-    await probe`select 1`;
-    probeOk = true;
+    // Only a local DB that has this migration applied; skip otherwise.
+    const [r] = await probe`select to_regclass('public.site_events') is not null as ok`;
+    probeOk = Boolean(r?.ok);
   } catch {
     probeOk = false;
   } finally {
