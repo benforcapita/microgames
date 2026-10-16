@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import { describe, it } from 'node:test';
 import { gameCsp, CSP_SOURCES } from '../../../cdn/csp.mjs';
 import { AST_BUDGET, analyzeGame, CONNECT_HOSTS, SCRIPT_HOSTS, STATIC_LIMITS, STYLE_HOSTS, type CheckLevel, type StaticReport } from './static-check.ts';
@@ -409,5 +410,41 @@ describe('SP-4 QA: budget-skipped files cannot slip past the text-scan fallback'
   it('the whole fallback stays fast at 4.9 MB (loose CI bound)', () => {
     const big = `<canvas></canvas><script>${'var a=b+c*d(e,f);/*x*/"s\\x41";'.repeat(Math.floor((4.9 * MB2) / 32))}</script>`;
     assertFast('the whole fallback stays fast at 4.9 MB (loose CI bound)', big, () => analyzeGame(big));
+  });
+});
+
+// Strict check against the production wall-clock cap, only meaningful on an idle box (skipped otherwise, and on busy CI).
+// Unloaded the byte-budget input takes ~300 ms here (432 ms seen earlier on a busier box); the bound is 0.75 x 600 = 450 ms:
+// 1.5x headroom over today's median, still 150 ms short of the cap, and any 3x linear slowdown (>= 900 ms) lands far past it.
+describe('strict unloaded timing vs AST_BUDGET', () => {
+  const cpus = os.cpus().length;
+  const loadavg1 = os.loadavg()[0];
+  const skip = loadavg1 > 0.5 * cpus ? `box loaded: loadavg1=${loadavg1.toFixed(2)} > 0.5 x ${cpus} cpus; strict timing is only valid unloaded` : false;
+  const BOUND_MS = 0.75 * AST_BUDGET.ms;
+  const fill = (unit: string, size: number) => unit.repeat(Math.floor(size / unit.length));
+  const input = `<canvas></canvas><script>${fill('var a=b+c*d(e,f);', AST_BUDGET.maxJsBytes - 64)}</script>`;
+  const medianOf = (runs: number, work: () => void) => {
+    work(); // warm-up
+    const times: number[] = [];
+    for (let i = 0; i < runs; i++) {
+      const t0 = performance.now();
+      work();
+      times.push(performance.now() - t0);
+    }
+    return { median: [...times].sort((a, b) => a - b)[Math.floor(runs / 2)], times };
+  };
+  const fmt = (ts: number[]) => ts.map((t) => t.toFixed(0)).join(', ');
+
+  it(`byte-budget input is fully analysed with median < 0.75 x AST_BUDGET.ms (${BOUND_MS} ms)`, { skip }, () => {
+    let report: StaticReport | undefined;
+    const { median, times } = medianOf(5, () => { report = analyzeGame(input); });
+    assert.ok(median < BOUND_MS, `median ${median.toFixed(0)} ms >= ${BOUND_MS} ms; runs [${fmt(times)}]`);
+    assert.equal(level(report!, 'deep-analysis'), undefined);
+  });
+
+  it('a 3x linear slowdown is caught by that bound', { skip }, () => {
+    // Simulate the slowdown by doing the same full analysis 3 times per sample: the strict bound must reject it.
+    const { median, times } = medianOf(3, () => { analyzeGame(input); analyzeGame(input); analyzeGame(input); });
+    assert.ok(median >= BOUND_MS, `3x work took median ${median.toFixed(0)} ms < ${BOUND_MS} ms, so the bound would miss it; runs [${fmt(times)}]`);
   });
 });
