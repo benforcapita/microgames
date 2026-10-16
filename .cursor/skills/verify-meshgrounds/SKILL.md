@@ -107,7 +107,8 @@ creates it and prints the path. Per feature capture: the action (command/script 
 resulting state (screenshot + ARIA snapshot, response headers/bodies), and the side effect read back from
 a second view (DB row via `$V exec -- node …postgres…`, Mailpit message, CDN response). Suite runs: tee
 outputs into `<run-id>/suite/`. `$V down` adds `supabase-start.log`, `seed.log`, `build.log`, `web.log`,
-`cdn.log`, and the run's copies of any `docs/pr-assets/*` it rewrote (under `e2e-pr-assets/`).
+`cdn.log`, the run's copies of any `docs/pr-assets/*` it rewrote (under `e2e-pr-assets/`), and a copy of
+`test-results/screenshots/` (gitignored; where e2e writes its screenshots) under `screenshots/` if present.
 
 Proof standards: drive the real user path (buttons, forms, routes), not internal setters or test-only
 endpoints; capture action and resulting state, not just the last screen; verify side effects (rows in
@@ -125,7 +126,7 @@ Kills only the portal/CDN process groups from `/tmp/vmg-state-<id>/*.pid`, runs
 `supabase stop --project-id <id> --no-backup` (drops our containers and volumes, nobody else's), restores
 `supabase/config.toml` from the backup and confirms it matches HEAD, restores only the tracked
 `docs/pr-assets/*` files this run changed to the snapshot `up` took (edits that existed before `up` are
-kept; the run's versions go to evidence), copies logs to evidence, deletes the state
+kept; the run's versions go to evidence), copies `test-results/screenshots/` (if present) into evidence, copies logs to evidence, deletes the state
 dir, and prints `[vmg] evidence kept: <dir> (N files)`. Then confirm: `ls <evidence dir>`,
 `git status --short` (only your intended changes), `docker ps | grep _<id>` empty. Run `$V down` after
 every failed attempt too; it is safe to repeat. If `up` died mid-way, `down` still restores the config.
