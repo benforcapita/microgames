@@ -1,3 +1,4 @@
+import { errorDetails, sendSiteEvent } from './site-events';
 import { getAdProvider } from './ads';
 import { gameFrameSrc } from './frame-src';
 
@@ -99,6 +100,7 @@ export function mountPlayer(host: HTMLElement, game: PlayerGame, opts: PlayerOpt
     if (!destroyed) {
       srcSet = true;
       frame.src = gameFrameSrc(opts.cdnOrigin, game.id, location.origin, save, opts.previewToken);
+      sendSiteEvent('game_launch', { gameId: game.id });
     }
   });
 
@@ -172,7 +174,11 @@ export function mountPlayer(host: HTMLElement, game: PlayerGame, opts: PlayerOpt
         if (!started) (started = true), track('start');
         break;
       case '__MG_CRASH':
-        if (!crashed) (crashed = true), track('crash');
+        if (!crashed) {
+          crashed = true;
+          track('crash');
+          sendSiteEvent('error', { gameId: game.id, details: errorDetails('game', data.message) });
+        }
         break;
       case '__MG_STORAGE': {
         const json = JSON.stringify(data.items ?? {});
