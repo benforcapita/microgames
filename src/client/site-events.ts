@@ -2,7 +2,7 @@
 // Never blocks or breaks the page: sendBeacon first, fetch keepalive as fallback, every failure dropped.
 // Everything sent is cleaned with the SAME detector the server enforces (../lib/pii): query strings and
 // fragments stripped, PII redacted, text cut by UTF-8 bytes on code-point boundaries under the server caps.
-import { redactPii, truncateText, utf8Bytes } from '../lib/pii';
+import { redactPii, redactUrlIntIpv4, truncateText, utf8Bytes } from '../lib/pii';
 
 export type SiteEventType = 'page_view' | 'game_launch' | 'error';
 /** Server: path <= 512 UTF-16 units; details JSON <= 4000 UTF-8 bytes. */
@@ -23,7 +23,8 @@ export function scrub(text: unknown, maxBytes: number, maxUnits = Infinity): str
 }
 
 /** Pathname only (never the query string or hash), scrubbed and capped at the server's 512 units. */
-export const scrubPath = (pathname: string) => scrub(pathname, MAX_PATH_BYTES, MAX_PATH_UNITS);
+// A whole path segment that is a decimal-integer IPv4 is redacted, matching the server's URL-only rule.
+export const scrubPath = (pathname: string) => scrub(redactUrlIntIpv4(pathname.replace(QUERY, '')), MAX_PATH_BYTES, MAX_PATH_UNITS);
 
 /** Body for an error event: short message and stack, scrubbed, and guaranteed under the server's details cap. */
 export function errorDetails(source: string, message: unknown, stack?: unknown): Record<string, string> {

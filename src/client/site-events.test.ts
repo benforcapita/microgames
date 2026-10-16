@@ -47,7 +47,7 @@ describe('client path: never the query string or hash', () => {
 });
 
 describe('client scrub uses the server PII detector', () => {
-  const PII = ['ben@example.com', 'ben%40example.com', 'ben%2540example.com', 'ben%2Bx%40example.com', '2001:db8::1', '::1', 'fe80::1', '::ffff:cb00:7109', '203.0.113.9', '3405803785', 'ben[at]example.com'];
+  const PII = ['ben@example.com', 'ben%40example.com', 'ben%2540example.com', 'ben%2Bx%40example.com', '2001:db8::1', '::1', 'fe80::1', '::ffff:cb00:7109', '203.0.113.9', 'ben[at]example.com'];
   for (const v of PII) it(`redacts ${v} and the server then stores the event (204, not 400)`, async () => {
     const d = errorDetails('portal', `failed for ${v} here`, `Error: ${v}\n    at main.js:3:14`);
     assert.ok(!JSON.stringify(d).includes(v));
@@ -55,6 +55,23 @@ describe('client scrub uses the server PII detector', () => {
     const r = await serverStores(sent[0].body);
     assert.equal(r.status, 204);
     assert.match(String(r.row?.details.message), /^failed for \[redacted\] here$/);
+  });
+});
+
+describe('decimal-integer IPv4: consistent with the server URL-only rule', () => {
+  it('a 10-digit timestamp in an error message is sent as-is and stored', async () => {
+    const d = errorDetails('portal', 'crash at 1760598000', 'Error: crash at 1760598000\n    at main.js:3:14');
+    assert.equal(d.message, 'crash at 1760598000');
+    const sent = await capture(() => sendSiteEvent('error', { details: d }));
+    const r = await serverStores(sent[0].body);
+    assert.equal(r.status, 204);
+    assert.equal(r.row?.details.message, 'crash at 1760598000');
+  });
+  it('an integer-IPv4 path segment is redacted, so the page_view is stored instead of refused', async () => {
+    const sent = await capture(() => sendSiteEvent('page_view'), { loc: { pathname: '/u/3405803777/x', search: '?ip=3405803777' } });
+    const r = await serverStores(sent[0].body);
+    assert.equal(r.status, 204);
+    assert.equal(r.row?.path, '/u/[redacted]/x');
   });
 });
 
