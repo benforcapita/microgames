@@ -10,10 +10,9 @@ import type { AssetDb } from './asset-manifest.ts';
 import { canonicalAssetPath, extensionOf, type ExpectedType } from './asset-scan.ts';
 import { containsHtmlMarker, sniffAsset, type SniffedFormat } from './asset-sniff.ts';
 
-/** HTML/code plus every asset already stored for the version, including this file. */
-export const GAME_VERSION_MAX_BYTES = 4 * 1024 * 1024;
-/** Larger assets are stored. The owner sees a warning afterwards. */
-export const ASSET_SIZE_WARN_BYTES = 100 * 1024;
+// One source for the limits and the size formatting: the client-safe module the AS-4 warnings also use.
+import { ASSET_SIZE_WARN_BYTES, GAME_VERSION_MAX_BYTES } from '../asset-limits.ts';
+export { ASSET_SIZE_WARN_BYTES, GAME_VERSION_MAX_BYTES, formatBytes } from '../asset-limits.ts';
 /** Rows allowed on one game, across versions. */
 export const MAX_ASSET_FILES = 200;
 
@@ -170,12 +169,6 @@ export function formatGameMb(bytes: number): string {
     return value.toFixed(6).replace(/0+$/, '').replace(/\.$/, '');
   }
   return value.toFixed(2);
-}
-
-export function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
 }
 
 export function mismatchMessage(got: StoredAssetType, want: StoredAssetType): string {

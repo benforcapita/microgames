@@ -1,5 +1,7 @@
+import { GAME_VERSION_MAX_BYTES } from '../asset-limits.ts';
+
 /** Whole game version: the uploaded HTML/code plus every asset combined. */
-export const GAME_TOTAL_MAX_BYTES = 4 * 1024 * 1024;
+export const GAME_TOTAL_MAX_BYTES = GAME_VERSION_MAX_BYTES;
 export const GAME_SIZE_LIMIT = 'the whole game, code plus assets, must stay under 4 MB';
 
 export const UPLOAD = {

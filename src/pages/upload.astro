@@ -79,6 +79,7 @@ const forkable = fork && fork.license !== 'All rights reserved' ? fork : null;
         <span><input type="checkbox" name="agree" required /> I confirm this game contains no unlicensed copyrighted art, music
         or characters, and no voice clones of real people. <a href="/creators#rules">Content rules</a></span>
       </label>
+      <div id="asset-warnings" hidden></div>
       <button class="btn" type="submit">Submit for validation</button>
     </form>
   </section>
@@ -104,6 +105,13 @@ const forkable = fork && fork.license !== 'All rights reserved' ? fork : null;
   .snap-copy { display: grid; gap: 0.6rem; align-content: center; }
   .snap-copy p { margin: 0; }
   #use-preview[aria-pressed='true'] { border-color: var(--accent); color: var(--accent); }
+  #asset-warnings { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 1.25rem; display: grid; gap: 0.75rem; }
+  #asset-warnings[hidden] { display: none !important; }
+  /* Children are created by the client script, so they carry no Astro scope attribute: hence :global. */
+  #asset-warnings :global(p) { margin: 0; }
+  #asset-warnings :global(ul) { margin: 0.25rem 0 0; padding-left: 1.25rem; }
+  #asset-warnings :global(li), #asset-warnings :global(p) { overflow-wrap: anywhere; }
+  #asset-warnings :global(.warn) { color: var(--warn); }
   @media (max-width: 860px) {
     .upload, .two, .snap { grid-template-columns: 1fr; }
     .intro { position: static; }
@@ -113,10 +121,12 @@ const forkable = fork && fork.license !== 'All rights reserved' ? fork : null;
 <script>
   import boot from '../../cdn/boot.js?raw';
   import { PREVIEW_TIMEOUT_COPY, createPreviewWatch, injectPreview } from '../client/upload-preview';
+  import { formatTotal, summarizeAssets } from '../lib/asset-limits';
 
   const form = document.getElementById('upload-form') as HTMLFormElement;
   const errors = document.getElementById('errors')!;
   const gameInput = form.querySelector<HTMLInputElement>('input[name="game"]')!;
+  const assetWarnings = document.getElementById('asset-warnings');
   const thumbInput = document.getElementById('thumb-file') as HTMLInputElement;
   const snap = document.getElementById('snap')!;
   const frame = document.getElementById('game-preview') as HTMLIFrameElement;
@@ -155,6 +165,36 @@ const forkable = fork && fork.license !== 'All rights reserved' ? fork : null;
     snapMsg.textContent = usingPreview ? 'This preview will be the thumbnail.' : 'No thumbnail file selected.';
   }
 
+  function renderAssetWarnings(container: HTMLElement, summary: ReturnType<typeof summarizeAssets>) {
+    container.replaceChildren();
+
+    const totalP = document.createElement('p');
+    if (summary.overTotal) totalP.className = 'warn';
+    totalP.textContent = `Whole game: ${formatTotal(summary.totalBytes)} of 4 MB`;
+    container.appendChild(totalP);
+
+    if (summary.missing.length > 0) {
+      const missingDiv = document.createElement('div');
+      missingDiv.setAttribute('role', 'status');
+
+      const msgP = document.createElement('p');
+      msgP.className = 'warn';
+      msgP.textContent = `${summary.missing.length} referenced file(s) not uploaded yet (upload them from the game's assets page after submitting):`;
+      missingDiv.appendChild(msgP);
+
+      const ul = document.createElement('ul');
+      for (const path of summary.missing) {
+        const li = document.createElement('li');
+        li.textContent = path;
+        ul.appendChild(li);
+      }
+      missingDiv.appendChild(ul);
+      container.appendChild(missingDiv);
+    }
+
+    container.hidden = false;
+  }
+
   gameInput.addEventListener('change', () => {
     const file = gameInput.files?.[0];
     snapshot = null;
@@ -167,6 +207,10 @@ const forkable = fork && fork.license !== 'All rights reserved' ? fork : null;
     if (previewUrl) URL.revokeObjectURL(previewUrl);
     previewUrl = '';
     watch.stop();
+    if (assetWarnings) {
+      assetWarnings.hidden = true;
+      assetWarnings.replaceChildren();
+    }
     if (!file) { snap.hidden = true; return; }
     snap.hidden = false;
     // Off-screen cross-origin iframes may get no animation frames, which capture relies on.
@@ -181,9 +225,32 @@ const forkable = fork && fork.license !== 'All rights reserved' ? fork : null;
     file.text().then((html) => {
       previewUrl = URL.createObjectURL(new Blob([injectBoot(html)], { type: 'text/html' }));
       frame.src = previewUrl;
+
+      // The scanner pulls in acorn (~37 KB gz), so it loads only once a file is picked, not with the page.
+      import('../lib/server/asset-scan').then(({ scanAssetSource }) => {
+        if (!assetWarnings || gameInput.files?.[0] !== file) return;
+        const scan = scanAssetSource(html);
+        renderAssetWarnings(assetWarnings, summarizeAssets({
+          codeBytes: file.size,
+          assets: scan.assets.map((a) => ({ path: a.path, status: 'missing', sizeBytes: null })),
+        }));
+      }).catch(() => {
+        if (!assetWarnings || gameInput.files?.[0] !== file) return;
+        assetWarnings.replaceChildren();
+        const notice = document.createElement('p');
+        notice.className = 'warn';
+        notice.setAttribute('role', 'status');
+        notice.textContent = "Couldn't check for missing files; the submission page will list them";
+        assetWarnings.appendChild(notice);
+        assetWarnings.hidden = false;
+      });
     }).catch(() => {
       watch.stop();
       snapMsg.textContent = 'Could not read that file. Upload a PNG, JPEG, or WebP thumbnail.';
+      if (assetWarnings) {
+        assetWarnings.hidden = true;
+        assetWarnings.replaceChildren();
+      }
     });
   });
 

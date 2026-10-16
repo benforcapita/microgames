@@ -10,6 +10,7 @@
 import type { Stage } from './game-rules';
 import { sql } from './db';
 import { asValidationStatus, coerceQueuedStaticReport, preferValidation, type SubmissionStore, type ValidationRow } from './submissions';
+import { gameBundleVersion, type AssetDb } from './asset-manifest';
 
 interface GameHit {
   id: string;
@@ -65,5 +66,48 @@ function mapValidation(row: ValidationHit): ValidationRow | null {
     screenshotPaths: row.screenshot_paths ?? [],
     createdAt: row.created_at.toISOString(),
     finishedAt: row.finished_at ? row.finished_at.toISOString() : null,
+  };
+}
+
+interface AssetDbRow {
+  path: string;
+  status: string;
+  size_bytes: number | null;
+}
+
+function isAssetStatus(status: unknown): status is 'missing' | 'uploaded' | 'rejected' {
+  return status === 'missing' || status === 'uploaded' || status === 'rejected';
+}
+
+export async function loadAssetSummaryInput(
+  gameId: string,
+  sqlClient: AssetDb = sql,
+): Promise<{
+  codeBytes: number;
+  assets: { path: string; status: 'missing' | 'uploaded' | 'rejected'; sizeBytes: number | null }[];
+}> {
+  const version = await gameBundleVersion(sqlClient, gameId);
+  const [gameRow] = await sqlClient<{ size_bytes: number | null }[]>`
+    select size_bytes from games where id = ${gameId}
+  `;
+  const assetRows = await sqlClient<AssetDbRow[]>`
+    select path, status, size_bytes
+    from game_assets
+    where game_id = ${gameId} and version = ${version}
+    order by path
+  `;
+  const assets: { path: string; status: 'missing' | 'uploaded' | 'rejected'; sizeBytes: number | null }[] = [];
+  for (const row of assetRows) {
+    if (isAssetStatus(row.status)) {
+      assets.push({
+        path: row.path,
+        status: row.status,
+        sizeBytes: typeof row.size_bytes === 'number' ? row.size_bytes : null,
+      });
+    }
+  }
+  return {
+    codeBytes: typeof gameRow?.size_bytes === 'number' ? gameRow.size_bytes : 0,
+    assets,
   };
 }
