@@ -122,3 +122,25 @@ describe('next length cap', () => {
     assert.equal(safeNext('/p?x=' + '%41'.repeat(300)), '/p?x=' + '%41'.repeat(300));
   });
 });
+
+describe('AU-1 email form errors', async () => {
+  const { emailAuthErrorCode, authErrorText, AUTH_ERROR_TEXT: T } = await import('./google-auth.ts');
+  it('maps AuthError codes to fixed codes; unknown -> signin_failed', () => {
+    assert.equal(emailAuthErrorCode({ code: 'invalid_credentials' }), 'invalid_credentials');
+    assert.equal(emailAuthErrorCode({ code: 'email_not_confirmed' }), 'email_not_confirmed');
+    assert.equal(emailAuthErrorCode({ code: 'user_already_exists' }), 'account_exists');
+    assert.equal(emailAuthErrorCode({ code: 'email_exists' }), 'account_exists');
+    assert.equal(emailAuthErrorCode({ code: 'weak_password' }), 'weak_password');
+    assert.equal(emailAuthErrorCode({ code: 'over_email_send_rate_limit' }), 'rate_limited');
+    assert.equal(emailAuthErrorCode({ status: 429 }), 'rate_limited');
+    assert.equal(emailAuthErrorCode({ code: 'unexpected_failure' }), 'signin_failed');
+    assert.equal(emailAuthErrorCode(null), 'signin_failed');
+  });
+  it('/login text: known code -> its text; free text or unknown -> signin_failed; none -> null', () => {
+    assert.equal(authErrorText('invalid_credentials'), T.invalid_credentials);
+    assert.equal(authErrorText('Invalid login credentials'), T.signin_failed);
+    assert.equal(authErrorText('__proto__'), T.signin_failed);
+    assert.equal(authErrorText(null), null);
+    assert.equal(authErrorText(''), null);
+  });
+});
