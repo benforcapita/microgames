@@ -1,6 +1,7 @@
 ---
 import Layout from '../layouts/Layout.astro';
 import { safeNext, withParams } from '../lib/server/auth';
+import { AUTH_ERROR_TEXT, isAuthErrorCode } from '../lib/server/google-auth';
 
 const p = Astro.url.searchParams;
 const next = safeNext(p.get('next'));
@@ -9,7 +10,9 @@ if (Astro.locals.user) return Astro.redirect(next);
 const modes = { password: 'Log in', signup: 'Sign up', magic: 'Magic link' } as const;
 type Mode = keyof typeof modes;
 const mode: Mode = (p.get('mode') as Mode) in modes ? (p.get('mode') as Mode) : 'password';
-const error = p.get('error');
+// Sign-in error codes (Google/callback) render fixed text. Free-text errors from the email form (/api/auth/login) are unchanged.
+const rawError = p.get('error');
+const error = isAuthErrorCode(rawError) ? AUTH_ERROR_TEXT[rawError] : rawError;
 const sent = p.get('sent');
 const email = p.get('email') ?? '';
 ---
