@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { shotPath } from './shots.mjs';
 
 const canvas2d = `<!doctype html>
 <html><head><meta charset="utf-8"><title>2d</title></head>
@@ -95,7 +96,7 @@ test('upload preview captures a 2D and a WebGL canvas, and times out when nothin
   await gameInput.setInputFiles(file('drawn.html', canvas2d));
   const drawn = await expectSnapshot();
   await page.locator('#snap').scrollIntoViewIfNeeded();
-  await page.locator('#snap').screenshot({ path: 'docs/pr-assets/th-1-use-this-preview.png' });
+  await page.locator('#snap').screenshot({ path: shotPath('th-1-use-this-preview.png') });
 
   await gameInput.setInputFiles(file('webgl.html', webgl));
   await expect(previewButton).toBeHidden();
