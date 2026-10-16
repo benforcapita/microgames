@@ -95,7 +95,7 @@ whenever anything looks off. Never drive an instance whose doctor fails or that 
   (`$MAILPIT_URL/api/v1/messages`, `/api/v1/message/<ID>` → `.Text`).
 - **Repo harnesses (full suite):** stop the long-lived servers first (`$V stop-web`) because smoke and
   Playwright start their own portal+CDN on the same block ports, then:
-  `$V exec -- npm test` (544 node tests incl. DB tests; require `fail 0` and `skipped 0`),
+  `$V exec -- npm test` (node tests incl. DB tests; require `npm test: 0 failed, 0 skipped`),
   `$V exec -- npm run smoke` (builds, seeds, 56 exact-status checks; `[smoke] OK: N checks passed`),
   `$V exec -- npx playwright test` (11 specs in `e2e/`), `npm run check`, `npm run check:copy -- --dist`.
 - Feature recipes: [features/README.md](features/README.md).
@@ -107,7 +107,7 @@ creates it and prints the path. Per feature capture: the action (command/script 
 resulting state (screenshot + ARIA snapshot, response headers/bodies), and the side effect read back from
 a second view (DB row via `$V exec -- node …postgres…`, Mailpit message, CDN response). Suite runs: tee
 outputs into `<run-id>/suite/`. `$V down` adds `supabase-start.log`, `seed.log`, `build.log`, `web.log`,
-`cdn.log`, and any e2e-rewritten `docs/pr-assets/*.png` (under `e2e-pr-assets/`).
+`cdn.log`, and the run's copies of any `docs/pr-assets/*` it rewrote (under `e2e-pr-assets/`).
 
 Proof standards: drive the real user path (buttons, forms, routes), not internal setters or test-only
 endpoints; capture action and resulting state, not just the last screen; verify side effects (rows in
@@ -123,8 +123,9 @@ $V down
 ```
 Kills only the portal/CDN process groups from `/tmp/vmg-state-<id>/*.pid`, runs
 `supabase stop --project-id <id> --no-backup` (drops our containers and volumes, nobody else's), restores
-`supabase/config.toml` from the backup and confirms it matches HEAD, moves e2e-rewritten
-`docs/pr-assets/*.png` into evidence and `git checkout`s them, copies logs to evidence, deletes the state
+`supabase/config.toml` from the backup and confirms it matches HEAD, restores only the tracked
+`docs/pr-assets/*` files this run changed to the snapshot `up` took (edits that existed before `up` are
+kept; the run's versions go to evidence), copies logs to evidence, deletes the state
 dir, and prints `[vmg] evidence kept: <dir> (N files)`. Then confirm: `ls <evidence dir>`,
 `git status --short` (only your intended changes), `docker ps | grep _<id>` empty. Run `$V down` after
 every failed attempt too; it is safe to repeat. If `up` died mid-way, `down` still restores the config.

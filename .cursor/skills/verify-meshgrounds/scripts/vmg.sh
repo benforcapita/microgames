@@ -57,6 +57,32 @@ load_env() {
   case "$DATABASE_URL" in postgresql://*@127.0.0.1:$P_DB/*) ;; *) die "DATABASE_URL not 127.0.0.1:$P_DB";; esac
 }
 
+# Safeguard for docs/pr-assets (e2e specs rewrite committed screenshots). `up` snapshots every tracked file's
+# current working-tree bytes (pre-existing edits included) + sha256; `down` restores only files whose bytes
+# changed during the run, back to that snapshot. Never `git checkout`, so edits made before `up` survive.
+ASSETS=docs/pr-assets
+snapshot_assets() {
+  local snap="$STATE/pr-assets" f; rm -rf "$snap"; mkdir -p "$snap"; : > "$STATE/pr-assets.sha256"
+  while IFS= read -r -d '' f; do
+    [ -f "$f" ] || { printf 'MISSING  %s\n' "$f" >> "$STATE/pr-assets.sha256"; continue; }
+    mkdir -p "$snap/$(dirname "$f")"; cp -p "$f" "$snap/$f"; sha256sum "$f" >> "$STATE/pr-assets.sha256"
+  done < <(git ls-files -z -- "$ASSETS")
+  echo "[vmg] $ASSETS: snapshot of $(wc -l < "$STATE/pr-assets.sha256") tracked files"
+}
+restore_assets() {
+  local d=$1 man="$STATE/pr-assets.sha256" n=0 sum f
+  [ -f "$man" ] || { echo "[vmg] $ASSETS: no snapshot from up; leaving files as they are"; return 0; }
+  while read -r sum f; do
+    if [ "$sum" = MISSING ]; then
+      [ -e "$f" ] && echo "[vmg] warning: $f was missing before up and exists now; left in place"; continue
+    fi
+    [ -f "$f" ] && [ "$(sha256sum "$f" | cut -d' ' -f1)" = "$sum" ] && continue
+    mkdir -p "$d/e2e-pr-assets"; [ -f "$f" ] && cp "$f" "$d/e2e-pr-assets/"
+    cp -p "$STATE/pr-assets/$f" "$f"; n=$((n+1)); echo "[vmg] $ASSETS: restored $f to its pre-up state"
+  done < "$man"
+  echo "[vmg] $ASSETS: $n file(s) changed during the run restored (run copies kept in evidence); pre-up edits untouched"
+}
+
 cmd_up() {
   mkdir -p "$STATE"
   [ -f "$STATE/config.toml.orig" ] && die "state exists ($STATE); run vmg.sh down first"
@@ -64,6 +90,7 @@ cmd_up() {
   docker ps --format '{{.Names}}' | grep -q "_${PID_}\$" && die "containers for project '$PID_' already running"
   local rid; rid=$(run_id); echo "$rid" > "$STATE/run_id"; mkdir -p "$(evdir)"
   cp "$CFG" "$STATE/config.toml.orig"
+  snapshot_assets
   sed -i -E \
     -e "s/^project_id = .*/project_id = \"$PID_\"/" \
     -e "/^\[api\]/,/^\[/ s/^port = .*/port = $P_API/" \
@@ -168,10 +195,8 @@ cmd_down() {
   if [ -f "$STATE/config.toml.orig" ]; then cp "$STATE/config.toml.orig" "$CFG"; echo "[vmg] config.toml restored"; fi
   git diff --quiet -- "$CFG" && echo "[vmg] config.toml clean vs HEAD" || echo "[vmg] warning: config.toml differs from HEAD"
   local d; d=$(evdir)
-  # e2e specs rewrite committed screenshots in docs/pr-assets: keep the new ones as evidence, restore the repo copies.
-  local changed; changed=$(git diff --name-only -- docs/pr-assets)
-  if [ -n "$changed" ]; then mkdir -p "$d/e2e-pr-assets"; for f in $changed; do cp "$f" "$d/e2e-pr-assets/"; done
-    git checkout -- docs/pr-assets; echo "[vmg] docs/pr-assets: $(echo "$changed" | wc -l) e2e screenshots moved to evidence, repo copies restored"; fi
+  # e2e specs rewrite committed screenshots: restore only what this run changed, from the up snapshot.
+  restore_assets "$d"
   [ -d "$STATE" ] && cp "$STATE"/*.log "$d/" 2>/dev/null || true
   rm -rf "$STATE"
   docker ps --format '{{.Names}}' | grep "_${PID_}\$" && echo "[vmg] warning: containers remain" || echo "[vmg] no $PID_ containers left"
