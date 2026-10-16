@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import { GRADUATION } from './config';
 import { sql } from './db';
 import { BAYES_PRIOR_VOTES, CREATED_GAME_LOOKUP, LISTABLE_STAGES, PUBLIC_STAGES, assessHealth, canViewGame, visibleStages, clampDurationMs, clampFirstFrameMs, ratingUserId, slugify, uniqueSlug, type HealthCheck, type Stage } from './game-rules';
+import { recordScannedGameAssets } from './asset-manifest';
 import { saveUploadedBundle } from './bundle-store';
 import { filterForDevice, readWithInputSupport, type DeviceKind } from './device';
 import { insertSessionStart, postgresSchemaClient } from './schema-rollout';
@@ -215,6 +216,7 @@ export async function createGame(input: NewGame): Promise<Game> {
       values (${id}, ${slug}, ${input.ownerId}, ${input.creator}, ${input.title}, ${input.tagline}, ${input.description},
               ${input.tags}, ${input.license}, ${input.forkedFrom}, ${input.html.byteLength}, ${crypto.randomInt(0, 360)}, ${thumb}, ${stage})`,
   });
+  await recordScannedGameAssets(sql, id, input.html);
   return (await getGame(id, CREATED_GAME_LOOKUP))!;
 }
 
