@@ -1,4 +1,5 @@
 import { test, expect, devices } from '@playwright/test';
+import { shotPath } from './shots.mjs';
 import postgres from 'postgres';
 import { localSupabaseEnv } from '../scripts/lib/local-supabase.mjs';
 
@@ -127,10 +128,10 @@ test.describe('desktop browser', () => {
     expectVariance(res.headers());
     await expect(page.getByRole('button', { name: 'Play Stack Tower' })).toBeVisible();
     await expect(page.getByTestId('desktop-only')).toHaveCount(0);
-    await page.screenshot({ path: 'docs/pr-assets/is-3-desktop-play.png', fullPage: true });
+    await page.screenshot({ path: shotPath('is-3-desktop-play.png'), fullPage: true });
     await page.goto('/games');
     await expect(page.getByRole('link', { name: /Stack Tower/ })).toBeVisible();
-    await page.screenshot({ path: 'docs/pr-assets/is-3-desktop-games.png', fullPage: true });
+    await page.screenshot({ path: shotPath('is-3-desktop-games.png'), fullPage: true });
   });
 
   test('fork credit links to a desktop-only parent', async ({ page }) => {
@@ -162,16 +163,16 @@ test.describe('mobile browser', () => {
     await expect(notice.locator('img, svg').first()).toBeVisible();
     await expect(page.getByRole('button', { name: 'Play Stack Tower' })).toHaveCount(0);
     await expect(page.locator('iframe.mg-frame')).toHaveCount(0);
-    await page.screenshot({ path: 'docs/pr-assets/is-3-mobile-notice.png', fullPage: true });
+    await page.screenshot({ path: shotPath('is-3-mobile-notice.png'), fullPage: true });
 
     await page.goto('/games');
     await expect(page.getByRole('link', { name: /Stack Tower/ })).toHaveCount(0);
     await expect(page.getByRole('link', { name: /Neon Lanes/ })).toBeVisible();
-    await page.screenshot({ path: 'docs/pr-assets/is-3-mobile-games.png', fullPage: true });
+    await page.screenshot({ path: shotPath('is-3-mobile-games.png'), fullPage: true });
 
     await page.goto('/');
     await expect(page.getByRole('link', { name: /Stack Tower/ })).toHaveCount(0);
-    await page.screenshot({ path: 'docs/pr-assets/is-3-mobile-home.png', fullPage: true });
+    await page.screenshot({ path: shotPath('is-3-mobile-home.png'), fullPage: true });
   });
 
   test('fork credit names a desktop-only parent without a link', async ({ page }) => {

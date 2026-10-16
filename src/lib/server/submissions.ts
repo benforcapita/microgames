@@ -279,7 +279,7 @@ export function buildSubmissionView(game: SubmissionGame, validation: Validation
   } else if (phase === 'passed' && published) {
     headline = 'Published';
     detail = game.stage === 'live'
-      ? 'This game has graduated and is monetized.'
+      ? 'This game has graduated and is live.'
       : 'This game is in the Proving Grounds.';
   } else if (phase === 'failed') {
     headline = 'Failed';

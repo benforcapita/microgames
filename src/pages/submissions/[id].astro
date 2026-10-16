@@ -24,7 +24,7 @@ if (result.status !== 200) return Astro.rewrite('/404');
 const view: SubmissionView = result.view;
 const staticChecks = view.validation?.checks.filter((c) => c.source === 'static') ?? [];
 const runChecks = view.validation?.checks.filter((c) => c.source === 'run') ?? [];
-const stageLabel = { pending: 'Pending', proving: 'Proving Grounds', live: 'Monetized', rejected: 'Rejected' }[view.game.stage];
+const stageLabel = { pending: 'Pending', proving: 'Proving Grounds', live: 'Live', rejected: 'Rejected' }[view.game.stage];
 ---
 
 <Layout title={`${view.game.title} · Submission`} description={`Validation status for ${view.game.title}.`}>
