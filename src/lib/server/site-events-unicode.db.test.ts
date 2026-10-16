@@ -45,7 +45,7 @@ describe('client-truncated unicode round-trips through /api/events into local js
       const details = errorDetails('portal', ch.repeat(3000), `Error\n${`    at f (${ch.repeat(30)}.js:1:2)\n`.repeat(300)}`);
       const path = `${P}/${name}`;
       const res = await handleSiteEvent(new Request('http://x/api/events', { method: 'POST', body: JSON.stringify({ type: 'error', path, details }) }),
-        { ip: 'unicode-test', userId: null }, { limiter: { hit: () => true } });
+        { ip: 'unicode-test' }, { limiter: { hit: () => true } });
       assert.equal(res.status, 204);
       const [row] = await sql`select details, pg_column_size(details) as size from public.site_events where path = ${path}`;
       assert.ok(row, 'row stored');

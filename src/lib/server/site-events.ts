@@ -1,8 +1,8 @@
 import { containsPii, hasUrlIntIpv4, truncateText, utf8Bytes, wellFormed } from '../pii';
 import { createLimiter } from './abuse';
 
-/** Client-reportable types. sign_up and upload are written by DB triggers only. */
-export const SITE_EVENT_TYPES = ['page_view', 'game_launch', 'error'] as const;
+/** Errors only: we log what could break the site and never track users (no page views, launches or user ids). */
+export const SITE_EVENT_TYPES = ['error'] as const;
 export type SiteEventType = (typeof SITE_EVENT_TYPES)[number];
 export const SITE_EVENT_MAX_PATH = 512;
 /** UTF-8 bytes of the details JSON. Kept under the DB's pg_column_size(details) <= 4096 (jsonb is larger than its text). */
@@ -39,7 +39,7 @@ function strings(v: unknown, out: string[] = []): string[] {
   return out;
 }
 
-/** Validates an untrusted body. user_id is never read from it; the caller supplies it from the session. */
+/** Validates an untrusted body. Nothing in it can identify a user; user_id is never stored. */
 export function parseSiteEvent(body: unknown): { ok: true; event: SiteEventInput } | { ok: false; reason: string } {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return { ok: false, reason: 'body' };
   const b = body as Record<string, unknown>;
@@ -70,10 +70,11 @@ export function parseSiteEvent(body: unknown): { ok: true; event: SiteEventInput
 /* ---------- write ---------- */
 
 /** game_id resolves to an existing game or null, atomically in the insert. */
-export async function recordSiteEvent(event: SiteEventInput, userId: string | null): Promise<void> {
+export async function recordSiteEvent(event: SiteEventInput): Promise<void> {
   const { sql } = await import('./db');
-  await sql`insert into public.site_events (event_type, user_id, game_id, path, details)
-    values (${event.type}, ${userId}, (select id from public.games where id = ${event.gameId}), ${event.path}, ${sql.json(event.details as never)})`;
+  // user_id is left null: error logs are never tied to a user.
+  await sql`insert into public.site_events (event_type, game_id, path, details)
+    values (${event.type}, (select id from public.games where id = ${event.gameId}), ${event.path}, ${sql.json(event.details as never)})`;
 }
 
 export type WriteOutcome = 'ok' | 'timeout' | 'invalid' | 'error';
@@ -84,12 +85,11 @@ export type WriteOutcome = 'ok' | 'timeout' | 'invalid' | 'error';
  */
 export async function recordSiteEventBounded(
   event: SiteEventInput,
-  userId: string | null,
   { write = recordSiteEvent, timeoutMs = SITE_EVENT_WRITE_TIMEOUT_MS }: { write?: typeof recordSiteEvent; timeoutMs?: number } = {},
 ): Promise<WriteOutcome> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<WriteOutcome>((resolve) => { timer = setTimeout(() => resolve('timeout'), timeoutMs); });
-  const written = write(event, userId).then(
+  const written = write(event).then(
     () => 'ok' as const,
     (err: { code?: string; message?: string }) => {
       // DB messages carry no row values for these errors; the event itself is never logged.
@@ -132,13 +132,13 @@ export interface HandleDeps {
 }
 
 /**
- * POST /api/events behaviour. `userId` must come from the verified session; the body cannot set it.
+ * POST /api/events behaviour: 'error' events only, never tied to a user.
  * 429 rate limited, 413 body over SITE_EVENT_MAX_BODY_BYTES, 400 invalid or PII, else 204 after the
  * awaited (<= ~1.5s) insert. A slow or failing DB still gets 204 and the event is dropped.
  */
 export async function handleSiteEvent(
   request: Request,
-  { ip, userId }: { ip: string; userId: string | null },
+  { ip }: { ip: string },
   { write, timeoutMs, limiter = siteEventsByIp }: HandleDeps = {},
 ): Promise<Response> {
   if (!limiter.hit(ip)) return new Response('Too many requests', { status: 429 });
@@ -154,7 +154,7 @@ export async function handleSiteEvent(
   }
   const parsed = parseSiteEvent(body);
   if (!parsed.ok) return new Response('Bad request', { status: 400 });
-  const outcome = await recordSiteEventBounded(parsed.event, userId, { write, timeoutMs });
+  const outcome = await recordSiteEventBounded(parsed.event, { write, timeoutMs });
   if (outcome === 'invalid') return new Response('Bad request', { status: 400 });
   if (outcome !== 'ok') console.warn(`[events] dropped (${outcome})`);
   return new Response(null, { status: 204 });

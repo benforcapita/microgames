@@ -1,22 +1,26 @@
 import { test, expect } from '@playwright/test';
 
-test('a portal page sends a page_view to /api/events with no query or hash in the path', async ({ page }) => {
-  // Chromium does not expose sendBeacon bodies to Playwright, so record each body and still send it for real.
+test('/api/events accepts only errors; page_view and game_launch get 400', async ({ request }) => {
+  const post = (data) => request.post('/api/events', { data });
+  expect((await post({ type: 'page_view', path: '/games' })).status()).toBe(400);
+  expect((await post({ type: 'game_launch', path: '/play/x', gameId: 'x' })).status()).toBe(400);
+  expect((await post({ type: 'error', path: '/games', details: { source: 'e2e', message: 'boom' } })).status()).toBe(204);
+});
+
+test('loading a page sends nothing to /api/events; a script error sends one error event', async ({ page }) => {
+  const types = [];
   await page.addInitScript(() => {
     const real = navigator.sendBeacon.bind(navigator);
     window.__beacons = [];
     navigator.sendBeacon = (url, data) => {
-      data.text().then((t) => window.__beacons.push({ url: String(url), body: t }));
+      data.text().then((t) => window.__beacons.push(JSON.parse(t).type));
       return real(url, data);
     };
   });
-  const responded = page.waitForResponse((r) => r.url().endsWith('/api/events') && r.request().method() === 'POST');
-  await page.goto('/games?email=ben%40example.com&utm_source=x#tok');
-  expect((await responded).status()).toBe(204);
-  await expect.poll(() => page.evaluate(() => window.__beacons.length)).toBeGreaterThan(0);
-  const [first] = await page.evaluate(() => window.__beacons);
-  expect(new URL(first.url, 'http://x').pathname).toBe('/api/events');
-  const body = JSON.parse(first.body);
-  expect(body).toEqual({ type: 'page_view', path: '/games' });
-  expect(first.body).not.toMatch(/email|utm_source|tok|%40|\?|#/);
+  page.on('request', (r) => { if (r.url().endsWith('/api/events')) types.push(r.method()); });
+  await page.goto('/games?ref=x#h');
+  await page.waitForTimeout(1000);
+  expect(types).toEqual([]);
+  await page.evaluate(() => setTimeout(() => { throw new Error('lg2 e2e boom'); }));
+  await expect.poll(() => page.evaluate(() => window.__beacons)).toEqual(['error']);
 });
