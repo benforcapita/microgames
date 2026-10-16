@@ -12,7 +12,7 @@ import { promisify } from 'node:util';
 import zlib from 'node:zlib';
 import { frameAncestors, matchEmbedder, parseOriginList } from './frame-ancestors.mjs';
 import { verifyPreviewToken } from './preview-token.mjs';
-import { gameCsp } from './csp.mjs';
+import { gameCsp, ownAssetSource } from './csp.mjs';
 import { injectHead } from './inject.mjs';
 
 const BOOT = fs.readFileSync(new URL('./boot.js', import.meta.url), 'utf8');
@@ -34,10 +34,15 @@ export const ASSET_MIME = {
   mp3: 'audio/mpeg', ogg: 'audio/ogg', oga: 'audio/ogg', wav: 'audio/wav', m4a: 'audio/mp4', aac: 'audio/aac', flac: 'audio/flac', weba: 'audio/webm',
   woff: 'font/woff', woff2: 'font/woff2', ttf: 'font/ttf', otf: 'font/otf',
   json: 'application/json; charset=utf-8',
+  js: 'text/javascript; charset=utf-8', mjs: 'text/javascript; charset=utf-8', css: 'text/css; charset=utf-8',
+  wasm: 'application/wasm',
   txt: 'text/plain; charset=utf-8',
 };
-const COMPRESSIBLE = new Set(['html', 'svg', 'json', 'txt', 'ttf', 'otf', 'wav', 'ico']);
+const COMPRESSIBLE = new Set(['html', 'svg', 'json', 'txt', 'ttf', 'otf', 'wav', 'ico', 'js', 'mjs', 'css', 'wasm']);
 export const IMMUTABLE = 'public, max-age=31536000, immutable';
+// Proving games can still be rejected/replaced, so their assets must not be pinned in shared caches for a year.
+export const SHORT_CACHE = 'public, max-age=60, must-revalidate';
+const HOST_RE = /^[A-Za-z0-9.-]+(:\d{1,5})?$/;
 const VERSION_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$/;
 // No leading dot (so no `.`, `..` or dotfiles), no separators, no encodings.
 const SEGMENT_RE = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$/;
@@ -59,7 +64,7 @@ export function parseAssetPath(segments) {
   if (!parts.every((seg) => SEGMENT_RE.test(seg))) return null;
   const ext = parts[parts.length - 1].split('.').pop().toLowerCase();
   if (!parts[parts.length - 1].includes('.') || !Object.hasOwn(ASSET_MIME, ext)) return null;
-  return { key: `${version}/${parts.join('/')}`, ext };
+  return { key: `${version}/${parts.join('/')}`, ext, version };
 }
 
 // Boot only. The upload preview sets its own capture flag; do not add one here.
@@ -153,7 +158,7 @@ function coalesce(fn) {
 }
 
 /**
- * @param {{ supabaseUrl: string, secret: string, webOrigins?: string, previewSecret?: string,
+ * @param {{ supabaseUrl: string, secret: string, webOrigins?: string, previewSecret?: string, cdnOrigin?: string,
  *           fetch?: typeof fetch, now?: () => number, ttlMs?: number }} cfg
  */
 export function createHandler(cfg) {
@@ -161,6 +166,15 @@ export function createHandler(cfg) {
   const SECRET = cfg.secret;
   const WEB_ORIGINS = cfg.webOrigins ?? 'http://localhost:* http://127.0.0.1:*';
   const PREVIEW_SECRET = cfg.previewSecret || '';
+  // This CDN's own origin, for the game CSP's own-asset source. Configured, else derived from Host.
+  const CDN_ORIGIN = cfg.cdnOrigin || '';
+  const cdnOrigin = (req) => {
+    if (CDN_ORIGIN) return CDN_ORIGIN;
+    const host = String(req.headers.host ?? '');
+    if (!HOST_RE.test(host)) return '';
+    const proto = String(req.headers['x-forwarded-proto'] ?? '').split(',')[0].trim() === 'https' ? 'https' : 'http';
+    return `${proto}://${host}`;
+  };
   const doFetch = cfg.fetch ?? fetch;
   const now = cfg.now ?? Date.now;
   // TTL caches so popular games don't hit Storage/PostgREST on every play. The stage TTL is the access-control
@@ -248,7 +262,7 @@ export function createHandler(cfg) {
             referer: req.headers.referer,
             embed: url.searchParams.get('embed'),
             webOrigins: WEB_ORIGINS,
-          })),
+          }), asset ? ownAssetSource(cdnOrigin(req), id, asset.version) : ''),
           'Cache-Control': cacheControl,
           Vary: 'Origin, Referer',
           ...privateCache,
@@ -258,15 +272,22 @@ export function createHandler(cfg) {
       if (asset) {
         // HTML documents get the runtime (and the embedder-dependent CSP, so they still revalidate).
         if (asset.ext === 'html' && !url.searchParams.has('source')) return gameHtml('no-cache');
-        // Assets are served byte-for-byte (never injected); the version segment makes them immutable.
+        // Assets are served byte-for-byte (never injected). Live versions are immutable; proving ones stay short.
         const allowed = matchEmbedder(req.headers.origin, portalOrigins);
+        // The game document runs in an opaque-origin sandbox, so its CORS-mode loads (fetch, wasm, module
+        // scripts) send `Origin: null`. Grant exactly that, only on this game's version assets; which game may
+        // load them is enforced by the per-game path in the game CSP (connect/script-src), not by CORS.
+        const sandboxCors = asset.ext !== 'html' && req.headers.origin === 'null'
+          ? { 'Access-Control-Allow-Origin': 'null' } : {};
         return sendCacheable(req, res, entry, {
           etag, name: 'raw', make: null, compress: COMPRESSIBLE.has(asset.ext),
           headers: {
             'Content-Type': asset.ext === 'html' ? 'text/plain; charset=utf-8' : ASSET_MIME[asset.ext],
             'Content-Security-Policy': asset.ext === 'html' ? "sandbox; default-src 'none'" : "default-src 'none'",
-            'Cache-Control': IMMUTABLE,
-            ...(asset.ext === 'html' ? { ...(allowed ? { 'Access-Control-Allow-Origin': allowed } : {}), Vary: 'Origin' } : {}),
+            'Cache-Control': stage === 'live' ? IMMUTABLE : SHORT_CACHE,
+            ...sandboxCors,
+            ...(asset.ext === 'html' ? { ...(allowed ? { 'Access-Control-Allow-Origin': allowed } : {}) } : {}),
+            Vary: 'Origin',
             ...privateCache,
           },
         });
@@ -315,7 +336,7 @@ export const handle = (req, res) => {
     const supabaseUrl = process.env.PUBLIC_SUPABASE_URL;
     const secret = process.env.SUPABASE_SECRET_KEY;
     if (!supabaseUrl || !secret) throw new Error('game-cdn needs PUBLIC_SUPABASE_URL and SUPABASE_SECRET_KEY');
-    defaultHandler = createHandler({ supabaseUrl, secret, webOrigins: process.env.MG_WEB_ORIGINS, previewSecret: process.env.CDN_PREVIEW_SECRET });
+    defaultHandler = createHandler({ supabaseUrl, secret, webOrigins: process.env.MG_WEB_ORIGINS, previewSecret: process.env.CDN_PREVIEW_SECRET, cdnOrigin: process.env.MG_CDN_ORIGIN });
   }
   return defaultHandler(req, res);
 };

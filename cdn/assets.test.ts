@@ -13,7 +13,7 @@ const FILES: Record<string, string> = {
   'v1/fonts/pixel.woff2': 'WOFF2',
   'v1/data/level.json': '{"a":1}',
   'v1/readme.txt': 'hi',
-  'v1/evil.js': 'alert(1)',
+  'v1/evil.php': '<?php',
   'v1/page.svgz': 'x',
 };
 
@@ -62,9 +62,9 @@ describe('AS-3 versioned asset serving', () => {
   });
   it('404s extensions outside the allowlist (even if the object exists)', async () => {
     const { get, calls } = harness();
-    for (const p of ['evil.js', 'page.svgz', 'noext', 'index.htm', 'x.mjs', 'x.wasm'])
+    for (const p of ['evil.php', 'page.svgz', 'noext', 'index.htm', 'x.exe', 'x.sh'])
       assert.equal((await get(`/g/live0001/v1/${p}`)).status, 404, p);
-    assert.ok(!calls.some((c) => c.includes('evil.js')), 'disallowed paths never reach Storage');
+    assert.ok(!calls.some((c) => c.includes('evil.php')), 'disallowed paths never reach Storage');
   });
   it('404s missing assets, unknown games and gated stages', async () => {
     const { get } = harness();
