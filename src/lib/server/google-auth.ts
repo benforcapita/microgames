@@ -13,8 +13,31 @@ export const AUTH_ERROR_TEXT = {
   link_expired: 'That sign-in link is invalid or has expired. Please try again.',
   other_browser: 'Please finish signing in in the same browser you started in.',
   signin_failed: "Sign-in didn't work. Please try again.",
+  // AU-1: email/password form
+  invalid_email: 'Enter a valid email address.',
+  password_too_short: 'Password must be at least 8 characters.',
+  invalid_credentials: "That email and password don't match.",
+  email_not_confirmed: 'Please confirm your email first. Check your inbox for the link.',
+  account_exists: 'An account with this email already exists. Try logging in.',
+  weak_password: 'Please choose a stronger password.',
+  rate_limited: 'Too many attempts. Please wait a minute and try again.',
+  email_unavailable: "Sign-in email can't be sent from this address.",
 } as const;
 export type AuthErrorCode = keyof typeof AUTH_ERROR_TEXT;
+/** What /login shows for ?error=: fixed text for a known code; anything else (free text, unknown codes) is signin_failed. */
+export const authErrorText = (v: string | null): string | null => (v === null || v === '' ? null : AUTH_ERROR_TEXT[isAuthErrorCode(v) ? v : 'signin_failed']);
+
+/** Code for a failed email-form call (signInWithPassword / signUp / signInWithOtp), from the AuthError's stable `code`. */
+export function emailAuthErrorCode(err: { code?: unknown; status?: unknown } | null | undefined): AuthErrorCode {
+  const code = typeof err?.code === 'string' ? err.code : '';
+  if (code === 'invalid_credentials') return 'invalid_credentials';
+  if (code === 'email_not_confirmed') return 'email_not_confirmed';
+  if (code === 'user_already_exists' || code === 'email_exists') return 'account_exists';
+  if (code === 'weak_password') return 'weak_password';
+  if (code.startsWith('over_') || err?.status === 429) return 'rate_limited';
+  return 'signin_failed';
+}
+
 export const isAuthErrorCode = (v: unknown): v is AuthErrorCode => typeof v === 'string' && Object.hasOwn(AUTH_ERROR_TEXT, v);
 
 type OAuthResult = { data: { url: string | null } | null; error: { message: string } | null };
