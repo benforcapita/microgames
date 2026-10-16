@@ -79,6 +79,7 @@ const forkable = fork && fork.license !== 'All rights reserved' ? fork : null;
         <span><input type="checkbox" name="agree" required /> I confirm this game contains no unlicensed copyrighted art, music
         or characters, and no voice clones of real people. <a href="/creators#rules">Content rules</a></span>
       </label>
+      <div id="asset-warnings" hidden></div>
       <button class="btn" type="submit">Submit for validation</button>
     </form>
   </section>
@@ -104,6 +105,11 @@ const forkable = fork && fork.license !== 'All rights reserved' ? fork : null;
   .snap-copy { display: grid; gap: 0.6rem; align-content: center; }
   .snap-copy p { margin: 0; }
   #use-preview[aria-pressed='true'] { border-color: var(--accent); color: var(--accent); }
+  #asset-warnings { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 1.25rem; display: grid; gap: 0.75rem; }
+  #asset-warnings[hidden] { display: none !important; }
+  #asset-warnings p { margin: 0; }
+  #asset-warnings ul { margin: 0.25rem 0 0; padding-left: 1.25rem; }
+  #asset-warnings .warn { color: var(--warn); }
   @media (max-width: 860px) {
     .upload, .two, .snap { grid-template-columns: 1fr; }
     .intro { position: static; }
@@ -113,10 +119,13 @@ const forkable = fork && fork.license !== 'All rights reserved' ? fork : null;
 <script>
   import boot from '../../cdn/boot.js?raw';
   import { PREVIEW_TIMEOUT_COPY, createPreviewWatch, injectPreview } from '../client/upload-preview';
+  import { formatSize, summarizeAssets } from '../lib/asset-limits';
+  import { scanAssetSource } from '../lib/server/asset-scan';
 
   const form = document.getElementById('upload-form') as HTMLFormElement;
   const errors = document.getElementById('errors')!;
   const gameInput = form.querySelector<HTMLInputElement>('input[name="game"]')!;
+  const assetWarnings = document.getElementById('asset-warnings');
   const thumbInput = document.getElementById('thumb-file') as HTMLInputElement;
   const snap = document.getElementById('snap')!;
   const frame = document.getElementById('game-preview') as HTMLIFrameElement;
@@ -155,6 +164,36 @@ const forkable = fork && fork.license !== 'All rights reserved' ? fork : null;
     snapMsg.textContent = usingPreview ? 'This preview will be the thumbnail.' : 'No thumbnail file selected.';
   }
 
+  function renderAssetWarnings(container: HTMLElement, summary: ReturnType<typeof summarizeAssets>) {
+    container.replaceChildren();
+
+    const totalP = document.createElement('p');
+    if (summary.overTotal) totalP.className = 'warn';
+    totalP.textContent = `Whole game: ${formatSize(summary.totalBytes)} of 4 MB`;
+    container.appendChild(totalP);
+
+    if (summary.missing.length > 0) {
+      const missingDiv = document.createElement('div');
+      missingDiv.setAttribute('role', 'status');
+
+      const msgP = document.createElement('p');
+      msgP.className = 'warn';
+      msgP.textContent = `${summary.missing.length} referenced file(s) not uploaded yet (upload them from the game's assets page after submitting):`;
+      missingDiv.appendChild(msgP);
+
+      const ul = document.createElement('ul');
+      for (const path of summary.missing) {
+        const li = document.createElement('li');
+        li.textContent = path;
+        ul.appendChild(li);
+      }
+      missingDiv.appendChild(ul);
+      container.appendChild(missingDiv);
+    }
+
+    container.hidden = false;
+  }
+
   gameInput.addEventListener('change', () => {
     const file = gameInput.files?.[0];
     snapshot = null;
@@ -167,6 +206,10 @@ const forkable = fork && fork.license !== 'All rights reserved' ? fork : null;
     if (previewUrl) URL.revokeObjectURL(previewUrl);
     previewUrl = '';
     watch.stop();
+    if (assetWarnings) {
+      assetWarnings.hidden = true;
+      assetWarnings.replaceChildren();
+    }
     if (!file) { snap.hidden = true; return; }
     snap.hidden = false;
     snapMsg.textContent = 'Capturing a preview from the first frames…';
@@ -179,9 +222,20 @@ const forkable = fork && fork.license !== 'All rights reserved' ? fork : null;
     file.text().then((html) => {
       previewUrl = URL.createObjectURL(new Blob([injectBoot(html)], { type: 'text/html' }));
       frame.src = previewUrl;
+
+      const scan = scanAssetSource(html);
+      const summary = summarizeAssets({
+        codeBytes: file.size,
+        assets: scan.assets.map((a) => ({ path: a.path, status: 'missing', sizeBytes: null })),
+      });
+      if (assetWarnings) renderAssetWarnings(assetWarnings, summary);
     }).catch(() => {
       watch.stop();
       snapMsg.textContent = 'Could not read that file. Upload a PNG, JPEG, or WebP thumbnail.';
+      if (assetWarnings) {
+        assetWarnings.hidden = true;
+        assetWarnings.replaceChildren();
+      }
     });
   });
 

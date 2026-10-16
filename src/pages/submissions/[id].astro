@@ -1,6 +1,8 @@
 ---
 import Layout from '../../layouts/Layout.astro';
-import { sqlSubmissionStore } from '../../lib/server/submissions-db';
+import AssetWarnings from '../../components/AssetWarnings.astro';
+import { summarizeAssets, type AssetInputItem } from '../../lib/asset-limits';
+import { loadAssetSummaryInput, sqlSubmissionStore } from '../../lib/server/submissions-db';
 import {
   isSubmissionPreview,
   previewSubmissionView,
@@ -20,6 +22,16 @@ const result = preview
 
 if (result.status === 401) return Astro.redirect(`/login?next=${encodeURIComponent(Astro.url.pathname)}`);
 if (result.status !== 200) return Astro.rewrite('/404');
+
+const PREVIEW_ASSETS: AssetInputItem[] = [
+  { path: 'sprites/hero.png', status: 'uploaded', sizeBytes: 180 * 1024 },
+  { path: 'audio/jump.mp3', status: 'missing', sizeBytes: null },
+];
+
+const assetSummaryInput = preview
+  ? { codeBytes: 48 * 1024, assets: PREVIEW_ASSETS }
+  : await loadAssetSummaryInput(id);
+const assetSummary = summarizeAssets(assetSummaryInput);
 
 const view: SubmissionView = result.view;
 const staticChecks = view.validation?.checks.filter((c) => c.source === 'static') ?? [];
@@ -45,6 +57,8 @@ const stageLabel = { pending: 'Pending', proving: 'Proving Grounds', live: 'Live
       </span>
     </div>
     <p class="muted lead">{view.detail}</p>
+
+    <AssetWarnings summary={assetSummary} />
 
     {view.published && (
       <p class="row">

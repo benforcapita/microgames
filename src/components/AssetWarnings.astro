@@ -1,0 +1,39 @@
+---
+import { formatSize, type summarizeAssets } from '../lib/asset-limits';
+
+interface Props {
+  summary: ReturnType<typeof summarizeAssets>;
+}
+
+const { summary } = Astro.props;
+---
+
+<div id="asset-warnings" class="panel">
+  <p class:list={[{ warn: summary.overTotal }]}>Whole game: {formatSize(summary.totalBytes)} of 4 MB</p>
+
+  {summary.missing.length > 0 && (
+    <div role="status">
+      <p class="warn">{summary.missing.length} referenced file(s) not uploaded yet:</p>
+      <ul>
+        {summary.missing.map((path) => (
+          <li>{path}</li>
+        ))}
+      </ul>
+    </div>
+  )}
+
+  {summary.large.length > 0 && (
+    <ul>
+      {summary.large.map((asset) => (
+        <li class="warn">{asset.path} is over 100 KB ({formatSize(asset.sizeBytes)})</li>
+      ))}
+    </ul>
+  )}
+</div>
+
+<style>
+  #asset-warnings { display: grid; gap: 0.75rem; }
+  #asset-warnings p { margin: 0; }
+  #asset-warnings ul { margin: 0.25rem 0 0; padding-left: 1.25rem; }
+  .warn { color: var(--warn); }
+</style>
