@@ -1,4 +1,4 @@
-import { containsPii, truncateText, utf8Bytes, wellFormed } from '../pii';
+import { containsPii, hasUrlIntIpv4, truncateText, utf8Bytes, wellFormed } from '../pii';
 import { createLimiter } from './abuse';
 
 /** Client-reportable types. sign_up and upload are written by DB triggers only. */
@@ -62,6 +62,8 @@ export function parseSiteEvent(body: unknown): { ok: true; event: SiteEventInput
   if (utf8Bytes(JSON.stringify(details)) > SITE_EVENT_MAX_DETAILS_BYTES) return { ok: false, reason: 'details-size' };
   // No emails or IPs at rest, in any stored field.
   if ([path ?? '', gameId ?? '', ...strings(details)].some(containsPii)) return { ok: false, reason: 'pii' };
+  // Integer IPv4 only where a bare number must be an address (path segment / query value), never free text.
+  if (path && hasUrlIntIpv4(path)) return { ok: false, reason: 'pii' };
   return { ok: true, event: { type: b.type as SiteEventType, path, gameId, details } };
 }
 

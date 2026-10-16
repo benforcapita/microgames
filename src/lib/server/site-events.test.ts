@@ -100,7 +100,7 @@ describe('POST /api/events: no emails or IPs stored', () => {
     urlenc: 'ben%40example.com', urlenc2: 'ben%2540example.com', urlenc3: 'ben%252540example.com', query: '/q?e=ben%2Bx%40example.com',
     badEncodingThenEmail: '%E0%A4%A ben%40x.com',
     spacedAt: 'ben at example.com', bracketAt: 'ben[at]example.com', parenAt: 'ben(at)example.com', atDot: 'ben (at) example dot com', wordAtDot: 'ben at example dot com',
-    ipv4: '203.0.113.9', ipv4zero: '203.000.113.009', ipv4int: '3405803785',
+    ipv4: '203.0.113.9', ipv4zero: '203.000.113.009',
     ipv6full: '2001:db8:0:0:0:0:0:1', ipv6comp: '2001:db8::1', ipv6loop: '::1', ipv6ll: 'fe80::1', ipv6zone: 'fe80::1%eth0', ipv6bracket: '[::1]:8080',
     mapped: '::ffff:203.0.113.9', mappedhex: '::ffff:cb00:7109', ipv6urlenc: '2001%3Adb8%3A%3A1',
   };
@@ -123,6 +123,26 @@ describe('POST /api/events: no emails or IPs stored', () => {
     const ok = ['TypeError: x is undefined\n    at main.js:3:14\n    at Object.run (game.js:10:2)', 'v1.2.3', '12:30:45', 'Foo::bar', 'score 12345', '100%', '%E0%A4%A', 1760000000000];
     for (const v of ok) assert.equal((await h.send({ type: 'error', path: '/games/space-at-night', details: { v } })).status, 204, String(v));
     assert.equal(h.rows.length, ok.length);
+  });
+});
+
+describe('POST /api/events: decimal-integer IPv4 only in URL parts', () => {
+  it('rejects ?ip=3405803777, a /3405803777 segment, and encoded variants; stores nothing', async () => {
+    const h = harness();
+    for (const path of ['/qa?ip=3405803777', '/qa?a=1&peer=3405803777', '/3405803777', '/u/3405803777/x', '/qa?ip=%33405803777', '/%2533405803777'])
+      assert.equal((await h.send({ type: 'page_view', path })).status, 400, path);
+    assert.equal(h.rows.length, 0);
+  });
+  it('stores 10-digit Unix timestamps in messages and details, and non-address numbers in paths', async () => {
+    const h = harness();
+    for (const body of [
+      { type: 'error', details: { message: 'Error at 1760598000: boom', ts: 1760598000, t: '1760598000' } },
+      { type: 'page_view', path: '/games/level-1760598000' },
+      { type: 'page_view', path: '/games/1234567' },
+      { type: 'page_view', path: '/games/99999999999' },
+    ]) assert.equal((await h.send(body)).status, 204, JSON.stringify(body));
+    assert.equal(h.rows.length, 4);
+    assert.equal(h.rows[0].event.details.ts, 1760598000);
   });
 });
 

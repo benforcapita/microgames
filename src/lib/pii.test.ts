@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { isIP } from 'node:net';
 import { describe, it } from 'node:test';
-import { containsPii, isIPv6, redactPii, REDACTED, truncateText, utf8Bytes, wellFormed } from './pii.ts';
+import { containsPii, hasUrlIntIpv4, isIPv6, redactPii, redactUrlIntIpv4, REDACTED, truncateText, utf8Bytes, wellFormed } from './pii.ts';
 
 describe('isIPv6 (parse-based) agrees with node:net', () => {
   const cases = ['::', '::1', 'fe80::1', '2001:db8::1', '2001:db8:0:0:0:0:0:1', '::ffff:203.0.113.9', '::ffff:cb00:7109', '1:2:3:4:5:6:7:8',
@@ -42,5 +42,17 @@ describe('truncateText (UTF-8 bytes, code-point boundaries)', () => {
   it('leaves short text alone and repairs lone surrogates', () => {
     assert.equal(truncateText('hello', 10), 'hello');
     assert.equal(truncateText('a\uD83D', 10), 'a\uFFFD');
+  });
+});
+
+describe('decimal-integer IPv4: URL parts only', () => {
+  it('flags whole path segments and query values', () => {
+    for (const p of ['/3405803777', '/a/3405803777/b', '/q?ip=3405803777', '/q?x=1&ip=3405803777#h']) assert.equal(hasUrlIntIpv4(p), true, p);
+    assert.equal(redactUrlIntIpv4('/u/3405803777/x'), `/u/${REDACTED}/x`);
+  });
+  it('ignores free text and numbers outside the IPv4 range or inside a segment', () => {
+    for (const p of ['/level-3405803777', '/q?t=a3405803777', '/1234567', '/99999999999']) assert.equal(hasUrlIntIpv4(p), false, p);
+    assert.equal(containsPii('crash at 1760598000'), false);
+    assert.equal(redactPii('crash at 1760598000'), 'crash at 1760598000');
   });
 });

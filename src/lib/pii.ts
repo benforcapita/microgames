@@ -64,8 +64,6 @@ const EMAIL_WORD_AT = new RegExp(
   'iu',
 );
 const IPV4_DOTTED = /(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])/;
-// A whole run of 8-10 digits in the IPv4 integer range (16777216 = 1.0.0.0 ... 4294967295).
-const IPV4_INT = /(?<!\d)\d{8,10}(?!\d)/g;
 
 function hasIpv6(s: string): boolean {
   // Candidate tokens: hex digits, colons, dots (for ::ffff:1.2.3.4); a %zone and surrounding dots are stripped.
@@ -78,18 +76,40 @@ function hasIpv6(s: string): boolean {
   return false;
 }
 
-function hasIpv4Int(s: string): boolean {
-  for (const m of s.matchAll(IPV4_INT)) {
-    const n = Number(m[0]);
-    if (n >= 16_777_216 && n <= 4_294_967_295) return true;
-  }
-  return false;
+/** A value that is exactly 8-10 digits in the IPv4 integer range (16777216 = 1.0.0.0 ... 4294967295). */
+function isIpv4Int(v: string): boolean {
+  if (!/^\d{8,10}$/.test(v)) return false;
+  const n = Number(v);
+  return n >= 16_777_216 && n <= 4_294_967_295;
 }
 
-/** True if the string, raw or after up to 3 percent-decodes, holds an email (incl. "at" forms) or an IPv4/IPv6 address. */
+/** URL parts where a bare integer can only be an address: whole path segments and whole query-param values. */
+function urlParts(path: string): string[] {
+  const [beforeHash] = path.split('#');
+  const q = beforeHash.indexOf('?');
+  const pathname = q < 0 ? beforeHash : beforeHash.slice(0, q);
+  const query = q < 0 ? '' : beforeHash.slice(q + 1);
+  const values = query ? query.split('&').map((kv) => kv.slice(kv.indexOf('=') + 1)) : [];
+  return [...pathname.split('/'), ...values];
+}
+
+/**
+ * Decimal-integer IPv4 ("3405803777") only when it is a whole path segment or query-param value.
+ * Free text (messages, details) is not checked for this: 10-digit Unix timestamps are common there.
+ */
+export function hasUrlIntIpv4(path: string): boolean {
+  return decodeVariants(path).some((v) => urlParts(v).some((part) => decodeVariants(part.replace(/\+/g, ' ')).some(isIpv4Int)));
+}
+
+/** Client side: replace such path segments with [redacted] (the client never sends a query string). */
+export function redactUrlIntIpv4(pathname: string): string {
+  return pathname.split('/').map((seg) => (decodeVariants(seg).some(isIpv4Int) ? REDACTED : seg)).join('/');
+}
+
+/** True if the string, raw or after up to 3 percent-decodes, holds an email (incl. "at" forms) or a dotted IPv4 / IPv6 address. */
 export function containsPii(s: string): boolean {
   return decodeVariants(s).some(
-    (v) => EMAIL.test(v) || EMAIL_BRACKET_AT.test(v) || EMAIL_WORD_AT.test(v) || IPV4_DOTTED.test(v) || hasIpv4Int(v) || hasIpv6(v),
+    (v) => EMAIL.test(v) || EMAIL_BRACKET_AT.test(v) || EMAIL_WORD_AT.test(v) || IPV4_DOTTED.test(v) || hasIpv6(v),
   );
 }
 

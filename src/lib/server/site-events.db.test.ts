@@ -82,6 +82,14 @@ describe('site_events writes (local DB)', { skip: !probeOk && 'no local database
     assert.equal(row.user_id, null);
   });
 
+  it('a 10-digit Unix timestamp in an error message and details is stored', async () => {
+    const r = parseSiteEvent({ type: 'error', path: `/${P}/ts`, details: { message: 'crash at 1760598000', ts: 1760598000 } });
+    assert.ok(r.ok, JSON.stringify(r));
+    await recordSiteEvent(r.event, null);
+    const [row] = await sql`select details from public.site_events where path = ${`/${P}/ts`}`;
+    assert.deepEqual(row.details, { message: 'crash at 1760598000', ts: 1760598000 });
+  });
+
   it('rows have no IP or email column and no IP/email value', async () => {
     const cols = (await sql<{ column_name: string }[]>`select column_name from information_schema.columns
       where table_schema = 'public' and table_name = 'site_events'`).map((c) => c.column_name).sort();
