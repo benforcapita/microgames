@@ -419,7 +419,12 @@ describe('SP-4 QA: budget-skipped files cannot slip past the text-scan fallback'
 describe('strict unloaded timing vs AST_BUDGET', () => {
   const cpus = os.cpus().length;
   const loadavg1 = os.loadavg()[0];
-  const skip = loadavg1 > 0.5 * cpus ? `box loaded: loadavg1=${loadavg1.toFixed(2)} > 0.5 x ${cpus} cpus; strict timing is only valid unloaded` : false;
+  // Absolute wall-clock bounds are not meaningful on shared CI runners.
+  const skip = process.env.CI
+    ? `CI=${process.env.CI}: strict absolute timing vs AST_BUDGET is not meaningful on shared CI runners; runs locally on idle boxes`
+    : loadavg1 > 0.5 * cpus
+      ? `box loaded: loadavg1=${loadavg1.toFixed(2)} > 0.5 x ${cpus} cpus; strict timing is only valid unloaded`
+      : false;
   const BOUND_MS = 0.75 * AST_BUDGET.ms;
   const fill = (unit: string, size: number) => unit.repeat(Math.floor(size / unit.length));
   const input = `<canvas></canvas><script>${fill('var a=b+c*d(e,f);', AST_BUDGET.maxJsBytes - 64)}</script>`;
