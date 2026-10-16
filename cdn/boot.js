@@ -141,6 +141,13 @@
     if (delay > 0) snapTimer = setTimeout(runSnapshot, delay);
     else snapTimer = setTimeout(function () { rAF(function () { runSnapshot(); }); }, 0);
   }
+  // Chromium may never fire rAF in an off-screen cross-origin iframe, so the first-frame
+  // trigger above can silently never run. Fall back to a timer once a canvas exists.
+  if (capturePreview) {
+    setTimeout(function () {
+      if (!firstFrame && !readySent && document.getElementsByTagName('canvas').length) runSnapshot();
+    }, 3000);
+  }
 
   /* ---------- storage shims ---------- */
   function makeStorage(initial, persist) {

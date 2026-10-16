@@ -1,0 +1,552 @@
+/**
+ * Owner upload of one asset into a game version.
+ *
+ * Limits live here (not in the scanner) so this keeps working if the scan
+ * module stops exporting them. A missing-file warning is AS-4, not this upload.
+ */
+import crypto from 'node:crypto';
+import { createLimiter } from './abuse.ts';
+import type { AssetDb } from './asset-manifest.ts';
+import { canonicalAssetPath, extensionOf, type ExpectedType } from './asset-scan.ts';
+import { containsHtmlMarker, sniffAsset, type SniffedFormat } from './asset-sniff.ts';
+
+/** HTML/code plus every asset already stored for the version, including this file. */
+export const GAME_VERSION_MAX_BYTES = 4 * 1024 * 1024;
+/** Larger assets are stored. The owner sees a warning afterwards. */
+export const ASSET_SIZE_WARN_BYTES = 100 * 1024;
+/** Rows allowed on one game, across versions. */
+export const MAX_ASSET_FILES = 200;
+
+/** Asset posts allowed per signed-in user. Same sliding window as the other limiters. */
+export const ASSET_UPLOAD_MAX = 30;
+export const ASSET_UPLOAD_WINDOW_MS = 10 * 60_000;
+
+export const ASSET_SIZE_WARNING = 'This asset is over 100 KB.';
+
+export const ASSET_UPLOAD_MESSAGES = {
+  rate: 'Too many uploads. Try again in a few minutes.',
+  empty: 'Choose a file to upload.',
+  path: 'That path is not allowed.',
+  manifest: "That path is not in this game's file list.",
+  cap: 'This game already has 200 files.',
+  markup: 'SVG and HTML files are not allowed.',
+  type: 'This file type is not allowed.',
+  storage: 'The file could not be stored. Try again.',
+  encoding: 'That path is not encoded correctly.',
+  control: 'That path contains a NUL or a control character.',
+} as const;
+
+/**
+ * Same extensions the game CDN will serve (`cdn/handler.mjs` `ASSET_MIME`).
+ * A test locks this object to that map so the two cannot drift.
+ * SVG and HTML are on the list and are still rejected from their bytes.
+ */
+export const UPLOAD_MIME = {
+  html: 'text/html; charset=utf-8',
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', avif: 'image/avif',
+  svg: 'image/svg+xml', ico: 'image/x-icon',
+  mp3: 'audio/mpeg', ogg: 'audio/ogg', oga: 'audio/ogg', wav: 'audio/wav', m4a: 'audio/mp4', aac: 'audio/aac', flac: 'audio/flac', weba: 'audio/webm',
+  woff: 'font/woff', woff2: 'font/woff2', ttf: 'font/ttf', otf: 'font/otf',
+  json: 'application/json; charset=utf-8',
+  js: 'text/javascript; charset=utf-8', mjs: 'text/javascript; charset=utf-8', css: 'text/css; charset=utf-8',
+  wasm: 'application/wasm',
+  txt: 'text/plain; charset=utf-8',
+} as const;
+
+export type UploadExtension = keyof typeof UPLOAD_MIME;
+
+/** Sniffed formats that may be stored under each CDN extension. */
+const FORMATS_BY_EXT: Record<UploadExtension, readonly SniffedFormat[]> = {
+  html: [],
+  png: ['png'],
+  jpg: ['jpeg'],
+  jpeg: ['jpeg'],
+  gif: ['gif'],
+  webp: ['webp'],
+  avif: ['avif'],
+  svg: [],
+  ico: ['ico'],
+  mp3: ['mp3'],
+  ogg: ['ogg'],
+  oga: ['ogg'],
+  wav: ['wav'],
+  m4a: ['m4a'],
+  aac: ['aac'],
+  flac: ['flac'],
+  weba: ['weba'],
+  woff: ['woff'],
+  woff2: ['woff2'],
+  ttf: ['ttf'],
+  otf: ['otf'],
+  json: ['json'],
+  js: ['text', 'json'],
+  mjs: ['text', 'json'],
+  css: ['text', 'json'],
+  wasm: ['wasm'],
+  txt: ['text', 'json'],
+};
+
+const EXPECTED_BY_EXT: Record<UploadExtension, StoredAssetType> = {
+  html: 'text',
+  png: 'image', jpg: 'image', jpeg: 'image', gif: 'image', webp: 'image', avif: 'image', svg: 'image', ico: 'image',
+  mp3: 'audio', ogg: 'audio', oga: 'audio', wav: 'audio', m4a: 'audio', aac: 'audio', flac: 'audio', weba: 'audio',
+  woff: 'font', woff2: 'font', ttf: 'font', otf: 'font',
+  json: 'json',
+  js: 'text', mjs: 'text', css: 'text', txt: 'text',
+  wasm: 'wasm',
+};
+
+/** js and mjs may contain the characters `<script` or `<html`. Other types may not. */
+const SCRIPT_EXTENSIONS = new Set<UploadExtension>(['js', 'mjs']);
+
+export type StoredAssetType = ExpectedType | 'wasm';
+
+function isUploadExtension(ext: string): ext is UploadExtension {
+  return Object.prototype.hasOwnProperty.call(UPLOAD_MIME, ext);
+}
+
+const SNIFFED_FORMATS = new Set<string>([
+  'png', 'jpeg', 'gif', 'webp', 'avif', 'ico', 'mp3', 'ogg', 'wav', 'm4a', 'aac', 'flac', 'weba',
+  'woff', 'woff2', 'ttf', 'otf', 'wasm', 'json', 'text',
+]);
+
+function isSniffedFormat(value: string): value is SniffedFormat {
+  return SNIFFED_FORMATS.has(value);
+}
+
+/** A decoded path that would leave the game directory, including one hidden behind percent-encoding. */
+function isDecodedTraversal(value: string): boolean {
+  return value.includes('..') || value.includes('\\') || value.startsWith('/');
+}
+
+/**
+ * NUL, other C0 controls, DEL, a percent-escape that is not two hex digits,
+ * or a traversal that appears only after percent-decoding (`%252e%252e` → `..`).
+ * Literal `../` is left for the path check so the upload page can still flash it.
+ */
+export function assetPathRejection(raw: string): { status: 400; message: string } | null {
+  if (/%(?![0-9A-Fa-f]{2})/.test(raw)) return { status: 400, message: ASSET_UPLOAD_MESSAGES.encoding };
+  if (hasControlChar(raw)) return { status: 400, message: ASSET_UPLOAD_MESSAGES.control };
+  let decoded = raw;
+  for (let pass = 0; pass < 8 && /%[0-9A-Fa-f]{2}/.test(decoded); pass++) {
+    let next: string;
+    try {
+      next = decodeURIComponent(decoded);
+    } catch {
+      return { status: 400, message: ASSET_UPLOAD_MESSAGES.encoding };
+    }
+    if (next === decoded) break;
+    decoded = next;
+    if (hasControlChar(decoded)) return { status: 400, message: ASSET_UPLOAD_MESSAGES.control };
+    if (isDecodedTraversal(decoded)) return { status: 400, message: ASSET_UPLOAD_MESSAGES.path };
+  }
+  return null;
+}
+
+function hasControlChar(value: string): boolean {
+  for (let i = 0; i < value.length; i++) {
+    const c = value.charCodeAt(i);
+    if (c <= 0x1f || c === 0x7f) return true;
+  }
+  return false;
+}
+
+export type AssetFlashCode = keyof typeof ASSET_UPLOAD_MESSAGES;
+
+export function createAssetUploadLimiter(now?: () => number) {
+  return createLimiter({ windowMs: ASSET_UPLOAD_WINDOW_MS, max: ASSET_UPLOAD_MAX, now });
+}
+
+export const assetUploadsByUser = createAssetUploadLimiter();
+
+export function gameTooBigMessage(totalBytes: number): string {
+  return `This file would bring your game to ${formatGameMb(totalBytes)} MB; the whole game, code plus assets, must stay under 4 MB`;
+}
+
+/** Two decimals, with extra places when rounding would hide that the total is over 4 MB. */
+export function formatGameMb(bytes: number): string {
+  const value = bytes / (1024 * 1024);
+  if (bytes > GAME_VERSION_MAX_BYTES && value < 4.005) {
+    return value.toFixed(6).replace(/0+$/, '').replace(/\.$/, '');
+  }
+  return value.toFixed(2);
+}
+
+export function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+}
+
+export function mismatchMessage(got: StoredAssetType, want: StoredAssetType): string {
+  return `This file is ${got}, but the path expects ${want}.`;
+}
+
+export function extensionMismatchMessage(format: SniffedFormat, ext: string): string {
+  return `This file is ${format}, but the path expects ${ext}.`;
+}
+
+const EXPECTED_TYPES: readonly StoredAssetType[] = ['image', 'audio', 'font', 'json', 'text', 'wasm'];
+
+function isExpectedType(value: string | null): value is StoredAssetType {
+  return !!value && (EXPECTED_TYPES as readonly string[]).includes(value);
+}
+
+export interface ExistingAsset {
+  path: string;
+  expectedType: StoredAssetType;
+  status: 'missing' | 'uploaded' | 'rejected';
+  sizeBytes: number | null;
+  source: 'scan' | 'creator';
+}
+
+export interface AssessAssetInput {
+  userId: string | null;
+  ownerId: string | null;
+  rawPath: string;
+  /** True for the add-file form (`source=creator`). A listed path is still a replacement. */
+  adding: boolean;
+  bytes: Uint8Array;
+  existing: ExistingAsset | null;
+  /** Byte length of the game's HTML/code. */
+  codeBytes: number;
+  /** Sum of uploaded asset sizes for this version, including `existing` when it is uploaded. */
+  uploadedBytes: number;
+  /** Manifest rows for the whole game. */
+  fileCount: number;
+  rateAllowed: boolean;
+}
+
+export type AssetUploadDecision =
+  | { kind: 'login' }
+  | { kind: 'not-found' }
+  | { kind: 'bad-request'; status: 400; message: string }
+  | { kind: 'flash'; code: AssetFlashCode }
+  | {
+      kind: 'reject';
+      code: 'markup' | 'type' | 'mismatch' | 'too-big' | 'extension';
+      path: string;
+      expectedType: StoredAssetType;
+      source: 'scan' | 'creator';
+      message: string;
+      totalBytes?: number;
+      got?: StoredAssetType;
+      format?: SniffedFormat;
+      ext?: string;
+    }
+  | {
+      kind: 'store';
+      path: string;
+      expectedType: StoredAssetType;
+      source: 'scan' | 'creator';
+      contentType: string;
+      sha256: string;
+      sizeBytes: number;
+      warning: string | null;
+    };
+
+function rejectRow(
+  path: string,
+  expectedType: StoredAssetType,
+  source: 'scan' | 'creator',
+  code: 'markup' | 'type' | 'mismatch' | 'too-big' | 'extension',
+  message: string,
+  extra: { totalBytes?: number; got?: StoredAssetType; format?: SniffedFormat; ext?: string } = {},
+): AssetUploadDecision {
+  return { kind: 'reject', code, path, expectedType, source, message, ...extra };
+}
+
+/** Decide what an upload may do. Does not touch storage or Postgres. */
+export function assessAssetUpload(input: AssessAssetInput): AssetUploadDecision {
+  if (!input.userId) return { kind: 'login' };
+  if (!input.ownerId || input.userId !== input.ownerId) return { kind: 'not-found' };
+  const pathError = assetPathRejection(input.rawPath);
+  if (pathError) return { kind: 'bad-request', status: 400, message: pathError.message };
+  if (!input.rateAllowed) return { kind: 'flash', code: 'rate' };
+  if (input.bytes.byteLength === 0) return { kind: 'flash', code: 'empty' };
+
+  const canonical = canonicalAssetPath(input.rawPath);
+  if (canonical.kind !== 'path') return { kind: 'flash', code: 'path' };
+  const path = canonical.path;
+  if (hasControlChar(path)) return { kind: 'bad-request', status: 400, message: ASSET_UPLOAD_MESSAGES.control };
+
+  const ext = extensionOf(path);
+  if (!isUploadExtension(ext)) return { kind: 'flash', code: 'path' };
+  const row = input.existing && input.existing.path === path ? input.existing : null;
+  if (!row && !input.adding) return { kind: 'flash', code: 'manifest' };
+  if (!row && input.fileCount >= MAX_ASSET_FILES) return { kind: 'flash', code: 'cap' };
+
+  const expectedType = row?.expectedType ?? EXPECTED_BY_EXT[ext];
+  const source = row?.source ?? 'creator';
+  const sniffed = sniffAsset(input.bytes);
+  if (!sniffed.ok) {
+    if (sniffed.reason === 'svg' || sniffed.reason === 'html' || sniffed.reason === 'trailing') {
+      const message = sniffed.reason === 'trailing' ? ASSET_UPLOAD_MESSAGES.type : ASSET_UPLOAD_MESSAGES.markup;
+      const code = sniffed.reason === 'trailing' ? 'type' : 'markup';
+      return rejectRow(path, expectedType, source, code, message);
+    }
+    return rejectRow(path, expectedType, source, 'type', ASSET_UPLOAD_MESSAGES.type);
+  }
+  if (!SCRIPT_EXTENSIONS.has(ext) && containsHtmlMarker(input.bytes)) {
+    return rejectRow(path, expectedType, source, 'markup', ASSET_UPLOAD_MESSAGES.markup);
+  }
+  if (!FORMATS_BY_EXT[ext].includes(sniffed.format)) {
+    return rejectRow(path, expectedType, source, 'extension', extensionMismatchMessage(sniffed.format, ext), {
+      format: sniffed.format,
+      ext,
+    });
+  }
+  const matches = sniffed.expectedType === expectedType || (expectedType === 'text' && (sniffed.format === 'json' || sniffed.format === 'text'));
+  if (!matches) {
+    return rejectRow(path, expectedType, source, 'mismatch', mismatchMessage(sniffed.expectedType, expectedType), {
+      got: sniffed.expectedType,
+    });
+  }
+
+  const previous = row?.status === 'uploaded' ? (row.sizeBytes ?? 0) : 0;
+  const nextTotal = Math.max(0, input.codeBytes) + Math.max(0, input.uploadedBytes - previous) + input.bytes.byteLength;
+  if (nextTotal > GAME_VERSION_MAX_BYTES) {
+    return rejectRow(path, expectedType, source, 'too-big', gameTooBigMessage(nextTotal), { totalBytes: nextTotal });
+  }
+
+  const contentType = UPLOAD_MIME[ext];
+  return {
+    kind: 'store',
+    path,
+    expectedType,
+    source,
+    contentType,
+    sha256: crypto.createHash('sha256').update(input.bytes).digest('hex'),
+    sizeBytes: input.bytes.byteLength,
+    warning: input.bytes.byteLength > ASSET_SIZE_WARN_BYTES ? ASSET_SIZE_WARNING : null,
+  };
+}
+
+/** Query string for the redirect after a decision the owner is allowed to see. */
+export function assetUploadQuery(decision: Exclude<AssetUploadDecision, { kind: 'login' | 'not-found' | 'bad-request' }>): Record<string, string> {
+  if (decision.kind === 'flash') return { error: decision.code };
+  if (decision.kind === 'reject') {
+    const query: Record<string, string> = { error: decision.code };
+    if (decision.code === 'too-big' && decision.totalBytes !== undefined) query.total = String(decision.totalBytes);
+    if (decision.code === 'mismatch' && decision.got) {
+      query.got = decision.got;
+      query.want = decision.expectedType;
+    }
+    if (decision.code === 'extension' && decision.format && decision.ext) {
+      query.format = decision.format;
+      query.ext = decision.ext;
+    }
+    return query;
+  }
+  const query: Record<string, string> = { uploaded: decision.path };
+  if (decision.warning) query.warn = '1';
+  return query;
+}
+
+/**
+ * Flash text for a redirect. `uploaded` is shown only when it is one of this
+ * page's paths, so a crafted query cannot invent a success.
+ */
+export function assetFlashMessage(query: URLSearchParams, paths: readonly string[]): { error: string | null; notice: string | null } {
+  const code = query.get('error');
+  let error: string | null = null;
+  if (code === 'too-big') {
+    const total = Number(query.get('total'));
+    if (Number.isSafeInteger(total) && total >= 0) error = gameTooBigMessage(total);
+  } else if (code === 'mismatch') {
+    const got = query.get('got');
+    const want = query.get('want');
+    if (isExpectedType(got) && isExpectedType(want)) error = mismatchMessage(got, want);
+  } else if (code === 'extension') {
+    const format = query.get('format');
+    const ext = query.get('ext');
+    if (format && isSniffedFormat(format) && ext && isUploadExtension(ext)) error = extensionMismatchMessage(format, ext);
+  } else if (code && Object.prototype.hasOwnProperty.call(ASSET_UPLOAD_MESSAGES, code)) {
+    error = ASSET_UPLOAD_MESSAGES[code as AssetFlashCode];
+  }
+
+  const uploaded = query.get('uploaded');
+  if (!uploaded || !paths.includes(uploaded)) return { error, notice: null };
+  const warning = query.get('warn') === '1' ? ` ${ASSET_SIZE_WARNING}` : '';
+  return { error, notice: `Uploaded ${uploaded}.${warning}` };
+}
+
+/** Storage key `<game>/<version>/<path>`. Null when the pieces are not safe to join. */
+export function assetObjectPath(gameId: string, version: number, path: string): string | null {
+  if (!/^[A-Za-z0-9_-]{6,16}$/.test(gameId)) return null;
+  if (!Number.isInteger(version) || version < 1) return null;
+  const canonical = canonicalAssetPath(path);
+  if (canonical.kind !== 'path' || canonical.path !== path) return null;
+  if (!isUploadExtension(extensionOf(path)) || hasControlChar(path)) return null;
+  return `${gameId}/${version}/${path}`;
+}
+
+export interface AssetStorage {
+  upload(path: string, bytes: Uint8Array, contentType: string): Promise<{ error: { message: string } | null }>;
+  remove(path: string): Promise<{ error: { message: string } | null }>;
+}
+
+export interface GameAssetRow {
+  path: string;
+  expectedType: StoredAssetType;
+  status: 'missing' | 'uploaded' | 'rejected';
+  sizeBytes: number | null;
+  rejectReason: string | null;
+  source: 'scan' | 'creator';
+}
+
+interface AssetDbRow {
+  path: string;
+  expected_type: string;
+  status: string;
+  size_bytes: number | null;
+  reject_reason: string | null;
+  source: string;
+}
+
+function isStatus(value: string): value is GameAssetRow['status'] {
+  return value === 'missing' || value === 'uploaded' || value === 'rejected';
+}
+
+function isSource(value: string): value is GameAssetRow['source'] {
+  return value === 'scan' || value === 'creator';
+}
+
+function toRow(row: AssetDbRow): GameAssetRow | null {
+  if (!isExpectedType(row.expected_type) || !isStatus(row.status) || !isSource(row.source)) return null;
+  return {
+    path: row.path,
+    expectedType: row.expected_type,
+    status: row.status,
+    sizeBytes: row.size_bytes,
+    rejectReason: row.reject_reason,
+    source: row.source,
+  };
+}
+
+export async function listGameAssets(sql: AssetDb, gameId: string, version: number): Promise<GameAssetRow[]> {
+  const rows = await sql<AssetDbRow[]>`
+    select path, expected_type, status, size_bytes, reject_reason, source
+    from public.game_assets
+    where game_id = ${gameId} and version = ${version}
+    order by path
+  `;
+  return rows.flatMap((row) => {
+    const mapped = toRow(row);
+    return mapped ? [mapped] : [];
+  });
+}
+
+export async function findGameAsset(sql: AssetDb, gameId: string, version: number, path: string): Promise<GameAssetRow | null> {
+  const rows = await sql<AssetDbRow[]>`
+    select path, expected_type, status, size_bytes, reject_reason, source
+    from public.game_assets
+    where game_id = ${gameId} and version = ${version} and path = ${path}
+  `;
+  return rows[0] ? toRow(rows[0]) : null;
+}
+
+export interface AssetUsage {
+  codeBytes: number;
+  uploadedBytes: number;
+  fileCount: number;
+}
+
+export async function assetUsage(sql: AssetDb, gameId: string, version: number): Promise<AssetUsage> {
+  const [row] = await sql<{ code_bytes: number | null; uploaded_bytes: number; file_count: number }[]>`
+    select
+      (select size_bytes from public.games where id = ${gameId}) as code_bytes,
+      (select coalesce(sum(size_bytes), 0)::int from public.game_assets
+        where game_id = ${gameId} and version = ${version} and status = 'uploaded') as uploaded_bytes,
+      (select count(*)::int from public.game_assets where game_id = ${gameId}) as file_count
+  `;
+  return {
+    codeBytes: row?.code_bytes ?? 0,
+    uploadedBytes: row?.uploaded_bytes ?? 0,
+    fileCount: row?.file_count ?? 0,
+  };
+}
+
+async function writeAssetRow(
+  sql: AssetDb,
+  row: {
+    gameId: string;
+    version: number;
+    path: string;
+    expectedType: StoredAssetType;
+    status: 'uploaded' | 'rejected';
+    sizeBytes: number | null;
+    sha256: string | null;
+    source: 'scan' | 'creator';
+    rejectReason: string | null;
+  },
+): Promise<void> {
+  await sql`
+    insert into public.game_assets
+      (game_id, version, path, expected_type, status, size_bytes, content_sha256, source, reject_reason, updated_at)
+    values
+      (${row.gameId}, ${row.version}, ${row.path}, ${row.expectedType}, ${row.status}, ${row.sizeBytes},
+       ${row.sha256}, ${row.source}, ${row.rejectReason}, now())
+    on conflict (game_id, version, path) do update set
+      status = excluded.status,
+      size_bytes = excluded.size_bytes,
+      content_sha256 = excluded.content_sha256,
+      reject_reason = excluded.reject_reason,
+      updated_at = now()
+  `;
+}
+
+/**
+ * Store an accepted file, or record a rejection.
+ * A rejected replacement of an uploaded file leaves that row and object alone, so the
+ * counted size stays equal to the bytes still in the bucket. The CDN serves bucket
+ * objects, so the rejected bytes are never written and cannot be served.
+ * A storage failure does not mark the row uploaded.
+ */
+export async function saveAssetDecision(
+  sql: AssetDb,
+  storage: AssetStorage,
+  gameId: string,
+  version: number,
+  decision: Extract<AssetUploadDecision, { kind: 'store' | 'reject' }>,
+  bytes: Uint8Array,
+  previous: Pick<GameAssetRow, 'status' | 'sizeBytes'> | null,
+): Promise<{ ok: true } | { ok: false; code: 'storage' }> {
+  if (decision.kind === 'store') {
+    const objectPath = assetObjectPath(gameId, version, decision.path);
+    if (!objectPath) return { ok: false, code: 'storage' };
+    const put = await storage.upload(objectPath, bytes, decision.contentType);
+    if (put.error) return { ok: false, code: 'storage' };
+    await writeAssetRow(sql, {
+      gameId,
+      version,
+      path: decision.path,
+      expectedType: decision.expectedType,
+      status: 'uploaded',
+      sizeBytes: decision.sizeBytes,
+      sha256: decision.sha256,
+      source: decision.source,
+      rejectReason: null,
+    });
+    return { ok: true };
+  }
+  if (previous?.status === 'uploaded') return { ok: true };
+  const objectPath = assetObjectPath(gameId, version, decision.path);
+  if (!objectPath) return { ok: false, code: 'storage' };
+  if (previous?.status === 'rejected') {
+    const removed = await storage.remove(objectPath);
+    if (removed.error) return { ok: false, code: 'storage' };
+  }
+  await writeAssetRow(sql, {
+    gameId,
+    version,
+    path: decision.path,
+    expectedType: decision.expectedType,
+    status: 'rejected',
+    sizeBytes: null,
+    sha256: null,
+    source: decision.source,
+    rejectReason: decision.message,
+  });
+  return { ok: true };
+}
