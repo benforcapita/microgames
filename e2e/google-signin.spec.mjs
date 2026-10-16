@@ -79,7 +79,8 @@ async function magicLink(base, email) {
   throw new Error('no magic link mail');
 }
 const cookieHeader = (jar) => [...jar].map(([k, v]) => `${k}=${v}`).join('; ');
-const apply = (jar, res) => { for (const c of res.headers.getSetCookie()) { const [k, v] = c.split(';')[0].split(/=(.*)/s); if (/Max-Age=0/i.test(c) || v === '') jar.delete(k); else jar.set(k, v); } };
+const isClear = (c) => /Max-Age=0/i.test(c) || /Expires=Thu, 01 Jan 1970/i.test(c);
+const apply = (jar, res) => { for (const c of res.headers.getSetCookie()) { const [k, v] = c.split(';')[0].split(/=(.*)/s); if (isClear(c) || v === '') jar.delete(k); else jar.set(k, v); } };
 
 test('real PKCE exchange: clears all verifier cookies, and next=//evil.com cannot redirect off-site after sign-in', async ({ baseURL }) => {
   test.skip(!process.env.MAILPIT_URL, 'needs the local stack (vmg.sh exec)');
@@ -91,7 +92,7 @@ test('real PKCE exchange: clears all verifier cookies, and next=//evil.com canno
   const ex = await fetch(new URL(first.callback, baseURL), { redirect: 'manual', headers: { cookie: cookieHeader(first.jar) } });
   expect(ex.status).toBe(303);
   expect(ex.headers.get('location')).toBe('/onboarding');
-  const cleared = ex.headers.getSetCookie().filter((c) => /-code-verifier=/.test(c) && /Max-Age=0/i.test(c)).map((c) => c.split('=')[0]);
+  const cleared = ex.headers.getSetCookie().filter((c) => /-code-verifier=/.test(c) && isClear(c)).map((c) => c.split('=')[0]);
   expect(cleared.sort()).toEqual(verifiers.sort());
   apply(first.jar, ex);
   expect([...first.jar.keys()].filter((k) => k.endsWith('-code-verifier'))).toEqual([]);
