@@ -3,27 +3,33 @@ import { describe, it } from 'node:test';
 import { createLimiter } from './abuse.ts';
 import { handleSiteEvent, type SiteEventInput } from './site-events.ts';
 
-type Row = { event: SiteEventInput; userId: string | null };
+type Row = { event: SiteEventInput };
 
 /** Drives the real POST /api/events handler with a fake DB that records what would be inserted. */
-function harness(opts: { write?: (e: SiteEventInput, u: string | null) => Promise<void>; timeoutMs?: number; max?: number } = {}) {
+function harness(opts: { write?: (e: SiteEventInput) => Promise<void>; timeoutMs?: number; max?: number } = {}) {
   const rows: Row[] = [];
-  const write = opts.write ?? (async (event: SiteEventInput, userId: string | null) => { rows.push({ event, userId }); });
+  const write = opts.write ?? (async (event: SiteEventInput) => { rows.push({ event }); });
   const limiter = createLimiter({ windowMs: 60_000, max: opts.max ?? 10_000 });
-  const send = (body: unknown, { userId = null, ip = '198.51.100.1', headers = {} }: { userId?: string | null; ip?: string; headers?: Record<string, string> } = {}) =>
+  const send = (body: unknown, { ip = '198.51.100.1', headers = {} }: { ip?: string; headers?: Record<string, string> } = {}) =>
     handleSiteEvent(
       new Request('http://x/api/events', { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: typeof body === 'string' ? body : JSON.stringify(body) }),
-      { ip, userId },
+      { ip },
       { write, timeoutMs: opts.timeoutMs, limiter },
     );
   return { rows, send };
 }
 
 describe('POST /api/events: types', () => {
-  it('stores page_view, game_launch and error with 204', async () => {
+  it('stores error with 204', async () => {
     const h = harness();
-    for (const type of ['page_view', 'game_launch', 'error']) assert.equal((await h.send({ type, path: '/games' })).status, 204, type);
-    assert.deepEqual(h.rows.map((r) => r.event.type), ['page_view', 'game_launch', 'error']);
+    assert.equal((await h.send({ type: 'error', path: '/games', details: { m: 'x' } })).status, 204);
+    assert.deepEqual(h.rows.map((r) => r.event.type), ['error']);
+  });
+  it('page_view and game_launch are gone: 400 and nothing stored', async () => {
+    const h = harness();
+    assert.equal((await h.send({ type: 'page_view', path: '/games' })).status, 400);
+    assert.equal((await h.send({ type: 'game_launch', path: '/play/x', gameId: 'x' })).status, 400);
+    assert.equal(h.rows.length, 0);
   });
   it('rejects trigger-only, unknown and malformed bodies with 400 and stores nothing', async () => {
     const h = harness();
@@ -33,13 +39,12 @@ describe('POST /api/events: types', () => {
   });
 });
 
-describe('POST /api/events: identity', () => {
-  it('user_id comes from the session only; body user_id/userId are ignored', async () => {
+describe('POST /api/events: no user tracking', () => {
+  it('a user id in the body is never passed to the write', async () => {
     const h = harness();
     const forged = '00000000-0000-0000-0000-000000000001';
-    await h.send({ type: 'page_view', user_id: forged, userId: forged });
-    await h.send({ type: 'page_view', user_id: forged }, { userId: '9ba96e53-5462-4d95-af7e-f888491efa4d' });
-    assert.deepEqual(h.rows.map((r) => r.userId), [null, '9ba96e53-5462-4d95-af7e-f888491efa4d']);
+    assert.equal((await h.send({ type: 'error', user_id: forged, userId: forged })).status, 204);
+    assert.equal(JSON.stringify(h.rows).includes(forged), false);
   });
 });
 
@@ -47,8 +52,8 @@ describe('POST /api/events: size caps', () => {
   const details = (bytes: number) => ({ m: 'x'.repeat(bytes - 8) }); // {"m":""} is 8 bytes
   it('path up to 512 characters', async () => {
     const h = harness();
-    assert.equal((await h.send({ type: 'page_view', path: '/' + 'a'.repeat(511) })).status, 204);
-    assert.equal((await h.send({ type: 'page_view', path: '/' + 'a'.repeat(512) })).status, 400);
+    assert.equal((await h.send({ type: 'error', path: '/' + 'a'.repeat(511) })).status, 204);
+    assert.equal((await h.send({ type: 'error', path: '/' + 'a'.repeat(512) })).status, 400);
   });
   it('details up to 4000 UTF-8 bytes (under the DB 4096 jsonb limit); multibyte counts as bytes', async () => {
     const h = harness();
@@ -64,7 +69,7 @@ describe('POST /api/events: size caps', () => {
   });
   it('413 counts UTF-8 bytes of the body, not characters', async () => {
     const h = harness();
-    const body = (junk: string) => JSON.stringify({ type: 'page_view', junk });
+    const body = (junk: string) => JSON.stringify({ type: 'error', junk });
     const base = Buffer.byteLength(body(''));
     assert.equal((await h.send(body('x'.repeat(6144 - base)))).status, 204, 'exactly 6144 bytes');
     assert.equal((await h.send(body('x'.repeat(6145 - base)))).status, 413, '6145 bytes');
@@ -78,7 +83,7 @@ describe('POST /api/events: size caps', () => {
     });
     const res = await handleSiteEvent(
       new Request('http://x/api/events', { method: 'POST', body: stream, duplex: 'half' } as RequestInit),
-      { ip: 'i', userId: null }, { write: async () => {}, limiter: { hit: () => true } },
+      { ip: 'i' }, { write: async () => {}, limiter: { hit: () => true } },
     );
     assert.equal(res.status, 413);
     assert.ok(pulled < 20, `read ${pulled} KB before stopping`);
@@ -111,8 +116,8 @@ describe('POST /api/events: no emails or IPs stored', () => {
         { type: 'error', details: { v } },
         { type: 'error', details: { [v]: 1 } },
         { type: 'error', details: { a: { b: [{ c: v }] } } },
-        { type: 'page_view', path: `/qa/${v}` },
-        { type: 'game_launch', gameId: v },
+        { type: 'error', path: `/qa/${v}` },
+        { type: 'error', gameId: v },
       ];
       for (const b of bodies) assert.equal((await h.send(b)).status, 400, JSON.stringify(b));
       assert.equal(h.rows.length, 0);
@@ -130,16 +135,16 @@ describe('POST /api/events: decimal-integer IPv4 only in URL parts', () => {
   it('rejects ?ip=3405803777, a /3405803777 segment, and encoded variants; stores nothing', async () => {
     const h = harness();
     for (const path of ['/qa?ip=3405803777', '/qa?a=1&peer=3405803777', '/3405803777', '/u/3405803777/x', '/qa?ip=%33405803777', '/%2533405803777'])
-      assert.equal((await h.send({ type: 'page_view', path })).status, 400, path);
+      assert.equal((await h.send({ type: 'error', path })).status, 400, path);
     assert.equal(h.rows.length, 0);
   });
   it('stores 10-digit Unix timestamps in messages and details, and non-address numbers in paths', async () => {
     const h = harness();
     for (const body of [
       { type: 'error', details: { message: 'Error at 1760598000: boom', ts: 1760598000, t: '1760598000' } },
-      { type: 'page_view', path: '/games/level-1760598000' },
-      { type: 'page_view', path: '/games/1234567' },
-      { type: 'page_view', path: '/games/99999999999' },
+      { type: 'error', path: '/games/level-1760598000' },
+      { type: 'error', path: '/games/1234567' },
+      { type: 'error', path: '/games/99999999999' },
     ]) assert.equal((await h.send(body)).status, 204, JSON.stringify(body));
     assert.equal(h.rows.length, 4);
     assert.equal(h.rows[0].event.details.ts, 1760598000);
@@ -147,7 +152,7 @@ describe('POST /api/events: decimal-integer IPv4 only in URL parts', () => {
 });
 
 describe('POST /api/events: awaited, bounded write', () => {
-  const ev = { type: 'page_view', path: '/x' };
+  const ev = { type: 'error', path: '/x' };
   it('the row is written before the 204 is returned', async () => {
     let written = false;
     const h = harness({ write: async () => { await new Promise((r) => setTimeout(r, 50)); written = true; } });

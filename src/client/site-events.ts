@@ -1,10 +1,9 @@
-// LG-1b: fire-and-forget client sender for POST /api/events (page_view, game_launch, error).
+// Fire-and-forget client sender for POST /api/events: errors only (portal script errors, player game crashes).
 // Never blocks or breaks the page: sendBeacon first, fetch keepalive as fallback, every failure dropped.
 // Everything sent is cleaned with the SAME detector the server enforces (../lib/pii): query strings and
 // fragments stripped, PII redacted, text cut by UTF-8 bytes on code-point boundaries under the server caps.
 import { redactPii, redactUrlIntIpv4, truncateText, utf8Bytes } from '../lib/pii';
 
-export type SiteEventType = 'page_view' | 'game_launch' | 'error';
 /** Server: path <= 512 UTF-16 units; details JSON <= 4000 UTF-8 bytes. */
 export const MAX_PATH_UNITS = 512;
 export const MAX_PATH_BYTES = 1024;
@@ -32,19 +31,21 @@ export function errorDetails(source: string, message: unknown, stack?: unknown):
   let st = scrub(stack, MAX_STACK_BYTES);
   if (st) d.stack = st;
   // JSON escaping (\n, \", control chars) can grow the payload; shrink the stack until it fits.
-  while (d.stack && utf8Bytes(JSON.stringify(d)) > MAX_DETAILS_BYTES) {
+  // Bounded: each pass at least halves the stack, so 16 passes cover any input; never loop forever.
+  for (let i = 0; i < 16 && d.stack && utf8Bytes(JSON.stringify(d)) > MAX_DETAILS_BYTES; i++) {
     st = truncateText(d.stack, Math.floor(utf8Bytes(d.stack) / 2));
     if (st.length <= 1) delete d.stack;
     else d.stack = st;
   }
+  if (d.stack && utf8Bytes(JSON.stringify(d)) > MAX_DETAILS_BYTES) delete d.stack;
   return d;
 }
 
 /** Sends one event in the background. Returns nothing and never throws. */
-export function sendSiteEvent(type: SiteEventType, opts: { path?: string; gameId?: string; details?: Record<string, unknown> } = {}): void {
+export function sendErrorEvent(opts: { path?: string; gameId?: string; details?: Record<string, unknown> } = {}): void {
   try {
     const body = JSON.stringify({
-      type,
+      type: 'error',
       path: scrubPath(opts.path ?? location.pathname),
       ...(opts.gameId ? { gameId: opts.gameId } : {}),
       ...(opts.details ? { details: opts.details } : {}),
@@ -64,19 +65,15 @@ export function sendSiteEvent(type: SiteEventType, opts: { path?: string; gameId
 
 let installed = false;
 
-/** Portal pages: a page_view (again on a bfcache restore), plus window error / unhandledrejection hooks, capped per page. */
-export function installPortalEvents(): void {
+/** Portal pages: window error / unhandledrejection hooks, capped per page. No page views. */
+export function installPortalErrors(): void {
   if (installed || typeof window === 'undefined') return;
   installed = true;
-  sendSiteEvent('page_view');
-  window.addEventListener('pageshow', (e) => {
-    if ((e as PageTransitionEvent).persisted) sendSiteEvent('page_view');
-  });
   let sent = 0;
   const report = (message: unknown, stack: unknown) => {
     if (sent >= MAX_ERRORS_PER_PAGE) return;
     sent++;
-    sendSiteEvent('error', { details: errorDetails('portal', message, stack) });
+    sendErrorEvent({ details: errorDetails('portal', message, stack) });
   };
   window.addEventListener('error', (e) => {
     if (!(e instanceof ErrorEvent)) return; // resource load errors are not script errors

@@ -40,7 +40,6 @@ describe('site_events writes (local DB)', { skip: !probeOk && 'no local database
   let recordSiteEvent: typeof import('./site-events.ts').recordSiteEvent;
   let parseSiteEvent: typeof import('./site-events.ts').parseSiteEvent;
   let gameId = '';
-  let userId = '';
 
   before(async () => {
     ({ sql } = await import('./db.ts'));
@@ -51,8 +50,6 @@ describe('site_events writes (local DB)', { skip: !probeOk && 'no local database
       gameId = `${P}-g`;
       await sql`insert into public.games (id, slug, creator, title, stage) values (${gameId}, ${gameId}, ${'c' + P}, 'SE', 'live')`;
     }
-    const [u] = await sql<{ id: string }[]>`select id from auth.users limit 1`;
-    userId = u?.id ?? '';
   });
   after(async () => {
     await sql`delete from public.site_events where path like ${'/' + P + '%'}`;
@@ -66,17 +63,17 @@ describe('site_events writes (local DB)', { skip: !probeOk && 'no local database
     return r.event;
   };
 
-  it('stores an existing game_id, the session user, path and details', async () => {
-    await recordSiteEvent(ev({ type: 'game_launch', path: `/${P}/a`, gameId, details: { k: 1 } }), userId || null);
+  it('stores an error with an existing game_id, path and details, and user_id null', async () => {
+    await recordSiteEvent(ev({ type: 'error', path: `/${P}/a`, gameId, details: { k: 1 } }));
     const [row] = await sql`select * from public.site_events where path = ${`/${P}/a`}`;
-    assert.equal(row.event_type, 'game_launch');
+    assert.equal(row.event_type, 'error');
     assert.equal(row.game_id, gameId);
-    assert.equal(row.user_id, userId || null);
+    assert.equal(row.user_id, null);
     assert.deepEqual(row.details, { k: 1 });
   });
 
   it('an unknown game_id is stored as null, not rejected', async () => {
-    await recordSiteEvent(ev({ type: 'page_view', path: `/${P}/b`, gameId: `${P}-nope` }), null);
+    await recordSiteEvent(ev({ type: 'error', path: `/${P}/b`, gameId: `${P}-nope` }));
     const [row] = await sql`select game_id, user_id from public.site_events where path = ${`/${P}/b`}`;
     assert.equal(row.game_id, null);
     assert.equal(row.user_id, null);
@@ -85,7 +82,7 @@ describe('site_events writes (local DB)', { skip: !probeOk && 'no local database
   it('a 10-digit Unix timestamp in an error message and details is stored', async () => {
     const r = parseSiteEvent({ type: 'error', path: `/${P}/ts`, details: { message: 'crash at 1760598000', ts: 1760598000 } });
     assert.ok(r.ok, JSON.stringify(r));
-    await recordSiteEvent(r.event, null);
+    await recordSiteEvent(r.event);
     const [row] = await sql`select details from public.site_events where path = ${`/${P}/ts`}`;
     assert.deepEqual(row.details, { message: 'crash at 1760598000', ts: 1760598000 });
   });
@@ -99,7 +96,10 @@ describe('site_events writes (local DB)', { skip: !probeOk && 'no local database
     for (const r of rows) assert.doesNotMatch(r.j, /@|\b(?:\d{1,3}\.){3}\d{1,3}\b/);
   });
 
-  it('the DB rejects trigger-only types inserted directly by the route path (type check holds)', async () => {
-    await assert.rejects(sql`insert into public.site_events (event_type) values ('bogus')`);
+  it('the DB itself accepts only errors without a user (LG-2 migration)', async () => {
+    for (const t of ['page_view', 'game_launch', 'sign_up', 'upload', 'bogus'])
+      await assert.rejects(sql`insert into public.site_events (event_type, path) values (${t}, ${`/${P}/x`})`, { code: '23514' }, t);
+    const [u] = await sql<{ id: string }[]>`select id from auth.users limit 1`;
+    if (u) await assert.rejects(sql`insert into public.site_events (event_type, user_id, path) values ('error', ${u.id}, ${`/${P}/u`})`, { code: '23514' });
   });
 });
