@@ -442,9 +442,12 @@ describe('strict unloaded timing vs AST_BUDGET', () => {
     assert.equal(level(report!, 'deep-analysis'), undefined);
   });
 
-  it('a 3x linear slowdown is caught by that bound', { skip }, () => {
-    // Simulate the slowdown by doing the same full analysis 3 times per sample: the strict bound must reject it.
-    const { median, times } = medianOf(3, () => { analyzeGame(input); analyzeGame(input); analyzeGame(input); });
-    assert.ok(median >= BOUND_MS, `3x work took median ${median.toFixed(0)} ms < ${BOUND_MS} ms, so the bound would miss it; runs [${fmt(times)}]`);
+  it('a 3x linear slowdown is caught (relative, machine-speed independent)', { skip }, () => {
+    // Same run, same machine: tripling the work must at least double the median, so the timing really tracks the
+    // analysis cost. No absolute bound here; test 1 owns the 450 ms limit (a fast box would make 3x < 450 ms).
+    const one = medianOf(5, () => { analyzeGame(input); });
+    const three = medianOf(5, () => { analyzeGame(input); analyzeGame(input); analyzeGame(input); });
+    assert.ok(three.median >= 2 * one.median,
+      `3x median ${three.median.toFixed(0)} ms < 2 x 1x median ${one.median.toFixed(0)} ms; 1x [${fmt(one.times)}], 3x [${fmt(three.times)}]`);
   });
 });
