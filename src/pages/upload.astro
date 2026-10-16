@@ -2,7 +2,7 @@
 import Layout from '../layouts/Layout.astro';
 import CreatorPrompts from '../components/CreatorPrompts.astro';
 import { getGame } from '../lib/server/games';
-import { UPLOAD } from '../lib/server/config';
+import { GAME_SIZE_LIMIT, UPLOAD } from '../lib/server/config';
 
 const { profile } = Astro.locals;
 if (!profile) return Astro.redirect(`/login?mode=signup&next=${encodeURIComponent(Astro.url.pathname + Astro.url.search)}`);
@@ -17,7 +17,7 @@ const forkable = fork && fork.license !== 'All rights reserved' ? fork : null;
       <span class="eyebrow">{forkable ? 'Remix' : 'Ship it'}</span>
       <h1>{forkable ? `Fork ${forkable.title}` : 'Upload a game'}</h1>
       <p class="muted">
-        One self-contained <code>.html</code> file, up to {UPLOAD.maxHtmlBytes / 1024 / 1024} MB. Load Three.js from a CDN
+        One self-contained <code>.html</code> file — {GAME_SIZE_LIMIT}. Load Three.js from a CDN
         such as jsDelivr, unpkg or esm.sh. The game stays private while validation runs, then publishes to the Proving Grounds on its own if it passes.
       </p>
       {
@@ -43,7 +43,7 @@ const forkable = fork && fork.license !== 'All rights reserved' ? fork : null;
       <CreatorPrompts />
     </div>
 
-    <form id="upload-form" class="panel form" method="post" action="/api/games" enctype="multipart/form-data" data-max-html={UPLOAD.maxHtmlBytes} data-max-thumb={UPLOAD.maxThumbBytes}>
+    <form id="upload-form" class="panel form" method="post" action="/api/games" enctype="multipart/form-data" data-max-html={UPLOAD.maxHtmlBytes} data-max-thumb={UPLOAD.maxThumbBytes} data-size-limit={GAME_SIZE_LIMIT}>
       {forkable && <input type="hidden" name="forkOf" value={forkable.slug} />}
       <div id="errors" class="errors" role="alert" hidden></div>
       <label>Game file <small>single .html, everything inlined except CDN libraries</small>
@@ -233,7 +233,7 @@ const forkable = fork && fork.license !== 'All rights reserved' ? fork : null;
     const out: string[] = [];
     const game = gameInput.files?.[0], thumb = thumbInput.files?.[0];
     if (game && !/\.html?$/i.test(game.name)) out.push('Game file must be .html.');
-    if (game && game.size > maxHtml) out.push(`Game file must be under ${maxHtml / 1024 / 1024} MB (yours is ${(game.size / 1024 / 1024).toFixed(1)} MB).`);
+    if (game && game.size > maxHtml) out.push(`${form.dataset.sizeLimit} (yours is ${(game.size / 1024 / 1024).toFixed(1)} MB).`);
     if (thumb && thumb.size > maxThumb) out.push(`Thumbnail must be under ${Math.round(maxThumb / 1024)} KB.`);
     if (!thumb && !(usingPreview && snapshot)) out.push('A thumbnail is required. Pick a file or use the captured preview.');
     return out;

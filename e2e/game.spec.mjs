@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { shotPath } from './shots.mjs';
 
 const GAME_ID = 'stk7wr01'; // seed game "Stack Tower"
 const CDN = `http://127.0.0.1:${process.env.E2E_CDN_PORT ?? 4722}`;
@@ -77,5 +78,5 @@ test('seed game loads in the sandboxed iframe and sends telemetry', async ({ pag
   expect(events.length).toBe(beforeSnapshot);
 
   await page.waitForTimeout(500);
-  await page.screenshot({ path: 'docs/pr-assets/mg-7-e2e-stack-tower.png' });
+  await page.screenshot({ path: shotPath('mg-7-e2e-stack-tower.png') });
 });

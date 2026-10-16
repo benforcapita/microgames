@@ -42,7 +42,7 @@ const deleted = Astro.url.searchParams.has('deleted');
               <div class="meta">
                 <a href={g.stage === 'pending' || g.stage === 'rejected' ? `/submissions/${g.id}` : `/play/${g.slug}`}><h3>{g.title}</h3></a>
                 <p class="muted mono">
-                  <span class:list={['badge', g.stage]}>{{ live: 'Monetized', proving: 'Proving Grounds', pending: 'Validating…', rejected: 'Rejected' }[g.stage]}</span>{' '}
+                  <span class:list={['badge', g.stage]}>{{ live: 'Live', proving: 'Proving Grounds', pending: 'Validating…', rejected: 'Rejected' }[g.stage]}</span>{' '}
                   {count(g.plays, "play")} · ★ {stars(g.avgRating)} ({g.ratingCount}) · uploaded {ago(g.createdAt)}
                 </p>
                 <a href={`/games/${g.slug}/assets`}>Assets</a>

@@ -1,24 +1,14 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import {
-  ASSET_LIMIT_COPY,
-  ASSET_WARN_BYTES,
-  GAME_TOTAL_MAX_BYTES,
-  MAX_ASSETS_PER_GAME,
-  scanAssetSource,
-  type AssetScan,
-} from './asset-scan.ts';
+import { MAX_ASSETS_PER_GAME, scanAssetSource, type AssetScan } from './asset-scan.ts';
 
 function paths(scan: AssetScan): string[] {
   return scan.assets.map((asset) => `${asset.expectedType}:${asset.path}`);
 }
 
 describe('asset limit constants', () => {
-  test('the hard cap is 4 MB for the whole game, with a 100 KB warning and a 200-file cap', () => {
-    assert.equal(GAME_TOTAL_MAX_BYTES, 4194304);
-    assert.equal(ASSET_WARN_BYTES, 102400);
+  test('the manifest keeps at most 200 files', () => {
     assert.equal(MAX_ASSETS_PER_GAME, 200);
-    assert.equal(ASSET_LIMIT_COPY, 'whole game, code plus assets, under 4 MB; assets over 100 KB get a warning');
   });
 });
 
@@ -144,6 +134,25 @@ describe('scanAssetSource', () => {
     assert.equal(scan.assets[0].path, 'img/0.png');
     assert.equal(scan.assets[199].path, 'img/199.png');
     assert.equal(scan.assets[199].expectedType, 'image');
+  });
+
+  test('over 200 refs, CSS and JS paths are kept alongside HTML attributes', () => {
+    const imgs = Array.from({ length: 201 }, (_, i) => `<img src="./img/${i}.png">`).join('');
+    const css = Array.from({ length: 10 }, (_, i) => `.c${i}{background:url("./css/${i}.webp")}`).join('');
+    const js = Array.from({ length: 10 }, (_, i) => `fetch("./js/${i}.json");`).join('');
+    const scan = scanAssetSource(`<body>${imgs}<style>${css}</style><script>${js}</script></body>`);
+    assert.equal(scan.assets.length, MAX_ASSETS_PER_GAME);
+    assert.equal(scan.truncated, true);
+    const got = new Set(scan.assets.map((asset) => asset.path));
+    for (let i = 0; i < 10; i++) {
+      assert.ok(got.has(`css/${i}.webp`), `missing css/${i}.webp`);
+      assert.ok(got.has(`js/${i}.json`), `missing js/${i}.json`);
+    }
+    assert.equal(scan.assets.filter((asset) => asset.path.startsWith('img/')).length, 180);
+    assert.deepEqual(
+      scan.assets.slice(0, 3).map((asset) => asset.path),
+      ['img/0.png', 'css/0.webp', 'js/0.json'],
+    );
   });
 
   test('scans a stylesheet or script on its own', () => {

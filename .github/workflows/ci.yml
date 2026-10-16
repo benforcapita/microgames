@@ -16,4 +16,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check
+      # CI-T1: run the unit suite (node:test). DB tests auto-skip without local Supabase; strict timing tests skip on a loaded runner.
+      - run: npm test
       - run: npm run build
+      # NM-1: strict site-copy guard (no money/payment terms in user-rendered files or the built output)
+      - run: npm run check:copy -- --dist

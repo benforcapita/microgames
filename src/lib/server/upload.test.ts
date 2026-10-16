@@ -1,7 +1,8 @@
 // Pure-function tests for upload rules. No Supabase client, database, or secrets.
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import { THUMB_REQUIRED, UPLOAD, validateGameUpload, validateThumb, type ForkParent, type ValidatedGameUpload } from './upload.ts';
+import { STATIC_LIMITS } from './static-check.ts';
+import { GAME_SIZE_LIMIT, GAME_TOTAL_MAX_BYTES, THUMB_REQUIRED, UPLOAD, validateGameUpload, validateThumb, type ForkParent, type ValidatedGameUpload } from './upload.ts';
 
 const HTML = '<html><body><canvas id="c"></canvas></body></html>';
 const MISSING_PARENT = 'The game you are forking no longer exists.';
@@ -125,6 +126,13 @@ function ok(result: { errors: string[]; upload: ValidatedGameUpload | null }): V
 
 describe('upload validation', { concurrency: false }, () => {
   describe('size limits', () => {
+    test('the HTML cap is 4 MB for the whole game', () => {
+      assert.equal(GAME_TOTAL_MAX_BYTES, 4194304);
+      assert.equal(UPLOAD.maxHtmlBytes, GAME_TOTAL_MAX_BYTES);
+      assert.equal(STATIC_LIMITS.maxBytes, GAME_TOTAL_MAX_BYTES);
+      assert.equal(GAME_SIZE_LIMIT, 'the whole game, code plus assets, must stay under 4 MB');
+    });
+
     test('accepts an HTML file exactly at the byte limit', async () => {
       const upload = ok(await run({ game: htmlFile(UPLOAD.maxHtmlBytes) }));
       assert.equal(upload.html.byteLength, UPLOAD.maxHtmlBytes);
@@ -134,7 +142,13 @@ describe('upload validation', { concurrency: false }, () => {
     test('rejects an HTML file one byte over the limit', async () => {
       const result = await run({ game: htmlFile(UPLOAD.maxHtmlBytes + 1) });
       assert.equal(result.upload, null);
-      assert.deepEqual(result.errors, ['Game file must be under 5 MB.']);
+      assert.deepEqual(result.errors, [GAME_SIZE_LIMIT]);
+    });
+
+    test('rejects a 4.5 MB HTML file', async () => {
+      const result = await run({ game: htmlFile(Math.floor(4.5 * 1024 * 1024)) });
+      assert.equal(result.upload, null);
+      assert.deepEqual(result.errors, [GAME_SIZE_LIMIT]);
     });
 
     test('rejects an empty or missing game file', async () => {

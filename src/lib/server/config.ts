@@ -32,6 +32,6 @@ export const GRADUATION = {
   minPlays: Number(env.MG_MIN_PLAYS ?? GRADUATION_DEFAULTS.minPlays),
 };
 
-export { UPLOAD } from './upload';
+export { GAME_SIZE_LIMIT, UPLOAD } from './upload';
 
 export const MAX_SAVE_BYTES = 1024 * 1024;

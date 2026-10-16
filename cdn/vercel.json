@@ -5,5 +5,5 @@
   "outputDirectory": ".",
   "cleanUrls": false,
   "rewrites": [{ "source": "/g/:p*", "destination": "/api/g?__p=:p*" }],
-  "functions": { "api/g.mjs": { "includeFiles": "{boot.js,handler.mjs,frame-ancestors.mjs}" } }
+  "functions": { "api/g.mjs": { "includeFiles": "{boot.js,handler.mjs,frame-ancestors.mjs,csp.mjs,inject.mjs,preview-token.mjs}" } }
 }

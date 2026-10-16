@@ -1,5 +1,9 @@
+/** Whole game version: the uploaded HTML/code plus every asset combined. */
+export const GAME_TOTAL_MAX_BYTES = 4 * 1024 * 1024;
+export const GAME_SIZE_LIMIT = 'the whole game, code plus assets, must stay under 4 MB';
+
 export const UPLOAD = {
-  maxHtmlBytes: 5 * 1024 * 1024,
+  maxHtmlBytes: GAME_TOTAL_MAX_BYTES,
   maxThumbBytes: 512 * 1024,
   maxThumbWidth: 640,
   maxThumbHeight: 360,
@@ -140,7 +144,7 @@ export async function validateGameUpload(
   if (forked && forked.license === 'All rights reserved') errors.push('That game is not licensed for remixing.');
   if (!(file instanceof File) || file.size === 0) errors.push('Attach your game as a single .html file.');
   else if (!/\.html?$/i.test(file.name)) errors.push('Game file must be .html.');
-  else if (file.size > UPLOAD.maxHtmlBytes) errors.push(`Game file must be under ${UPLOAD.maxHtmlBytes / 1024 / 1024} MB.`);
+  else if (file.size > UPLOAD.maxHtmlBytes) errors.push(GAME_SIZE_LIMIT);
 
   let thumb: ValidatedGameUpload['thumb'] | undefined;
   if (!(thumbFile instanceof File) || thumbFile.size === 0) errors.push(THUMB_REQUIRED);
