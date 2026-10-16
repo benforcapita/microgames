@@ -2,6 +2,7 @@
 import Layout from '../layouts/Layout.astro';
 import { safeNext, withParams } from '../lib/server/auth';
 import { authErrorText } from '../lib/server/google-auth';
+import { clearLoginEmailFlash, readLoginEmailFlash } from '../lib/server/login-email';
 
 const p = Astro.url.searchParams;
 const next = safeNext(p.get('next'));
@@ -13,7 +14,9 @@ const mode: Mode = (p.get('mode') as Mode) in modes ? (p.get('mode') as Mode) : 
 // ?error= carries a fixed code only; the page renders its fixed text and never free text (unknown -> signin_failed).
 const error = authErrorText(p.get('error'));
 const sent = p.get('sent');
-const email = p.get('email') ?? '';
+// The email refill arrives in a one-shot flash cookie set by /api/auth/login, never the URL.
+const email = readLoginEmailFlash(Astro.cookies);
+clearLoginEmailFlash(Astro.cookies);
 ---
 
 <Layout title={modes[mode]}>

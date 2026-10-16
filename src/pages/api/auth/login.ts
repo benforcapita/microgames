@@ -1,18 +1,24 @@
 import type { APIRoute } from 'astro';
+import { secureCookie } from '../../../lib/server/abuse';
 import { safeNext, withParams } from '../../../lib/server/auth';
 import { authEmailRedirect } from '../../../lib/server/email-redirect';
 import { emailAuthErrorCode, type AuthErrorCode } from '../../../lib/server/google-auth';
+import { setLoginEmailFlash } from '../../../lib/server/login-email';
 
 type Mode = 'password' | 'signup' | 'magic';
 const MODES = new Set<Mode>(['password', 'signup', 'magic']);
 
-export const POST: APIRoute = async ({ request, locals, redirect, url }) => {
+export const POST: APIRoute = async ({ request, locals, redirect, url, cookies }) => {
   const form = await request.formData();
   const mode = String(form.get('mode')) as Mode;
   const email = String(form.get('email') ?? '').trim();
   const password = String(form.get('password') ?? '');
   const next = safeNext(String(form.get('next') ?? ''));
-  const back = (params: { error: AuthErrorCode } | { sent: 'signup' | 'magic' }) => redirect(withParams('/login', { mode, next, email, ...params }), 303);
+  // The typed email goes back in a one-shot flash cookie, never in the URL.
+  const back = (params: { error: AuthErrorCode } | { sent: 'signup' | 'magic' }) => {
+    setLoginEmailFlash(cookies, email, secureCookie(url.protocol, import.meta.env.PROD, Boolean(process.env.VERCEL)));
+    return redirect(withParams('/login', { mode, next, ...params }), 303);
+  };
 
   if (!MODES.has(mode) || !/^\S+@\S+\.\S+$/.test(email)) return back({ error: 'invalid_email' });
   if (mode !== 'magic' && password.length < 8) return back({ error: 'password_too_short' });
