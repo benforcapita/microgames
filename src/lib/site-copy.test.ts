@@ -37,6 +37,11 @@ describe('NM-1 site-copy scanner', () => {
     assert.deepEqual(scanText('a\n<b>Monetized</b>', 'p.astro').map((h) => [h.file, h.line, h.term]), [['p.astro', 2, 'Monetized']]);
   });
   it('every user-rendered source file is clean', () => assert.deepEqual(scanSources(), []));
+  it('the submission status shown on /submissions says live, not monetized (src/lib/server/submissions.ts string)', () => {
+    const src = fs.readFileSync('src/lib/server/submissions.ts', 'utf8');
+    assert.match(src, /'This game has graduated and is live\.'/);
+    assert.doesNotMatch(src, /graduated and is moneti/);
+  });
   it('dist scan: page chunks and client assets are checked, non-page chunks are not', () => {
     const d = fs.mkdtempSync(path.join(os.tmpdir(), 'nm1-dist-'));
     fs.mkdirSync(path.join(d, 'server/chunks'), { recursive: true });
