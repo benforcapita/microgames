@@ -10,6 +10,7 @@
  */
 import { parse, type Node as AcornNode } from 'acorn';
 import { CSP_SOURCES } from '../../../cdn/csp.mjs';
+import { GAME_VERSION_MAX_BYTES } from '../asset-limits.ts';
 
 export type CheckLevel = 'pass' | 'warn' | 'fail';
 
@@ -109,8 +110,8 @@ export const CONNECT_HOSTS: readonly string[] = hostsOf(CSP_SOURCES.connect);
 /** Hosts allowed for images/media (CSP img-src + media-src). */
 export const MEDIA_HOSTS: readonly string[] = [...new Set([...hostsOf(CSP_SOURCES.img), ...hostsOf(CSP_SOURCES.media)])];
 
-/** Same 4 MB whole-game cap as upload.ts `GAME_TOTAL_MAX_BYTES`. Kept literal so this file stays free of the upload module (the Edge Function imports it). */
-export const STATIC_LIMITS = { maxBytes: 4 * 1024 * 1024, warnBytes: 1024 * 1024 };
+/** Same 4 MB whole-game cap as upload.ts `GAME_TOTAL_MAX_BYTES` via asset-limits.ts (dependency-free so Edge Functions stay safe). */
+export const STATIC_LIMITS = { maxBytes: GAME_VERSION_MAX_BYTES, warnBytes: 1024 * 1024 };
 const MAX_FINDINGS = 10;
 /** Upper bound on per-handler parses when the combined handler parse fails (keeps the worst case linear). */
 const MAX_HANDLER_PARSES = 200;

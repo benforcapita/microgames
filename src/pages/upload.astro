@@ -107,9 +107,11 @@ const forkable = fork && fork.license !== 'All rights reserved' ? fork : null;
   #use-preview[aria-pressed='true'] { border-color: var(--accent); color: var(--accent); }
   #asset-warnings { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 1.25rem; display: grid; gap: 0.75rem; }
   #asset-warnings[hidden] { display: none !important; }
-  #asset-warnings p { margin: 0; }
-  #asset-warnings ul { margin: 0.25rem 0 0; padding-left: 1.25rem; }
-  #asset-warnings .warn { color: var(--warn); }
+  /* Children are created by the client script, so they carry no Astro scope attribute: hence :global. */
+  #asset-warnings :global(p) { margin: 0; }
+  #asset-warnings :global(ul) { margin: 0.25rem 0 0; padding-left: 1.25rem; }
+  #asset-warnings :global(li), #asset-warnings :global(p) { overflow-wrap: anywhere; }
+  #asset-warnings :global(.warn) { color: var(--warn); }
   @media (max-width: 860px) {
     .upload, .two, .snap { grid-template-columns: 1fr; }
     .intro { position: static; }
@@ -119,7 +121,7 @@ const forkable = fork && fork.license !== 'All rights reserved' ? fork : null;
 <script>
   import boot from '../../cdn/boot.js?raw';
   import { PREVIEW_TIMEOUT_COPY, createPreviewWatch, injectPreview } from '../client/upload-preview';
-  import { formatBytes, summarizeAssets } from '../lib/asset-limits';
+  import { formatTotal, summarizeAssets } from '../lib/asset-limits';
 
   const form = document.getElementById('upload-form') as HTMLFormElement;
   const errors = document.getElementById('errors')!;
@@ -168,7 +170,7 @@ const forkable = fork && fork.license !== 'All rights reserved' ? fork : null;
 
     const totalP = document.createElement('p');
     if (summary.overTotal) totalP.className = 'warn';
-    totalP.textContent = `Whole game: ${formatBytes(summary.totalBytes)} of 4 MB`;
+    totalP.textContent = `Whole game: ${formatTotal(summary.totalBytes)} of 4 MB`;
     container.appendChild(totalP);
 
     if (summary.missing.length > 0) {
@@ -233,8 +235,14 @@ const forkable = fork && fork.license !== 'All rights reserved' ? fork : null;
           assets: scan.assets.map((a) => ({ path: a.path, status: 'missing', sizeBytes: null })),
         }));
       }).catch(() => {
-        // Warnings are advisory: if the scanner fails to load, the upload works exactly as before.
-        if (assetWarnings) assetWarnings.hidden = true;
+        if (!assetWarnings || gameInput.files?.[0] !== file) return;
+        assetWarnings.replaceChildren();
+        const notice = document.createElement('p');
+        notice.className = 'warn';
+        notice.setAttribute('role', 'status');
+        notice.textContent = "Couldn't check for missing files; the submission page will list them";
+        assetWarnings.appendChild(notice);
+        assetWarnings.hidden = false;
       });
     }).catch(() => {
       watch.stop();

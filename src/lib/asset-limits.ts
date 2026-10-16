@@ -57,6 +57,9 @@ export function summarizeAssets({
     }
   }
 
+  missing.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  large.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+
   const totalBytes = codeBytes + uploadedBytes;
 
   return {
@@ -70,6 +73,11 @@ export function summarizeAssets({
 
 export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  const kb = (bytes / 1024).toFixed(1);
+  if (Number(kb) < 1024) return `${kb} KB`;
   return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+}
+
+export function formatTotal(bytes: number): string {
+  return `${formatBytes(bytes)} (${bytes.toLocaleString('en-US')} bytes)`;
 }

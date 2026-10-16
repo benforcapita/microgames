@@ -1,5 +1,5 @@
 ---
-import { formatBytes, type summarizeAssets } from '../lib/asset-limits';
+import { formatBytes, formatTotal, type summarizeAssets } from '../lib/asset-limits';
 
 interface Props {
   summary: ReturnType<typeof summarizeAssets>;
@@ -9,7 +9,7 @@ const { summary } = Astro.props;
 ---
 
 <div id="asset-warnings" class="panel">
-  <p class:list={[{ warn: summary.overTotal }]}>Whole game: {formatBytes(summary.totalBytes)} of 4 MB</p>
+  <p class:list={[{ warn: summary.overTotal }]}>Whole game: {formatTotal(summary.totalBytes)} of 4 MB</p>
 
   {summary.missing.length > 0 && (
     <div role="status">
@@ -35,5 +35,6 @@ const { summary } = Astro.props;
   #asset-warnings { display: grid; gap: 0.75rem; }
   #asset-warnings p { margin: 0; }
   #asset-warnings ul { margin: 0.25rem 0 0; padding-left: 1.25rem; }
+  #asset-warnings li, #asset-warnings p { overflow-wrap: anywhere; }
   .warn { color: var(--warn); }
 </style>

@@ -94,7 +94,7 @@ export async function loadAssetSummaryInput(
     select path, status, size_bytes
     from game_assets
     where game_id = ${gameId} and version = ${version}
-    order by created_at, id
+    order by path
   `;
   const assets: { path: string; status: 'missing' | 'uploaded' | 'rejected'; sizeBytes: number | null }[] = [];
   for (const row of assetRows) {

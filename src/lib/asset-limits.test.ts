@@ -4,6 +4,7 @@ import {
   ASSET_SIZE_WARN_BYTES,
   GAME_VERSION_MAX_BYTES,
   formatBytes,
+  formatTotal,
   summarizeAssets,
 } from './asset-limits';
 
@@ -17,22 +18,43 @@ describe('summarizeAssets behavior', () => {
     assert.deepEqual(summary.missing, ['audio/bgm.mp3']);
   });
 
-  it('lists missing files in input order', () => {
-    const summary = summarizeAssets({
+  it('sorts missing and large by path regardless of input order', () => {
+    const orderA = summarizeAssets({
       codeBytes: 5_000,
       assets: [
         { path: 'sprites/player.png', status: 'missing', sizeBytes: null },
-        { path: 'sprites/enemy.png', status: 'uploaded', sizeBytes: 20_000 },
+        { path: 'sprites/enemy.png', status: 'uploaded', sizeBytes: 120_000 },
         { path: 'audio/jump.wav', status: 'missing', sizeBytes: null },
+        { path: 'audio/bgm.ogg', status: 'uploaded', sizeBytes: 150_000 },
         { path: 'data/levels.json', status: 'missing', sizeBytes: null },
       ],
     });
 
-    assert.deepEqual(summary.missing, [
-      'sprites/player.png',
+    const orderB = summarizeAssets({
+      codeBytes: 5_000,
+      assets: [
+        { path: 'data/levels.json', status: 'missing', sizeBytes: null },
+        { path: 'audio/bgm.ogg', status: 'uploaded', sizeBytes: 150_000 },
+        { path: 'sprites/enemy.png', status: 'uploaded', sizeBytes: 120_000 },
+        { path: 'audio/jump.wav', status: 'missing', sizeBytes: null },
+        { path: 'sprites/player.png', status: 'missing', sizeBytes: null },
+      ],
+    });
+
+    const expectedMissing = [
       'audio/jump.wav',
       'data/levels.json',
-    ]);
+      'sprites/player.png',
+    ];
+    const expectedLarge = [
+      { path: 'audio/bgm.ogg', sizeBytes: 150_000 },
+      { path: 'sprites/enemy.png', sizeBytes: 120_000 },
+    ];
+
+    assert.deepEqual(orderA.missing, expectedMissing);
+    assert.deepEqual(orderB.missing, expectedMissing);
+    assert.deepEqual(orderA.large, expectedLarge);
+    assert.deepEqual(orderB.large, expectedLarge);
   });
 
   it('total counts code + uploaded only', () => {
@@ -121,6 +143,7 @@ describe('summarizeAssets behavior', () => {
 describe('formatBytes behavior', () => {
   it('formats under 1 KB as bytes, under 1 MB as "N KB" with 1 decimal', () => {
     assert.equal(formatBytes(0), '0 B');
+    assert.equal(formatBytes(1023), '1023 B');
     assert.equal(formatBytes(1024), '1.0 KB');
     assert.equal(formatBytes(48 * 1024), '48.0 KB');
     assert.equal(formatBytes(100 * 1024), '100.0 KB');
@@ -129,9 +152,26 @@ describe('formatBytes behavior', () => {
   });
 
   it('formats 1 MB and above as "N.NN MB" with 2 decimals', () => {
+    assert.equal(formatBytes(1048575), '1.00 MB');
     assert.equal(formatBytes(1024 * 1024), '1.00 MB');
     assert.equal(formatBytes(4 * 1024 * 1024), '4.00 MB');
     assert.equal(formatBytes(4.5 * 1024 * 1024), '4.50 MB');
     assert.equal(formatBytes(1.234 * 1024 * 1024), '1.23 MB');
+  });
+});
+
+describe('formatTotal behavior', () => {
+  it('formats total bytes with exact byte counts differentiating boundary values', () => {
+    const s4194303 = formatTotal(4194303);
+    const s4194304 = formatTotal(4194304);
+    const s4194305 = formatTotal(4194305);
+
+    assert.notEqual(s4194303, s4194304);
+    assert.notEqual(s4194304, s4194305);
+    assert.notEqual(s4194303, s4194305);
+
+    assert.ok(s4194303.includes('4,194,303 bytes'));
+    assert.ok(s4194304.includes('4,194,304 bytes'));
+    assert.ok(s4194305.includes('4,194,305 bytes'));
   });
 });
