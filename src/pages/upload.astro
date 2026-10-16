@@ -120,7 +120,6 @@ const forkable = fork && fork.license !== 'All rights reserved' ? fork : null;
   import boot from '../../cdn/boot.js?raw';
   import { PREVIEW_TIMEOUT_COPY, createPreviewWatch, injectPreview } from '../client/upload-preview';
   import { formatSize, summarizeAssets } from '../lib/asset-limits';
-  import { scanAssetSource } from '../lib/server/asset-scan';
 
   const form = document.getElementById('upload-form') as HTMLFormElement;
   const errors = document.getElementById('errors')!;
@@ -223,12 +222,18 @@ const forkable = fork && fork.license !== 'All rights reserved' ? fork : null;
       previewUrl = URL.createObjectURL(new Blob([injectBoot(html)], { type: 'text/html' }));
       frame.src = previewUrl;
 
-      const scan = scanAssetSource(html);
-      const summary = summarizeAssets({
-        codeBytes: file.size,
-        assets: scan.assets.map((a) => ({ path: a.path, status: 'missing', sizeBytes: null })),
+      // The scanner pulls in acorn (~37 KB gz), so it loads only once a file is picked, not with the page.
+      import('../lib/server/asset-scan').then(({ scanAssetSource }) => {
+        if (!assetWarnings || gameInput.files?.[0] !== file) return;
+        const scan = scanAssetSource(html);
+        renderAssetWarnings(assetWarnings, summarizeAssets({
+          codeBytes: file.size,
+          assets: scan.assets.map((a) => ({ path: a.path, status: 'missing', sizeBytes: null })),
+        }));
+      }).catch(() => {
+        // Warnings are advisory: if the scanner fails to load, the upload works exactly as before.
+        if (assetWarnings) assetWarnings.hidden = true;
       });
-      if (assetWarnings) renderAssetWarnings(assetWarnings, summary);
     }).catch(() => {
       watch.stop();
       snapMsg.textContent = 'Could not read that file. Upload a PNG, JPEG, or WebP thumbnail.';
