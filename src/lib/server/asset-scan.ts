@@ -1,21 +1,12 @@
 /**
  * Pure scan of uploaded HTML, CSS, and JS for local asset paths.
  * Rows are references only (`status = 'missing'`). Sizes are not known here.
- *
- * Hard cap for one game version (code plus assets): GAME_TOTAL_MAX_BYTES.
- * An individual asset over ASSET_WARN_BYTES is a warning, not a rejection.
- * whole game, code plus assets, under 4 MB; assets over 100 KB get a warning
+ * The upload size cap lives in upload.ts. Per-asset byte warnings are a later ticket.
  */
 import { parse } from 'acorn';
 
-/** Whole game version: HTML/code plus every asset combined. */
-export const GAME_TOTAL_MAX_BYTES = 4194304;
-/** Assets over this size get a warning. They are not rejected for size alone. */
-export const ASSET_WARN_BYTES = 102400;
 /** Manifest rows kept per game version. */
 export const MAX_ASSETS_PER_GAME = 200;
-export const ASSET_LIMIT_COPY =
-  'whole game, code plus assets, under 4 MB; assets over 100 KB get a warning';
 
 const PATH_MAX = 512;
 
@@ -423,56 +414,97 @@ function isPathAttr(name: string): boolean {
   return name === 'src' || name === 'href' || name.endsWith(':src') || name.endsWith(':href');
 }
 
-function collect(add: (raw: string) => void, source: string, kind: 'html' | 'css' | 'js'): void {
+type AssetSource = 'html' | 'css' | 'js';
+
+interface ClassifiedPath {
+  path: string;
+  expectedType: ExpectedType;
+  source: AssetSource;
+}
+
+function collect(add: (raw: string, source: AssetSource) => void, source: string, kind: AssetSource): void {
   if (kind === 'css') {
-    for (const url of cssUrls(source)) add(url);
+    for (const url of cssUrls(source)) add(url, 'css');
     return;
   }
   if (kind === 'js') {
-    for (const path of jsPaths(source)) add(path);
+    for (const path of jsPaths(source)) add(path, 'js');
     return;
   }
   const doc = tokenize(source);
   for (const tag of doc.tags) {
     for (const [name, value] of tag.attrs) {
-      if (isPathAttr(name) && value) add(value);
-      if (name === 'style' && value) for (const url of cssUrls(value)) add(url);
+      if (isPathAttr(name) && value) add(value, 'html');
+      if (name === 'style' && value) for (const url of cssUrls(value)) add(url, 'css');
     }
   }
-  for (const css of doc.styles) for (const url of cssUrls(css)) add(url);
+  for (const css of doc.styles) for (const url of cssUrls(css)) add(url, 'css');
   for (const script of doc.scripts) {
-    if (isJsScript(script.attrs)) for (const path of jsPaths(script.text)) add(path);
+    if (isJsScript(script.attrs)) for (const path of jsPaths(script.text)) add(path, 'js');
   }
-  for (const handler of doc.handlers) for (const path of jsPaths(handler)) add(path);
+  for (const handler of doc.handlers) for (const path of jsPaths(handler)) add(path, 'js');
 }
 
-/** Scan one uploaded HTML document, stylesheet, or script. Order is first-seen. The manifest stops at MAX_ASSETS_PER_GAME. */
-export function scanAssetSource(source: string, kind: 'html' | 'css' | 'js' = 'html'): AssetScan {
-  const assets: ScannedAsset[] = [];
-  const rejected: RejectedAsset[] = [];
+/**
+ * At or under the cap, keep document order. Over the cap, take turns from HTML
+ * attributes, CSS urls, and JS paths (encounter order inside each) so a long
+ * list of image tags cannot crowd out stylesheets and scripts.
+ */
+function capAssets(found: ClassifiedPath[]): { assets: ScannedAsset[]; truncated: boolean } {
+  const order: ScannedAsset[] = [];
+  const buckets: Record<AssetSource, ScannedAsset[]> = { html: [], css: [], js: [] };
   const seen = new Set<string>();
-  const rejectedSeen = new Set<string>();
-  let truncated = false;
+  for (const item of found) {
+    if (seen.has(item.path)) continue;
+    seen.add(item.path);
+    const asset = { path: item.path, expectedType: item.expectedType };
+    order.push(asset);
+    buckets[item.source].push(asset);
+  }
+  if (order.length <= MAX_ASSETS_PER_GAME) return { assets: order, truncated: false };
 
-  const add = (raw: string) => {
-    const found = classifyAssetPath(raw);
-    if (found.kind === 'skip') return;
-    if (found.kind === 'reject') {
-      const key = `${found.reason}\0${found.raw}`;
+  const assets: ScannedAsset[] = [];
+  const index: Record<AssetSource, number> = { html: 0, css: 0, js: 0 };
+  const sources: AssetSource[] = ['html', 'css', 'js'];
+  while (assets.length < MAX_ASSETS_PER_GAME) {
+    let progressed = false;
+    for (const source of sources) {
+      const next = buckets[source][index[source]];
+      if (!next) continue;
+      index[source] += 1;
+      assets.push(next);
+      progressed = true;
+      if (assets.length >= MAX_ASSETS_PER_GAME) break;
+    }
+    if (!progressed) break;
+  }
+  return { assets, truncated: true };
+}
+
+/**
+ * Scan one uploaded HTML document, stylesheet, or script.
+ * Duplicate paths keep the first occurrence. The manifest keeps at most
+ * MAX_ASSETS_PER_GAME rows; see capAssets for how the overflow is chosen.
+ */
+export function scanAssetSource(source: string, kind: AssetSource = 'html'): AssetScan {
+  const found: ClassifiedPath[] = [];
+  const rejected: RejectedAsset[] = [];
+  const rejectedSeen = new Set<string>();
+
+  const add = (raw: string, assetSource: AssetSource) => {
+    const classified = classifyAssetPath(raw);
+    if (classified.kind === 'skip') return;
+    if (classified.kind === 'reject') {
+      const key = `${classified.reason}\0${classified.raw}`;
       if (rejectedSeen.has(key)) return;
       rejectedSeen.add(key);
-      rejected.push({ raw: found.raw, reason: found.reason });
+      rejected.push({ raw: classified.raw, reason: classified.reason });
       return;
     }
-    if (seen.has(found.path)) return;
-    if (assets.length >= MAX_ASSETS_PER_GAME) {
-      truncated = true;
-      return;
-    }
-    seen.add(found.path);
-    assets.push({ path: found.path, expectedType: found.expectedType });
+    found.push({ path: classified.path, expectedType: classified.expectedType, source: assetSource });
   };
 
   collect(add, source, kind);
+  const { assets, truncated } = capAssets(found);
   return { assets, rejected, truncated };
 }

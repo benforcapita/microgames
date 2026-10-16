@@ -34,7 +34,7 @@ const CASES: Record<string, { status: CheckLevel; expect: Record<string, CheckLe
 };
 
 // Bound is deliberately loose (4x the ~500 ms target) so slow or busy CI machines don't flake: a quadratic
-// scan over 5 MB takes minutes, so this still catches any non-linear regression.
+// scan over the size cap takes minutes, so this still catches any non-linear regression.
 const ADVERSARIAL_MS = 2000;
 describe('static-check fixtures', () => {
   it('covers at least 10 fixtures, all of them on disk', () => {
@@ -88,7 +88,7 @@ describe('static-check details', () => {
   it('still hides real HTML comments (markup level only)', () => {
     assert.equal(level(analyzeGame(load('good-comments-ignored.html')), 'script-hosts'), 'pass');
   });
-  it('fails files over 5 MB without analysing them and warns over 1 MB', () => {
+  it('fails files over the size cap without analysing them and warns over 1 MB', () => {
     const pad = (n: number) => `<!doctype html><canvas></canvas><script>/*${'x'.repeat(n)}*/</script>`;
     const huge = analyzeGame(pad(STATIC_LIMITS.maxBytes + 1));
     assert.equal(huge.status, 'fail');
@@ -121,17 +121,20 @@ describe('static-check scales linearly on large valid JS (acorn-bound)', () => {
     'many Meshground.* members': (b) => '<script>' + 'Meshground.ready;'.repeat(Math.floor(b / 18)) + '</script>',
   };
   for (const [name, make] of Object.entries(CASES)) {
-    it(`${name}: 4 MB < 6x the 1 MB time, 1 MB < ${ADVERSARIAL_MS / 2} ms`, () => {
+    it(`${name}: near the size cap < 6x the 1 MB time, 1 MB < ${ADVERSARIAL_MS / 2} ms`, () => {
       time(make(256 * 1024)); // warm up the JIT
       const one = time(make(1024 * 1024));
-      const four = time(make(4 * 1024 * 1024));
+      // Wrappers around the payload must stay inside the cap, or analyzeGame returns before the walk.
+      const nearCap = STATIC_LIMITS.maxBytes - 128;
+      const near = time(make(nearCap));
       assert.ok(one < ADVERSARIAL_MS / 2, `1 MB: ${one.toFixed(0)} ms`);
-      assert.ok(four < one * 6, `1 MB ${one.toFixed(0)} ms vs 4 MB ${four.toFixed(0)} ms`);
+      assert.ok(near < one * 6, `1 MB ${one.toFixed(0)} ms vs near-cap ${near.toFixed(0)} ms`);
+      assert.notEqual(level(analyzeGame(make(nearCap)), 'size'), 'fail');
     });
   }
 });
 
-describe('static-check is linear on adversarial input (5 MB, < ADVERSARIAL_MS each)', () => {
+describe('static-check is linear on adversarial input (size cap, < ADVERSARIAL_MS each)', () => {
   const FIVE_MB = STATIC_LIMITS.maxBytes;
   const fill = (prefix: string, unit: string, suffix = '') => {
     const body = unit.repeat(Math.floor((FIVE_MB - prefix.length - suffix.length) / unit.length));
@@ -174,14 +177,17 @@ describe('Edge CPU budget: AST phase is capped, hard fails stay unconditional', 
   };
   const warns = (r: StaticReport) => r.checks.filter((c) => c.level === 'warn').map((c) => c.id);
 
-  it('member chain at 4.9 MB finishes under 1 s total', () => {
-    const { r, ms } = timed(`<canvas></canvas><script>x${fill('.a', 4.9 * MB)}</script>`);
+  it('member chain just under the size cap finishes under 1 s total', () => {
+    const html = `<canvas></canvas><script>x${fill('.a', STATIC_LIMITS.maxBytes - 64)}</script>`;
+    assert.ok(html.length <= STATIC_LIMITS.maxBytes, String(html.length));
+    const { r, ms } = timed(html);
     assert.ok(ms < ADVERSARIAL_MS, `${ms.toFixed(0)} ms (limit ${ADVERSARIAL_MS})`);
     assert.notEqual(r.status, 'fail');
   });
-  it('270k inline <script> blocks at 4.9 MB finish under 1 s total', () => {
-    const html = '<script>a</script>'.repeat(272_000); // 18 bytes each, 4.9 MB
-    assert.ok(html.length >= 4.89e6 && html.length <= STATIC_LIMITS.maxBytes, String(html.length));
+  it('inline <script> blocks just under the size cap finish under 1 s total', () => {
+    const unit = '<script>a</script>';
+    const html = unit.repeat(Math.floor(STATIC_LIMITS.maxBytes / unit.length));
+    assert.ok(html.length > STATIC_LIMITS.maxBytes - unit.length && html.length <= STATIC_LIMITS.maxBytes, String(html.length));
     const { r, ms } = timed(html);
     assert.ok(ms < ADVERSARIAL_MS, `${ms.toFixed(0)} ms (limit ${ADVERSARIAL_MS})`);
     assert.notEqual(r.status, 'fail');

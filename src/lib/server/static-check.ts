@@ -109,7 +109,8 @@ export const CONNECT_HOSTS: readonly string[] = hostsOf(CSP_SOURCES.connect);
 /** Hosts allowed for images/media (CSP img-src + media-src). */
 export const MEDIA_HOSTS: readonly string[] = [...new Set([...hostsOf(CSP_SOURCES.img), ...hostsOf(CSP_SOURCES.media)])];
 
-export const STATIC_LIMITS = { maxBytes: 5 * 1024 * 1024, warnBytes: 1024 * 1024 };
+/** Same 4 MB whole-game cap as upload.ts `GAME_TOTAL_MAX_BYTES`. Kept literal so this file stays free of the upload module (the Edge Function imports it). */
+export const STATIC_LIMITS = { maxBytes: 4 * 1024 * 1024, warnBytes: 1024 * 1024 };
 const MAX_FINDINGS = 10;
 /** Upper bound on per-handler parses when the combined handler parse fails (keeps the worst case linear). */
 const MAX_HANDLER_PARSES = 200;
@@ -764,7 +765,7 @@ export function analyzeGame(input: string | Uint8Array): StaticReport {
   // Hard fails (spec §3): size, UTF-8, markup, script/style hosts.
   const mb = (x: number) => `${(x / 1024 / 1024).toFixed(2)} MB`;
   if (bytes > STATIC_LIMITS.maxBytes) {
-    add('size', 'File size', 'fail', `${mb(bytes)} is over the 5 MB limit.`);
+    add('size', 'File size', 'fail', `${mb(bytes)} is over the ${STATIC_LIMITS.maxBytes / 1024 / 1024} MB limit.`);
     return finish(checks, bytes); // don't spend time analysing a file we must reject anyway
   }
   if (bytes > STATIC_LIMITS.warnBytes) add('size', 'File size', 'warn', `${mb(bytes)}. Aim for under 1 MB so it loads instantly.`);
