@@ -371,6 +371,17 @@ describe('asset path encoding', () => {
     }
     assert.equal(assetPathRejection('sprites/hero.png'), null);
   });
+
+  it('answers 400 for a double-encoded .. before storage sees the path', () => {
+    for (const rawPath of ['%252e%252e/secret.png', 'sprites/%252e%252e/hero.png', '%252E%252E/secret.png']) {
+      const rejection = assetPathRejection(rawPath);
+      assert.equal(rejection?.status, 400, rawPath);
+      assert.equal(rejection?.message, 'That path is not allowed.');
+      const decision = assessAssetUpload(input({ rawPath, adding: true }));
+      assert.equal(decision.kind, 'bad-request', rawPath);
+      if (decision.kind === 'bad-request') assert.equal(decision.status, 400);
+    }
+  });
 });
 
 describe('rejected replacement stays consistent with storage', () => {

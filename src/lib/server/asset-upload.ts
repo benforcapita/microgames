@@ -114,16 +114,32 @@ function isSniffedFormat(value: string): value is SniffedFormat {
   return SNIFFED_FORMATS.has(value);
 }
 
-/** NUL, other C0 controls, DEL, or a percent-escape that is not two hex digits. */
+/** A decoded path that would leave the game directory, including one hidden behind percent-encoding. */
+function isDecodedTraversal(value: string): boolean {
+  return value.includes('..') || value.includes('\\') || value.startsWith('/');
+}
+
+/**
+ * NUL, other C0 controls, DEL, a percent-escape that is not two hex digits,
+ * or a traversal that appears only after percent-decoding (`%252e%252e` → `..`).
+ * Literal `../` is left for the path check so the upload page can still flash it.
+ */
 export function assetPathRejection(raw: string): { status: 400; message: string } | null {
   if (/%(?![0-9A-Fa-f]{2})/.test(raw)) return { status: 400, message: ASSET_UPLOAD_MESSAGES.encoding };
+  if (hasControlChar(raw)) return { status: 400, message: ASSET_UPLOAD_MESSAGES.control };
   let decoded = raw;
-  try {
-    decoded = decodeURIComponent(raw);
-  } catch {
-    return { status: 400, message: ASSET_UPLOAD_MESSAGES.encoding };
+  for (let pass = 0; pass < 8 && /%[0-9A-Fa-f]{2}/.test(decoded); pass++) {
+    let next: string;
+    try {
+      next = decodeURIComponent(decoded);
+    } catch {
+      return { status: 400, message: ASSET_UPLOAD_MESSAGES.encoding };
+    }
+    if (next === decoded) break;
+    decoded = next;
+    if (hasControlChar(decoded)) return { status: 400, message: ASSET_UPLOAD_MESSAGES.control };
+    if (isDecodedTraversal(decoded)) return { status: 400, message: ASSET_UPLOAD_MESSAGES.path };
   }
-  if (hasControlChar(raw) || hasControlChar(decoded)) return { status: 400, message: ASSET_UPLOAD_MESSAGES.control };
   return null;
 }
 

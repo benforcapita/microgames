@@ -26,14 +26,18 @@ describe('creator prompts', () => {
   });
 
   it('states the whole-game size rule in both prompts and the contract', () => {
-    const phrase = /whole game, code plus assets, under 4 MB; assets over 100 KB get a warning/i;
+    const phrase = /whole game, code plus assets, under 4 MB \(target ≤ 1 MB\); assets over 100 KB get a warning/i;
     const contract = fs.readFileSync(path.resolve(process.cwd(), 'docs/RUNTIME-CONTRACT.md'), 'utf-8');
+    const rules = contract.split('## Creator prompts')[0];
+    const mentions = (text: string) => text.split('4 MB').length - 1;
     for (const prompt of CREATOR_PROMPTS) {
       assert.match(prompt.text, phrase, `Prompt ${prompt.id}`);
       assert.equal(prompt.text.includes('under 5 MB'), false);
       assert.equal(prompt.text.includes('assets inline'), false);
+      assert.equal(mentions(prompt.text), 1, `Prompt ${prompt.id} states 4 MB once`);
     }
     assert.match(contract, phrase);
+    assert.equal(mentions(rules), 1);
     assert.equal(contract.includes('under 5 MB'), false);
     assert.equal(contract.includes('≤ 5 MB'), false);
   });

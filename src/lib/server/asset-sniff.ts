@@ -189,8 +189,53 @@ function pngEndsClean(bytes: Uint8Array): boolean {
   return false;
 }
 
+/** Index of the FF that starts the next marker, after stuffed FF00 bytes and RST markers. */
+function skipJpegEntropy(bytes: Uint8Array, offset: number): number | null {
+  let i = offset;
+  while (i < bytes.length) {
+    if (bytes[i] !== 0xff) {
+      i += 1;
+      continue;
+    }
+    let j = i + 1;
+    while (j < bytes.length && bytes[j] === 0xff) j += 1;
+    if (j >= bytes.length) return null;
+    const code = bytes[j];
+    if (code === 0x00 || (code >= 0xd0 && code <= 0xd7)) {
+      i = j + 1;
+      continue;
+    }
+    return j - 1;
+  }
+  return null;
+}
+
+/**
+ * True only when the first EOI is the last two bytes.
+ * Markers with a length (APP, COM, SOS, …) are skipped whole, so an FF D9 inside EXIF is not the end.
+ * Entropy after SOS skips stuffed FF00 and RST markers. Bytes after that first EOI are a polyglot.
+ */
 function jpegEndsClean(bytes: Uint8Array): boolean {
-  return bytes.length >= 4 && bytes[bytes.length - 2] === 0xff && bytes[bytes.length - 1] === 0xd9;
+  if (bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8) return false;
+  let i = 2;
+  while (i < bytes.length) {
+    if (bytes[i] !== 0xff) return false;
+    while (i < bytes.length && bytes[i] === 0xff) i += 1;
+    if (i >= bytes.length) return false;
+    const marker = bytes[i];
+    i += 1;
+    if (marker === 0xd9) return i === bytes.length;
+    if (marker === 0x01 || marker === 0xd8 || (marker >= 0xd0 && marker <= 0xd7)) continue;
+    if (i + 2 > bytes.length) return false;
+    const length = (bytes[i] << 8) | bytes[i + 1];
+    if (length < 2 || i + length > bytes.length) return false;
+    i += length;
+    if (marker !== 0xda) continue;
+    const next = skipJpegEntropy(bytes, i);
+    if (next === null) return false;
+    i = next;
+  }
+  return false;
 }
 
 function skipSubBlocks(bytes: Uint8Array, offset: number): number | null {

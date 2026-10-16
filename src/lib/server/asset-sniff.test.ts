@@ -39,6 +39,28 @@ function gif(version: 'GIF87a' | 'GIF89a'): Uint8Array {
   return bytes;
 }
 
+function concat(...parts: Uint8Array[]): Uint8Array {
+  const out = new Uint8Array(parts.reduce((n, part) => n + part.byteLength, 0));
+  let offset = 0;
+  for (const part of parts) {
+    out.set(part, offset);
+    offset += part.byteLength;
+  }
+  return out;
+}
+
+/** JPEG marker whose 2-byte length includes those length bytes. */
+function jpegMarker(type: number, payload: Uint8Array): Uint8Array {
+  const out = new Uint8Array(4 + payload.byteLength);
+  out[0] = 0xff;
+  out[1] = type;
+  const length = payload.byteLength + 2;
+  out[2] = length >> 8;
+  out[3] = length & 0xff;
+  out.set(payload, 4);
+  return out;
+}
+
 function ftyp(brand: string): Uint8Array {
   const body = bytesOf(brand);
   const size = 8 + body.length;
@@ -116,6 +138,35 @@ describe('asset sniffing', () => {
     assert.equal(sniffed.ok, false);
     if (sniffed.ok) return;
     assert.equal(sniffed.reason, 'html');
+  });
+
+  it('accepts a JPEG with EXIF and a comment, including FF bytes inside those segments', () => {
+    const jpeg = concat(
+      Uint8Array.from([0xff, 0xd8]),
+      jpegMarker(0xe1, concat(bytesOf('Exif\0\0'), Uint8Array.from([0xff, 0xd9, 0x00]))),
+      jpegMarker(0xfe, Uint8Array.from([0x68, 0x69, 0xff, 0xd9])),
+      jpegMarker(0xda, Uint8Array.from([0x01, 0x01, 0x00, 0x00, 0x3f, 0x00])),
+      Uint8Array.from([0x12, 0xff, 0x00, 0x34, 0xff, 0xd0, 0x56]),
+      Uint8Array.from([0xff, 0xd9]),
+    );
+    const sniffed = sniffAsset(jpeg);
+    assert.equal(sniffed.ok && sniffed.format, 'jpeg');
+  });
+
+  it('rejects a JPEG with a ZIP appended and a second EOI at the end', () => {
+    const jpeg = concat(
+      Uint8Array.from([0xff, 0xd8]),
+      jpegMarker(0xe1, bytesOf('Exif\0\0')),
+      Uint8Array.from([0xff, 0xda, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3f, 0x00]),
+      Uint8Array.from([0xff, 0x00, 0xff, 0xd7]),
+      Uint8Array.from([0xff, 0xd9]),
+    );
+    const polyglot = concat(jpeg, Uint8Array.from([0x50, 0x4b, 0x03, 0x04, 0x14, 0x00]), Uint8Array.from([0xff, 0xd9]));
+    const sniffed = sniffAsset(polyglot);
+    assert.equal(sniffed.ok, false);
+    if (!sniffed.ok) assert.equal(sniffed.reason, 'trailing');
+    assert.equal(polyglot[polyglot.length - 2], 0xff);
+    assert.equal(polyglot[polyglot.length - 1], 0xd9);
   });
 
   it('rejects trailing bytes after PNG IEND, JPEG EOI, and the GIF trailer', () => {
