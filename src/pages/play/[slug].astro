@@ -50,7 +50,6 @@ const uploaded = Astro.url.searchParams.has('uploaded');
       uploaded && (
         <div class="notice panel">
           <b>You're live in the Proving Grounds.</b> Share the link: real plays and ratings decide when the game graduates.
-          Ads stay off until then.
         </div>
       )
     }
@@ -80,7 +79,7 @@ const uploaded = Astro.url.searchParams.has('uploaded');
       </div>
       <div class="toolbar spread">
         <div class="row">
-          <span class:list={['badge', game.stage]}>{live ? 'Monetized' : 'Proving Grounds · no ads'}</span>
+          <span class:list={['badge', game.stage]}>{live ? 'Live' : 'Proving Grounds'}</span>
           <span id="best" class="mono muted"></span>
           <span class="mono muted small">{user ? '☁ cloud saves on' : <a href={`/login?next=/play/${game.slug}`}>log in for cloud saves</a>}</span>
         </div>
@@ -126,8 +125,8 @@ const uploaded = Astro.url.searchParams.has('uploaded');
         <p class="muted small">
           {
             live
-              ? `Live and monetized. Revenue sharing for creators is planned; details to come.`
-              : `Measured automatically from real plays. Once every check passes after ${GRADUATION.minPlays}+ plays, ads switch on. Revenue sharing for creators is planned.`
+              ? `Graduated to the main arcade. Every check passed.`
+              : `Measured automatically from real plays. Once every check passes after ${GRADUATION.minPlays}+ plays, the game graduates to the main arcade.`
           }
         </p>
         <ul>
