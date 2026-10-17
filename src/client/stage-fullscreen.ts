@@ -256,10 +256,24 @@ export function attachStageFullscreen(
     control.textContent = '×';
     control.setAttribute('aria-label', FULLSCREEN_EXIT_NAME);
     for (const [name, value] of EXIT_STYLE) control.style.setProperty(name, value);
-    control.addEventListener('click', () => {
+    // Chrome drops the tap's click when the previous touch sequence started in the
+    // cross-origin game frame and is still settling (a swipe flushed in one turn).
+    // pointerup and touchend still hit this button. One tap must exit once.
+    let consumedAt = Number.NEGATIVE_INFINITY;
+    const requestExit = (event: Event) => {
+      const button = (event as PointerEvent).button;
+      if (event.type === 'pointerup' && typeof button === 'number' && button !== 0) return;
+      // Once the release has restored the page, the tap's click would hit whatever
+      // is now under the corner (the Upload link). Cancel that compatibility click.
+      if (event.type !== 'click' && event.cancelable) event.preventDefault();
+      if (event.timeStamp - consumedAt < 700) return;
+      consumedAt = event.timeStamp;
       beginNativeExit();
       void enqueue(leave);
-    });
+    };
+    control.addEventListener('pointerup', requestExit);
+    control.addEventListener('touchend', requestExit);
+    control.addEventListener('click', requestExit);
     stage.append(control);
     exitButton = control;
   };

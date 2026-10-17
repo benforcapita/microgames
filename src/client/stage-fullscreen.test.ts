@@ -77,6 +77,9 @@ function fakeButton() {
     click() {
       for (const listener of listeners.get('click') ?? []) listener(new Event('click'));
     },
+    emit(type: string) {
+      for (const listener of listeners.get(type) ?? []) listener(new Event(type));
+    },
     remove() {
       this.removed = true;
     },
@@ -188,6 +191,29 @@ describe('stage fullscreen fallback', () => {
     assert.equal(button.getAttribute('aria-label'), FULLSCREEN_ENTER_NAME);
     assert.equal(button.getAttribute('aria-pressed'), 'false');
     assert.ok(button.focusCount >= 1);
+    assert.equal(exit.removed, true);
+    controls.destroy();
+  });
+
+  it('leaves fullscreen from a pointer release when the click never arrives', async () => {
+    const { stage, button, doc, controls } = attach();
+    stage.requestFullscreen = async () => {
+      doc.fullscreenElement = stage;
+    };
+    await controls.toggle();
+    const exit = stage.children[0];
+    assert.ok(exit);
+    exit.emit('pointerup');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(button.textContent, FULLSCREEN_ENTER_LABEL);
+    assert.equal(doc.exitCalls, 1);
+    exit.emit('touchend');
+    exit.emit('click');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(doc.exitCalls, 1);
+    assert.equal(button.textContent, FULLSCREEN_ENTER_LABEL);
+    assert.equal(button.getAttribute('aria-label'), FULLSCREEN_ENTER_NAME);
+    assert.equal(button.focusCount, 1);
     assert.equal(exit.removed, true);
     controls.destroy();
   });
