@@ -1,10 +1,34 @@
 import { test, expect } from '@playwright/test';
+import postgres from 'postgres';
 import { shotPath } from './shots.mjs';
+import { localSupabaseEnv } from '../scripts/lib/local-supabase.mjs';
 
 const GAMES = [
   { slug: 'stack-tower', title: 'Stack Tower' },
   { slug: 'neon-lanes', title: 'Neon Lanes' },
 ];
+
+function databaseUrl() {
+  const fromEnv = process.env.DATABASE_URL ?? '';
+  if (/^postgresql:\/\/([^@/]*@)?(127\.0\.0\.1|localhost)[:/]/.test(fromEnv)) return fromEnv;
+  return localSupabaseEnv().DATABASE_URL;
+}
+
+/** This spec plays on phones and desktops. It sets input_support itself so a prior suite cannot hide a game. */
+async function markPlayable() {
+  const sql = postgres(databaseUrl(), { prepare: false, max: 1 });
+  try {
+    const rows = await sql`
+      update public.games set input_support = 'both'
+      where slug in ('stack-tower', 'neon-lanes')
+      returning slug`;
+    if (rows.length !== GAMES.length) {
+      throw new Error(`fullscreen spec needs ${GAMES.map((game) => game.slug).join(' and ')}; updated ${rows.length}`);
+    }
+  } finally {
+    await sql.end();
+  }
+}
 
 async function stageState(page) {
   return page.locator('#stage').evaluate((el) => {
@@ -42,24 +66,43 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
-test('fullscreen is the same for every game', async ({ page, browserName }, testInfo) => {
+test('fullscreen exit sits inside the stage for every game', async ({ page, browserName }, testInfo) => {
   const immersive = browserName === 'webkit' || testInfo.project.name === 'iphone';
   const project = testInfo.project.name || 'desktop';
+  const exit = page.locator('#stage [data-fullscreen-exit]');
 
   for (const [index, game] of GAMES.entries()) {
+    await markPlayable();
     await page.goto(`/play/${game.slug}`);
     await expect(page.locator('#stage')).toBeVisible();
-    await expect(page.locator('#fullscreen')).toHaveText('⛶ Fullscreen');
+    const toolbar = page.locator('#fullscreen');
+    await expect(toolbar).toHaveText('⛶ Fullscreen');
+    await expect(toolbar).toHaveAttribute('aria-label', 'Fullscreen');
 
-    await page.locator('#fullscreen').click();
+    await toolbar.click();
     const frame = page.locator('iframe.mg-frame');
     await expect(frame).toHaveAttribute('sandbox', 'allow-scripts allow-pointer-lock');
     await expect(frame).toHaveAttribute('allow', 'autoplay; gamepad; accelerometer; gyroscope; fullscreen');
     expect(await frame.getAttribute('allowfullscreen')).not.toBeNull();
-    await expect(page.locator('#fullscreen')).toHaveText('⛶ Exit fullscreen');
+    await expect(toolbar).toHaveText('⛶ Exit fullscreen');
+    await expect(toolbar).toHaveAttribute('aria-label', 'Exit fullscreen');
 
     const box = await stageState(page);
     const viewport = page.viewportSize();
+    await expect(exit).toBeVisible();
+    const placed = await exit.evaluate((el) => {
+      const host = el.parentElement?.getBoundingClientRect();
+      const button = el.getBoundingClientRect();
+      return {
+        inStage: el.parentElement?.id === 'stage',
+        z: Number(getComputedStyle(el).zIndex),
+        inside: !!host && button.top >= host.top - 1 && button.right <= host.right + 1 && button.bottom <= host.bottom + 1,
+      };
+    });
+    expect(placed.inStage).toBe(true);
+    expect(placed.z).toBeGreaterThan(0);
+    expect(placed.z).toBeLessThan(1000);
+    expect(placed.inside).toBe(true);
     if (immersive) {
       expect(box.native).toBe(false);
       expect(box.position).toBe('fixed');
@@ -67,7 +110,6 @@ test('fullscreen is the same for every game', async ({ page, browserName }, test
       expect(box.overflow).toBe('hidden');
       expect(box.width).toBeGreaterThan((viewport?.width ?? 0) * 0.9);
       expect(box.height).toBeGreaterThan((viewport?.height ?? 0) * 0.9);
-      await expect(page.getByRole('button', { name: 'Exit fullscreen', exact: true })).toBeVisible();
     } else {
       expect(box.native).toBe(true);
     }
@@ -77,20 +119,12 @@ test('fullscreen is the same for every game', async ({ page, browserName }, test
 
     await page.screenshot({ path: shotPath(`fs-1-${project}-${game.slug}.png`) });
 
-    if (immersive && index === 0) {
-      await page.getByRole('button', { name: 'Exit fullscreen', exact: true }).click();
-    } else if (immersive) {
-      await page.keyboard.press('Escape');
-    } else {
-      // Headless Chromium leaves fullscreen without the fullscreenchange event the
-      // Fullscreen API fires. Dispatch the event the browser would, then check the label.
-      await page.evaluate(async () => {
-        if (typeof document.exitFullscreen === 'function') await document.exitFullscreen().catch(() => {});
-        if (!document.fullscreenElement) document.dispatchEvent(new Event('fullscreenchange'));
-      });
-    }
-    await expect(page.locator('#fullscreen')).toHaveText('⛶ Fullscreen');
-    await expect(page.getByRole('button', { name: 'Exit fullscreen', exact: true })).toHaveCount(0);
+    if (immersive && index === 1) await page.keyboard.press('Escape');
+    else await exit.click();
+    await expect(toolbar).toHaveText('⛶ Fullscreen');
+    await expect(toolbar).toHaveAttribute('aria-label', 'Fullscreen');
+    await expect(toolbar).toBeFocused();
+    await expect(exit).toHaveCount(0);
     expect(await page.evaluate(() => document.fullscreenElement)).toBeNull();
     if (immersive) {
       expect(await page.locator('#stage').evaluate((el) => getComputedStyle(el).position)).toBe('relative');

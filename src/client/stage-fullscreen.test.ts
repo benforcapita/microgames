@@ -3,7 +3,9 @@ import fs from 'node:fs';
 import { describe, it } from 'node:test';
 import {
   FULLSCREEN_ENTER_LABEL,
+  FULLSCREEN_ENTER_NAME,
   FULLSCREEN_EXIT_LABEL,
+  FULLSCREEN_EXIT_NAME,
   attachStageFullscreen,
   type OrientationScreen,
 } from './stage-fullscreen.ts';
@@ -28,13 +30,18 @@ function styleMap() {
 
 function fakeStage(width: number, height: number) {
   const style = styleMap();
+  const children: ReturnType<typeof fakeButton>[] = [];
   const stage = {
     clientWidth: width,
     clientHeight: height,
     style,
     dataset: {} as DOMStringMap,
+    children,
     contains(node: unknown) {
       return node === stage;
+    },
+    append(node: ReturnType<typeof fakeButton>) {
+      children.push(node);
     },
     requestFullscreen: undefined as (() => Promise<void>) | undefined,
     webkitRequestFullscreen: undefined as (() => Promise<void>) | undefined,
@@ -48,8 +55,13 @@ function fakeButton() {
   return {
     type: '',
     textContent: '',
+    dataset: {} as DOMStringMap,
     style: styleMap(),
     removed: false,
+    focusCount: 0,
+    focus() {
+      this.focusCount += 1;
+    },
     setAttribute(name: string, value: string) {
       attrs.set(name, value);
     },
@@ -88,6 +100,7 @@ function fakeDocument() {
     async exitFullscreen() {
       doc.exitCalls += 1;
       doc.fullscreenElement = null;
+      doc.webkitFullscreenElement = null;
     },
     createElement(tag: string) {
       assert.equal(tag, 'button');
@@ -152,14 +165,18 @@ describe('stage fullscreen fallback', () => {
     assert.equal(doc.documentElement.style.getPropertyValue('overflow'), 'hidden');
     assert.equal(doc.body.style.getPropertyValue('overflow'), 'hidden');
     assert.equal(button.textContent, FULLSCREEN_EXIT_LABEL);
+    assert.equal(button.getAttribute('aria-label'), FULLSCREEN_EXIT_NAME);
     assert.equal(button.getAttribute('aria-pressed'), 'true');
+    assert.equal(doc.bodyChildren.length, 0);
 
-    const exit = doc.bodyChildren[0];
+    const exit = stage.children[0];
     assert.ok(exit);
+    assert.equal(exit.dataset.fullscreenExit, '1');
     assert.equal(exit.textContent, '×');
-    assert.equal(exit.getAttribute('aria-label'), 'Exit fullscreen');
+    assert.equal(exit.getAttribute('aria-label'), FULLSCREEN_EXIT_NAME);
     assert.equal(exit.removed, false);
-    assert.equal(exit.style.getPropertyValue('position'), 'fixed');
+    assert.equal(exit.style.getPropertyValue('position'), 'absolute');
+    assert.equal(exit.style.getPropertyValue('z-index'), '2');
 
     const esc = escapeEvent();
     doc.emit('keydown', esc as unknown as Event);
@@ -168,7 +185,9 @@ describe('stage fullscreen fallback', () => {
     assert.equal(css(stage, 'position'), '');
     assert.equal(doc.body.style.getPropertyValue('overflow'), '');
     assert.equal(button.textContent, FULLSCREEN_ENTER_LABEL);
+    assert.equal(button.getAttribute('aria-label'), FULLSCREEN_ENTER_NAME);
     assert.equal(button.getAttribute('aria-pressed'), 'false');
+    assert.ok(button.focusCount >= 1);
     assert.equal(exit.removed, true);
     controls.destroy();
   });
@@ -176,7 +195,7 @@ describe('stage fullscreen fallback', () => {
   it('leaves immersive mode from the exit button', async () => {
     const { stage, button, doc, controls } = attach();
     await controls.toggle();
-    doc.bodyChildren[0]?.click();
+    stage.children[0]?.click();
     await new Promise((resolve) => setTimeout(resolve, 0));
     assert.equal(css(stage, 'position'), '');
     assert.equal(button.textContent, FULLSCREEN_ENTER_LABEL);
@@ -189,7 +208,8 @@ describe('stage fullscreen fallback', () => {
     stage.requestFullscreen = () => Promise.reject(new Error('not allowed'));
     await controls.toggle();
     assert.equal(css(stage, 'position'), 'fixed');
-    assert.equal(doc.bodyChildren.length, 1);
+    assert.equal(doc.bodyChildren.length, 0);
+    assert.equal(stage.children.length, 1);
     controls.destroy();
   });
 
@@ -202,12 +222,18 @@ describe('stage fullscreen fallback', () => {
     await controls.toggle();
     assert.equal(css(stage, 'position'), '');
     assert.equal(doc.bodyChildren.length, 0);
+    assert.equal(stage.children.length, 1);
+    assert.equal(stage.children[0]?.style.getPropertyValue('position'), 'absolute');
     assert.equal(button.textContent, FULLSCREEN_EXIT_LABEL);
+    assert.equal(button.getAttribute('aria-label'), FULLSCREEN_EXIT_NAME);
 
     doc.webkitFullscreenElement = null;
     doc.emit('webkitfullscreenchange');
     assert.equal(button.textContent, FULLSCREEN_ENTER_LABEL);
+    assert.equal(button.getAttribute('aria-label'), FULLSCREEN_ENTER_NAME);
     assert.equal(button.getAttribute('aria-pressed'), 'false');
+    assert.equal(stage.children[0]?.removed, true);
+    assert.ok(button.focusCount >= 1);
     controls.destroy();
   });
 
@@ -223,6 +249,8 @@ describe('stage fullscreen fallback', () => {
     assert.equal(esc.prevented(), true);
     assert.ok(doc.exitCalls >= 1);
     assert.equal(button.textContent, FULLSCREEN_ENTER_LABEL);
+    assert.equal(button.getAttribute('aria-label'), FULLSCREEN_ENTER_NAME);
+    assert.ok(button.focusCount >= 1);
     controls.destroy();
   });
 
@@ -238,7 +266,44 @@ describe('stage fullscreen fallback', () => {
     doc.fullscreenElement = null;
     doc.emit('fullscreenchange');
     assert.equal(button.textContent, FULLSCREEN_ENTER_LABEL);
+    assert.equal(button.getAttribute('aria-label'), FULLSCREEN_ENTER_NAME);
+    assert.equal(stage.children[0]?.removed, true);
+    assert.ok(button.focusCount >= 1);
     controls.destroy();
+  });
+
+  it('keeps the exit button inside the stage for both native tiers and leaves when it is clicked', async () => {
+    for (const tier of ['standard', 'webkit'] as const) {
+      const { stage, button, doc, controls } = attach();
+      if (tier === 'standard') {
+        stage.requestFullscreen = async () => {
+          doc.fullscreenElement = stage;
+        };
+      } else {
+        stage.requestFullscreen = () => Promise.reject(new Error('missing'));
+        stage.webkitRequestFullscreen = async () => {
+          doc.webkitFullscreenElement = stage;
+        };
+      }
+      await controls.toggle();
+      assert.equal(css(stage, 'position'), '');
+      assert.equal(doc.bodyChildren.length, 0);
+      const exit = stage.children[0];
+      assert.ok(exit);
+      assert.equal(exit.dataset.fullscreenExit, '1');
+      assert.equal(exit.getAttribute('aria-label'), FULLSCREEN_EXIT_NAME);
+      assert.equal(exit.style.getPropertyValue('z-index'), '2');
+      assert.equal(button.focusCount, 0);
+
+      exit.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      assert.ok(doc.exitCalls >= 1);
+      assert.equal(button.textContent, FULLSCREEN_ENTER_LABEL);
+      assert.equal(button.getAttribute('aria-label'), FULLSCREEN_ENTER_NAME);
+      assert.equal(exit.removed, true);
+      assert.ok(button.focusCount >= 1);
+      controls.destroy();
+    }
   });
 
   it('locks landscape from the stage box and ignores a rejected lock', async () => {
@@ -284,6 +349,7 @@ describe('fullscreen is a shared player feature', () => {
     assert.doesNotMatch(page, /stage\.requestFullscreen/);
     assert.match(player, /gyroscope; fullscreen/);
     assert.match(player, /allowFullscreen = true/);
+    assert.match(player, /data-fullscreen-exit/);
     assert.equal(player.includes('inputSupport'), false);
   });
 });

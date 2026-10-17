@@ -4,6 +4,9 @@
 
 export const FULLSCREEN_ENTER_LABEL = '⛶ Fullscreen';
 export const FULLSCREEN_EXIT_LABEL = '⛶ Exit fullscreen';
+/** Accessible names. The visible label keeps the glyph; these do not. */
+export const FULLSCREEN_ENTER_NAME = 'Fullscreen';
+export const FULLSCREEN_EXIT_NAME = 'Exit fullscreen';
 
 const IMMERSIVE_STYLE: readonly (readonly [string, string])[] = [
   ['position', 'fixed'],
@@ -21,11 +24,14 @@ const IMMERSIVE_STYLE: readonly (readonly [string, string])[] = [
   ['padding-left', 'env(safe-area-inset-left)'],
 ];
 
+// One ×, inside the stage, for native and CSS. Native fullscreen only paints the stage,
+// so a control on document.body never appears there. z-index 2 clears the game iframe.
+// The stage stacking context (900 while immersive) stays under the ad overlay at 1000.
 const EXIT_STYLE: readonly (readonly [string, string])[] = [
-  ['position', 'fixed'],
+  ['position', 'absolute'],
   ['top', 'max(12px, env(safe-area-inset-top))'],
   ['right', 'max(12px, env(safe-area-inset-right))'],
-  ['z-index', '901'],
+  ['z-index', '2'],
   ['width', '44px'],
   ['height', '44px'],
   ['padding', '0'],
@@ -110,6 +116,19 @@ async function tryNative(stage: HTMLElement): Promise<boolean> {
   return false;
 }
 
+type ExitCall = (this: unknown) => void | Promise<void>;
+
+/** Start an exit in the current turn. A later microtask is too late for Chromium to leave fullscreen. */
+function kickExit(fn: unknown, receiver: object): Promise<void> | null {
+  if (typeof fn !== 'function') return null;
+  try {
+    const result = (fn as ExitCall).call(receiver);
+    return result instanceof Promise ? result : Promise.resolve();
+  } catch {
+    return null;
+  }
+}
+
 async function exitNative(doc: Document): Promise<void> {
   const webkit = webkitDocument(doc);
   const exits = [doc.exitFullscreen?.bind(doc), webkit.webkitExitFullscreen?.bind(webkit), webkit.webkitCancelFullScreen?.bind(webkit)];
@@ -168,8 +187,9 @@ function defaultScreen(): OrientationScreen | null {
 
 /**
  * Binds the toolbar button to the shared stage. Native fullscreen is preferred.
- * When the document cannot enter it, the stage is pinned over the page and a visible
- * exit control is added. Escape leaves that fallback. `fullscreenchange` (and the
+ * When the document cannot enter it, the stage is pinned over the page. The same ×
+ * sits inside the stage in both modes, above the game iframe and under the ad overlay.
+ * Escape leaves when the key reaches this document. `fullscreenchange` (and the
  * webkit equivalent) keeps the toolbar label in sync when the browser leaves on its own.
  */
 export function attachStageFullscreen(
@@ -182,6 +202,7 @@ export function attachStageFullscreen(
   let mode: Mode = 'off';
   let locked = false;
   let exitButton: HTMLButtonElement | null = null;
+  let nativeExit: Promise<void> | null = null;
   let stageStyle: Map<string, string> | null = null;
   let rootOverflow: Map<string, string> | null = null;
   let bodyOverflow: Map<string, string> | null = null;
@@ -190,7 +211,26 @@ export function attachStageFullscreen(
 
   const setActive = (active: boolean) => {
     button.textContent = active ? FULLSCREEN_EXIT_LABEL : FULLSCREEN_ENTER_LABEL;
+    button.setAttribute('aria-label', active ? FULLSCREEN_EXIT_NAME : FULLSCREEN_ENTER_NAME);
     button.setAttribute('aria-pressed', active ? 'true' : 'false');
+  };
+
+  const focusToolbar = () => {
+    if (!destroyed) button.focus();
+  };
+
+  const beginNativeExit = () => {
+    if (nativeExit || (mode !== 'native' && !isNativeActive(doc, stage))) return;
+    const webkit = webkitDocument(doc);
+    const pending = [kickExit(doc.exitFullscreen, doc), kickExit(webkit.webkitExitFullscreen, webkit), kickExit(webkit.webkitCancelFullScreen, webkit)].filter(
+      (result): result is Promise<void> => result !== null,
+    );
+    if (!pending.length) return;
+    const settled: Promise<void> = Promise.all(pending.map((result) => result.then(() => undefined, () => undefined))).then(() => undefined);
+    nativeExit = settled;
+    void settled.then(() => {
+      if (nativeExit === settled) nativeExit = null;
+    });
   };
 
   const hideExit = () => {
@@ -206,20 +246,21 @@ export function attachStageFullscreen(
     rootOverflow = null;
     if (bodyOverflow) restore(doc.body, bodyOverflow);
     bodyOverflow = null;
-    hideExit();
   };
 
   const showExit = () => {
     if (exitButton) return;
     const control = doc.createElement('button');
     control.type = 'button';
+    control.dataset.fullscreenExit = '1';
     control.textContent = '×';
-    control.setAttribute('aria-label', 'Exit fullscreen');
+    control.setAttribute('aria-label', FULLSCREEN_EXIT_NAME);
     for (const [name, value] of EXIT_STYLE) control.style.setProperty(name, value);
     control.addEventListener('click', () => {
+      beginNativeExit();
       void enqueue(leave);
     });
-    doc.body.append(control);
+    stage.append(control);
     exitButton = control;
   };
 
@@ -228,7 +269,6 @@ export function attachStageFullscreen(
     stageStyle = remember(stage, IMMERSIVE_STYLE);
     rootOverflow = remember(doc.documentElement, [['overflow', 'hidden']]);
     bodyOverflow = remember(doc.body, [['overflow', 'hidden']]);
-    showExit();
   };
 
   const releaseLock = async () => {
@@ -242,12 +282,16 @@ export function attachStageFullscreen(
     if (isNativeActive(doc, stage)) {
       if (mode === 'css') clearImmersive();
       mode = 'native';
+      showExit();
       setActive(true);
       return;
     }
     if (mode === 'native') {
       mode = 'off';
+      clearImmersive();
+      hideExit();
       setActive(false);
+      focusToolbar();
       void releaseLock();
     }
   };
@@ -255,28 +299,35 @@ export function attachStageFullscreen(
   async function enter(): Promise<FullscreenMode> {
     const landscape = stageIsLandscape(stage);
     const native = await tryNative(stage);
-    if (native) {
-      mode = 'native';
-      setActive(true);
-    } else {
+    if (native) mode = 'native';
+    else {
       applyImmersive();
       mode = 'css';
-      setActive(true);
     }
+    showExit();
+    setActive(true);
     if (landscape) locked = await lockLandscape(screen);
     return mode;
   }
 
   async function leave(): Promise<FullscreenMode> {
-    if (mode === 'native' || isNativeActive(doc, stage)) await exitNative(doc);
+    if (mode === 'native' || isNativeActive(doc, stage)) {
+      const pending = nativeExit;
+      if (pending) await pending;
+      if (isNativeActive(doc, stage)) await exitNative(doc);
+    }
     clearImmersive();
+    hideExit();
     mode = 'off';
     setActive(false);
     await releaseLock();
     if (isNativeActive(doc, stage)) {
       mode = 'native';
+      showExit();
       setActive(true);
+      return mode;
     }
+    focusToolbar();
     return mode;
   }
 
@@ -296,12 +347,7 @@ export function attachStageFullscreen(
     if (mode === 'off') return;
     if (!('key' in event) || (event as KeyboardEvent).key !== 'Escape') return;
     event.preventDefault();
-    // exitFullscreen has to start in this event turn. A microtask later, Chromium
-    // resolves the call without leaving the fullscreen element.
-    if (mode === 'native' || isNativeActive(doc, stage)) {
-      const exit = doc.exitFullscreen;
-      if (typeof exit === 'function') void exit.call(doc).catch(() => {});
-    }
+    beginNativeExit();
     void enqueue(leave);
   };
 
@@ -309,12 +355,16 @@ export function attachStageFullscreen(
   doc.addEventListener('webkitfullscreenchange', onFullscreen);
   doc.addEventListener('keydown', onKey);
   setActive(isNativeActive(doc, stage));
-  if (isNativeActive(doc, stage)) mode = 'native';
+  if (isNativeActive(doc, stage)) {
+    mode = 'native';
+    showExit();
+  }
 
   return {
     toggle() {
       if (destroyed) return Promise.resolve('off');
       const entering = mode === 'off' && !isNativeActive(doc, stage);
+      if (!entering) beginNativeExit();
       return enqueue(entering ? enter : leave);
     },
     destroy() {
@@ -323,6 +373,7 @@ export function attachStageFullscreen(
       doc.removeEventListener('webkitfullscreenchange', onFullscreen);
       doc.removeEventListener('keydown', onKey);
       clearImmersive();
+      hideExit();
       if (mode !== 'off') void releaseLock();
       mode = 'off';
       setActive(false);

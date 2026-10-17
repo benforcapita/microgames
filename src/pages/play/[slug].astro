@@ -85,7 +85,7 @@ const uploaded = Astro.url.searchParams.has('uploaded');
         </div>
         <div class="row">
           <button class="btn ghost sm" type="button" id="restart">↻ Restart</button>
-          <button class="btn ghost sm" type="button" id="fullscreen">⛶ Fullscreen</button>
+          <button class="btn ghost sm" type="button" id="fullscreen" aria-label="Fullscreen">⛶ Fullscreen</button>
           {remixable && <a class="btn ghost sm" href={`${CDN_ORIGIN}/g/${game.id}/index.html?source${ptQuery}`} target="_blank" rel="noopener">{'</>'} Source</a>}
           {remixable && live && <a class="btn sm" href={`/upload?fork=${game.slug}`}>⑂ Fork</a>}
           {isOwner && <a class="btn ghost sm" href="/me">Manage</a>}
@@ -278,11 +278,12 @@ const uploaded = Astro.url.searchParams.has('uploaded');
       const fullscreen = attachStageFullscreen(stage, fullscreenBtn);
       fullscreenBtn.addEventListener('click', () => {
         if (!player) start();
-        void fullscreen.toggle().then((entered) => {
-          // Keep the toolbar focused in the CSS fallback so Escape reaches this document.
-          // Native fullscreen keeps the game focused; the browser's own Escape exits it.
-          if (entered === 'css') fullscreenBtn.focus();
-          else player?.frame.focus();
+        void fullscreen.toggle().then((mode) => {
+          // CSS mode needs the toolbar focused so Escape reaches this document.
+          // Leaving either mode returns focus here. Native enter keeps the game focused;
+          // the × inside the stage is on screen for that mode.
+          if (mode === 'native') player?.frame.focus();
+          else fullscreenBtn.focus();
         });
       });
     }

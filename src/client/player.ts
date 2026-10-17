@@ -79,16 +79,25 @@ export function mountPlayer(host: HTMLElement, game: PlayerGame, opts: PlayerOpt
   frame.setAttribute('allow', 'autoplay; gamepad; accelerometer; gyroscope; fullscreen');
   frame.allowFullscreen = true;
   frame.setAttribute('referrerpolicy', 'no-referrer');
+  // The fullscreen × is a child of the stage so native fullscreen can show it. Restart
+  // replaces the frame and has to put that control back on top of the new iframe.
+  const exit = host.querySelector('[data-fullscreen-exit]');
   host.replaceChildren(frame);
-  // CSS immersive keeps focus on the toolbar so Escape reaches the portal. The frame is cross-origin.
-  if (host.dataset.immersive !== '1') frame.focus();
+  if (exit) host.append(exit);
+  // CSS immersive keeps focus on the toolbar so Escape reaches the portal. A late load
+  // must not steal focus after exit has returned it to the fullscreen button.
+  const focusFrame = () => {
+    if (host.dataset.immersive === '1' || document.activeElement?.id === 'fullscreen') return;
+    frame.focus();
+  };
+  focusFrame();
 
   let destroyed = false;
   let srcSet = false;
   let sessionStartTracked = false;
 
   const onLoad = () => {
-    if (host.dataset.immersive !== '1') frame.focus();
+    focusFrame();
     // A PAUSE posted before boot.js was listening is lost; re-send the current state to the fresh document.
     if (pauses.size) post('PAUSE');
     if (!destroyed && srcSet && !sessionStartTracked) {
