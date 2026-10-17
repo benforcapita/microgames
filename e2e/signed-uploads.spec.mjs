@@ -3,10 +3,12 @@
 // file-count cap + 4 MB version cap + rate limit). The browser PUTs bytes straight to Supabase;
 // POST /api/games/<slug>/assets/finalize scans the stored bytes, re-checks the caps and writes the
 // 'uploaded' row. Orphans (never finalized) are not assets and are not served by the CDN.
+import { randomBytes } from 'node:crypto';
 import { test, expect, request as pwRequest } from '@playwright/test';
 import postgres from 'postgres';
 import { createClient } from '@supabase/supabase-js';
 import { localSupabaseEnv } from '../scripts/lib/local-supabase.mjs';
+import { GAME_VERSION_MAX_BYTES } from '../src/lib/asset-limits.ts';
 
 const WEB = `http://127.0.0.1:${process.env.E2E_WEB_PORT ?? 4721}`;
 const CDN = `http://127.0.0.1:${process.env.E2E_CDN_PORT ?? 4722}`;
@@ -32,14 +34,17 @@ const finalize = (c, slug, body) => c.post(`/api/games/${slug}/assets/finalize`,
 const putSigned = (url, bytes, contentType) => fetch(url, { method: 'PUT', headers: { 'content-type': contentType, 'x-upsert': 'true' }, body: bytes });
 const assetUrl = (id, path) => `${CDN}/g/${id}/1/${path}`;
 
-const RUN = Date.now().toString(36);
+// Every title/email/handle gets its own random suffix: --repeat-each runs in the same worker
+// share module state, and Date.now() slugs collide across parallel workers on games_slug_key.
+const uniq = () => randomBytes(5).toString('hex');
 
 async function signup(c, tag) {
-  const email = `up2a-${tag}-${RUN}@example.test`;
+  const id = `${tag}${uniq()}`;
+  const email = `up2a-${id}@example.test`;
   const password = 'up2a-pass-123';
   let r = await c.post('/api/auth/login', { multipart: { mode: 'signup', email, password, next: '/me' }, maxRedirects: 0 });
   expect(r.status(), 'signup').toBe(303);
-  r = await c.post('/api/profile', { multipart: { handle: `up2a${tag}${RUN}`.slice(0, 32), next: '/me' }, maxRedirects: 0 });
+  r = await c.post('/api/profile', { multipart: { handle: `up2a${id}`.slice(0, 32), next: '/me' }, maxRedirects: 0 });
   expect(r.status(), 'handle').toBe(303);
   return { email, password };
 }
@@ -73,7 +78,7 @@ test.afterAll(async () => {
 test('UP-2a sign: anonymous 401, non-owner 404, owner 200', async () => {
   const owner = await ctx();
   await signup(owner, 'own');
-  const game = await uploadGame(owner, `UP2a owner ${Date.now()}`);
+  const game = await uploadGame(owner, `UP2a owner ${uniq()}`);
   const other = await ctx();
   await signup(other, 'oth');
   const anon = await ctx();
@@ -95,7 +100,7 @@ test('UP-2a sign: anonymous 401, non-owner 404, owner 200', async () => {
 test('UP-2a signed URL writes exactly one path', async () => {
   const c = await ctx();
   await signup(c, 'one');
-  const game = await uploadGame(c, `UP2a single ${Date.now()}`);
+  const game = await uploadGame(c, `UP2a single ${uniq()}`);
   const r = await sign(c, game.slug, { path: 'sfx/a.wav', size: SMALL_WAV.length, contentType: 'audio/wav' });
   const { url, token, uploadPath } = await r.json();
   expect(uploadPath).toMatch(new RegExp(`^${game.id}/_staging/`));
@@ -118,7 +123,7 @@ test('UP-2a signed URL writes exactly one path', async () => {
 test('UP-2a finalize rejects a bad file and deletes the stored object', async () => {
   const c = await ctx();
   await signup(c, 'bad');
-  const game = await uploadGame(c, `UP2a bad ${Date.now()}`);
+  const game = await uploadGame(c, `UP2a bad ${uniq()}`);
   await sql`update public.games set stage = 'proving' where id = ${game.id}`;
 
   const s = await sign(c, game.slug, { path: 'sprites/evil.png', size: SVG.length, contentType: 'image/png' });
@@ -147,7 +152,7 @@ test('UP-2a finalize rejects a bad file and deletes the stored object', async ()
 test('UP-2a caps: file-count and 4 MB enforced at both sign and finalize', async () => {
   const c = await ctx();
   await signup(c, 'cap');
-  const game = await uploadGame(c, `UP2a caps ${Date.now()}`);
+  const game = await uploadGame(c, `UP2a caps ${uniq()}`);
 
   // Seat the game at 199 manifest rows so the next row is the 200th.
   await sql`
@@ -178,7 +183,7 @@ test('UP-2a caps: file-count and 4 MB enforced at both sign and finalize', async
   expect((await denied.json()).error).toBe('cap');
 
   // 4 MB cap on a second game (game A is at the file cap, so its failures would be 'cap' anyway).
-  const gameB = await uploadGame(c, `UP2a sizecap ${Date.now()}`);
+  const gameB = await uploadGame(c, `UP2a sizecap ${uniq()}`);
   const [g] = await sql`select size_bytes from public.games where id = ${gameB.id}`;
   const room = 4 * 1024 * 1024 - g.size_bytes;
   const declaredTooBig = await sign(c, gameB.slug, { path: 'big.wav', size: room + 1, contentType: 'audio/wav' });
@@ -202,7 +207,7 @@ test('UP-2a caps: file-count and 4 MB enforced at both sign and finalize', async
 test('UP-2a orphan upload: PUT to a signed URL is not served until finalize', async () => {
   const c = await ctx();
   await signup(c, 'orph');
-  const game = await uploadGame(c, `UP2a orphan ${Date.now()}`);
+  const game = await uploadGame(c, `UP2a orphan ${uniq()}`);
   await sql`update public.games set stage = 'proving' where id = ${game.id}`;
 
   const s = await sign(c, game.slug, { path: 'sprites/orphan.png', size: PNG.length, contentType: 'image/png' });
@@ -223,7 +228,7 @@ test('UP-2a orphan upload: PUT to a signed URL is not served until finalize', as
 test('UP-2a anon and authenticated roles cannot write the bucket; only signed URLs/service role can', async () => {
   const c = await ctx();
   const { email, password } = await signup(c, 'rls');
-  const game = await uploadGame(c, `UP2a rls ${Date.now()}`);
+  const game = await uploadGame(c, `UP2a rls ${uniq()}`);
   const victim = `${game.id}/1/rls.png`;
   const attacker = `${game.id}/1/attacker.png`;
   const PWNED = Buffer.from('PWNED-BYTES');
@@ -260,7 +265,7 @@ test('UP-2a anon and authenticated roles cannot write the bucket; only signed UR
 test('UP-2a happy path: sign -> PUT -> finalize -> row -> CDN 200', async () => {
   const c = await ctx();
   await signup(c, 'happy');
-  const game = await uploadGame(c, `UP2a happy ${Date.now()}`);
+  const game = await uploadGame(c, `UP2a happy ${uniq()}`);
   await sql`update public.games set stage = 'proving' where id = ${game.id}`;
 
   const s = await sign(c, game.slug, { path: 'sfx/jump.wav', size: SMALL_WAV.length, contentType: 'audio/wav' });
@@ -291,7 +296,7 @@ test('UP-2a happy path: sign -> PUT -> finalize -> row -> CDN 200', async () => 
 test('UP-2a signed URL cannot replace a finalized asset without finalize', async () => {
   const c = await ctx();
   await signup(c, 'swap');
-  const game = await uploadGame(c, `UP2a swap ${Date.now()}`);
+  const game = await uploadGame(c, `UP2a swap ${uniq()}`);
   await sql`update public.games set stage = 'proving' where id = ${game.id}`;
 
   // v1 through the whole flow: signed, uploaded, scanned, finalized.
@@ -320,5 +325,141 @@ test('UP-2a signed URL cannot replace a finalized asset without finalize', async
   const still = await fetch(assetUrl(game.id, 'sfx/beep.wav'));
   expect(still.status).toBe(200);
   expect(Buffer.from(await still.arrayBuffer()).equals(v1), 'CDN must keep serving the finalized bytes').toBe(true);
+  await c.dispose();
+});
+
+test('UP-2a sign rejects control characters in the path with 400, before any storage/DB work', async () => {
+  const c = await ctx();
+  await signup(c, 'ctl');
+  const game = await uploadGame(c, `UP2a ctl ${uniq()}`);
+
+  // A NUL or other control character must get the same {error, message} 400 finalize and the
+  // legacy multipart POST return — never a 500 from Postgres choking on the path parameter.
+  for (const path of ['x.png\u0000.wav', '%00x.png', 'x\u001f.png']) {
+    const r = await sign(c, game.slug, { path, size: SMALL_WAV.length, contentType: 'audio/wav' });
+    expect(r.status(), JSON.stringify(path)).toBe(400);
+    const body = await r.json();
+    expect(body.error, JSON.stringify(path)).toBe('control');
+    expect(body.message, JSON.stringify(path)).toBe('That path contains a NUL or a control character.');
+  }
+
+  // Nothing may be staged or written for the rejected paths.
+  const staging = await gamesBucket().list(`${game.id}/_staging`);
+  expect(staging.error).toBeNull();
+  expect(staging.data ?? [], 'no staged object may be created').toEqual([]);
+  const [count] = await sql`select count(*)::int as n from public.game_assets where game_id = ${game.id}`;
+  expect(count.n, 'no asset row may be written').toBe(0);
+  await c.dispose();
+});
+
+test('UP-2a finalize: anonymous 401, non-owner 404, staged object survives for the owner', async () => {
+  const owner = await ctx();
+  await signup(owner, 'fown');
+  const game = await uploadGame(owner, `UP2a fown ${uniq()}`);
+  const other = await ctx();
+  await signup(other, 'foth');
+  const anon = await ctx();
+
+  const s = await sign(owner, game.slug, { path: 'sfx/keep.wav', size: SMALL_WAV.length, contentType: 'audio/wav' });
+  expect(s.status()).toBe(200);
+  const { url, uploadId, uploadPath } = await s.json();
+  expect((await putSigned(url, SMALL_WAV, 'audio/wav')).status).toBe(200);
+  expect(await objectExists(uploadPath)).toBe(true);
+
+  // A valid uploadId is not a capability: the session decides who may finalize.
+  const denied = await finalize(anon, game.slug, { path: 'sfx/keep.wav', uploadId });
+  expect(denied.status(), 'signed-out finalize').toBe(401);
+  const nonOwner = await finalize(other, game.slug, { path: 'sfx/keep.wav', uploadId });
+  expect(nonOwner.status(), 'non-owner finalize').toBe(404);
+  expect(await objectExists(uploadPath), "others' finalize attempts must leave the staged bytes alone").toBe(true);
+
+  const own = await finalize(owner, game.slug, { path: 'sfx/keep.wav', uploadId });
+  expect(own.status(), 'the owner can still finalize the same uploadId').toBe(200);
+  expect(await objectExists(uploadPath), 'staged object is consumed by the real finalize').toBe(false);
+  await Promise.all([owner, other, anon].map((c) => c.dispose()));
+});
+
+test('UP-2a finalize answers a fixed 500 and deletes the staged object on a DB failure', async () => {
+  const c = await ctx();
+  await signup(c, 'dbf');
+  const game = await uploadGame(c, `UP2a dbfail ${uniq()}`);
+
+  // Inject a real Postgres failure at the row write: a game_assets write for this game's
+  // 'dbfail/' path raises. The route must still answer a fixed {error:'storage'} body — the DB
+  // message is server-side only — and the staged object must be deleted on every exit path.
+  // The function/trigger names and the condition are unique to this invocation: --repeat-each
+  // and --workers run copies of this test concurrently on the same database.
+  const fn = `mg_test_fail_${uniq()}`;
+  await sql.unsafe(`create or replace function public.${fn}() returns trigger language plpgsql as $f$
+    begin
+      if new.game_id = '${game.id}' and new.path like 'dbfail/%' then raise exception 'injected test failure'; end if;
+      return new;
+    end
+  $f$`);
+  await sql.unsafe(`create trigger ${fn} before insert or update on public.game_assets
+    for each row execute function public.${fn}()`);
+  try {
+    const s = await sign(c, game.slug, { path: 'dbfail/x.png', size: PNG.length, contentType: 'image/png' });
+    expect(s.status()).toBe(200);
+    const { url, uploadId, uploadPath } = await s.json();
+    expect((await putSigned(url, PNG, 'image/png')).status).toBe(200);
+    expect(await objectExists(uploadPath)).toBe(true);
+
+    const f = await finalize(c, game.slug, { path: 'dbfail/x.png', uploadId });
+    expect(f.status()).toBe(500);
+    const body = await f.json().catch(() => null);
+    expect(body, 'fixed error body — the real DB message is server-side only').toEqual({
+      error: 'storage',
+      message: 'The file could not be stored. Try again.',
+    });
+    expect(await objectExists(uploadPath), 'staged object must be deleted on a DB failure').toBe(false);
+    const [row] = await sql`select status from public.game_assets where game_id = ${game.id} and path = 'dbfail/x.png'`;
+    expect(row, 'no asset row may be written').toBeUndefined();
+    expect((await fetch(assetUrl(game.id, 'dbfail/x.png'))).status, 'never served').toBe(404);
+  } finally {
+    await sql.unsafe(`drop trigger if exists ${fn} on public.game_assets`);
+    await sql.unsafe(`drop function if exists public.${fn}()`);
+    await c.dispose();
+  }
+});
+
+test('UP-2a finalize re-checks the whole-version 4 MB cap', async () => {
+  const c = await ctx();
+  await signup(c, 'total');
+  const game = await uploadGame(c, `UP2a total ${uniq()}`);
+  const [g] = await sql`select size_bytes from public.games where id = ${game.id}`;
+  const room = GAME_VERSION_MAX_BYTES - g.size_bytes;
+  // Every file fits on its own, and every sign sees the version total still under the cap
+  // (no finalized rows yet). Finalized one after another, they would take the version past
+  // 4 MB — the cap must be re-checked against the version's real bytes at finalize.
+  const size = Math.floor(room * 0.45);
+  const staged = [];
+  for (let i = 0; i < 4; i++) {
+    const path = `bulk/f${i}.wav`;
+    const s = await sign(c, game.slug, { path, size, contentType: 'audio/wav' });
+    expect(s.status(), `sign ${path}`).toBe(200);
+    const j = await s.json();
+    expect((await putSigned(j.url, wav(size), 'audio/wav')).status).toBe(200);
+    staged.push({ path, ...j });
+  }
+
+  const replies = [];
+  for (const it of staged) replies.push(await finalize(c, game.slug, { path: it.path, uploadId: it.uploadId }));
+  expect(replies[0].status(), 'first file fits').toBe(200);
+  expect(replies[1].status(), 'second file still fits').toBe(200);
+  for (const r of replies.slice(2)) {
+    expect(r.status(), 'a finalize that would pass the version cap is refused').toBe(413);
+    expect((await r.json()).error).toBe('too-big');
+  }
+  for (const it of staged.slice(2)) {
+    expect(await objectExists(it.uploadPath), `staged object for ${it.path} must be deleted`).toBe(false);
+    expect(await objectExists(`${game.id}/1/${it.path}`), `no served object for ${it.path}`).toBe(false);
+    // A 'rejected' audit row is allowed; nothing may be counted as uploaded for that path.
+    const [row] = await sql`select status from public.game_assets where game_id = ${game.id} and path = ${it.path}`;
+    expect(row?.status ?? 'absent', `${it.path} must not be an uploaded asset`).not.toBe('uploaded');
+    expect((await fetch(assetUrl(game.id, it.path))).status, `${it.path} is never served`).toBe(404);
+  }
+  const [count] = await sql`select count(*)::int as n from public.game_assets where game_id = ${game.id} and version = 1 and status = 'uploaded'`;
+  expect(count.n, 'only the two admitted files count toward the version').toBe(2);
   await c.dispose();
 });

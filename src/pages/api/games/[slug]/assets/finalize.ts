@@ -74,45 +74,57 @@ export const POST: APIRoute = async ({ request, params, locals }) => {
     },
   };
 
-  const [existing, usage] = await Promise.all([
-    findGameAsset(sql, game.id, version, assetPath),
-    assetUsage(sql, game.id, version),
-  ]);
-  // Same scan + caps as the multipart upload; adding: true because signing already admitted the
-  // path like the creator "Add file" form. The rate limit was spent at sign time.
-  const decision = assessAssetUpload({
-    userId: locals.user.id,
-    ownerId: game.ownerId,
-    rawPath: body.path,
-    adding: true,
-    bytes,
-    existing,
-    codeBytes: usage.codeBytes,
-    uploadedBytes: usage.uploadedBytes,
-    fileCount: usage.fileCount,
-    rateAllowed: true,
-  });
-
-  if (decision.kind === 'store' || decision.kind === 'reject') {
-    const saved = await saveFinalizedAsset(sql, storage, game.id, version, decision, { path: stagedPath, bytes });
-    if (!saved.ok) return deny({ status: 500, error: 'storage', message: ASSET_UPLOAD_MESSAGES.storage, flash: { error: 'storage' } });
-    if (decision.kind === 'store') {
-      return json({ path: decision.path, sizeBytes: decision.sizeBytes, warning: decision.warning });
-    }
-    return deny({
-      status: decision.code === 'too-big' ? 413 : 400,
-      error: decision.code,
-      message: decision.message,
-      flash: assetUploadQuery(decision),
+  try {
+    const [existing, usage] = await Promise.all([
+      findGameAsset(sql, game.id, version, assetPath),
+      assetUsage(sql, game.id, version),
+    ]);
+    // Same scan + caps as the multipart upload; adding: true because signing already admitted
+    // the path like the creator "Add file" form. The rate limit was spent at sign time.
+    const decision = assessAssetUpload({
+      userId: locals.user.id,
+      ownerId: game.ownerId,
+      rawPath: body.path,
+      adding: true,
+      bytes,
+      existing,
+      codeBytes: usage.codeBytes,
+      uploadedBytes: usage.uploadedBytes,
+      fileCount: usage.fileCount,
+      rateAllowed: true,
     });
-  }
 
-  // 'flash' and 'bad-request' decisions never get a row; the staged object still has to go.
-  const removed = await storage.remove(stagedPath);
-  if (removed.error) console.error(`Finalize cleanup failed for game ${game.id} ${stagedPath}`, removed.error);
-  if (decision.kind === 'bad-request') return deny({ status: 400, error: decision.code, message: decision.message, flash: { error: decision.code } });
-  if (decision.kind === 'login') return deny({ status: 401, error: 'unauthorized', message: 'Log in to upload files.' });
-  if (decision.kind === 'not-found') return deny({ status: 404, error: 'not-found', message: 'Not found' });
-  const status = decision.code === 'cap' ? 409 : decision.code === 'rate' ? 429 : 400;
-  return deny({ status, error: decision.code, message: ASSET_UPLOAD_MESSAGES[decision.code], flash: assetUploadQuery(decision) });
+    if (decision.kind === 'store' || decision.kind === 'reject') {
+      const saved = await saveFinalizedAsset(sql, storage, game.id, version, decision, bytes);
+      if (!saved.ok) {
+        return deny({ status: 500, error: 'storage', message: ASSET_UPLOAD_MESSAGES.storage, flash: { error: 'storage' } });
+      }
+      if (decision.kind === 'store') {
+        return json({ path: decision.path, sizeBytes: decision.sizeBytes, warning: decision.warning });
+      }
+      return deny({
+        status: decision.code === 'too-big' ? 413 : 400,
+        error: decision.code,
+        message: decision.message,
+        flash: assetUploadQuery(decision),
+      });
+    }
+
+    if (decision.kind === 'bad-request') {
+      return deny({ status: 400, error: decision.code, message: decision.message, flash: { error: decision.code } });
+    }
+    if (decision.kind === 'login') return deny({ status: 401, error: 'unauthorized', message: 'Log in to upload files.' });
+    if (decision.kind === 'not-found') return deny({ status: 404, error: 'not-found', message: 'Not found' });
+    const status = decision.code === 'cap' ? 409 : decision.code === 'rate' ? 429 : 400;
+    return deny({ status, error: decision.code, message: ASSET_UPLOAD_MESSAGES[decision.code], flash: assetUploadQuery(decision) });
+  } catch (error) {
+    // Fixed body — the real error (a failed usage read, a failed row write) is server-side only.
+    console.error(`Finalize failed for game ${game.id} ${stagedPath}`, error);
+    return deny({ status: 500, error: 'storage', message: ASSET_UPLOAD_MESSAGES.storage, flash: { error: 'storage' } });
+  } finally {
+    // One cleanup site: the staged object is deleted on every exit — success, every denial
+    // ('flash' and 'bad-request' never get a row) and every failure, thrown or returned.
+    const removed = await storage.remove(stagedPath).catch((error: unknown) => ({ error: { message: String(error) } }));
+    if (removed.error) console.error(`Finalize cleanup failed for game ${game.id} ${stagedPath}`, removed.error);
+  }
 };
