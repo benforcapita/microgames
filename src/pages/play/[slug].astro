@@ -171,7 +171,8 @@ const uploaded = Astro.url.searchParams.has('uploaded');
     /* Keep the running game's layout and paint isolated from the rest of the page. */
     contain: layout paint;
   }
-  .stage:fullscreen { border-radius: 0; max-height: none; border: 0; }
+  .stage:fullscreen,
+  .stage:-webkit-full-screen { border-radius: 0; max-height: none; border: 0; }
   .launch {
     position: absolute;
     inset: 0;
@@ -243,6 +244,7 @@ const uploaded = Astro.url.searchParams.has('uploaded');
 
 <script>
   import { mountPlayer, preloadSave, type PlayerHandle } from '../../client/player';
+  import { attachStageFullscreen } from '../../client/stage-fullscreen';
 
   // Desktop-only visits render the notice instead of #stage, so this script no-ops there.
   const stage = document.getElementById('stage');
@@ -270,10 +272,19 @@ const uploaded = Astro.url.searchParams.has('uploaded');
     };
     stage.querySelector('.launch')!.addEventListener('click', start);
     document.getElementById('restart')!.addEventListener('click', start);
-    document.getElementById('fullscreen')!.addEventListener('click', () => {
-      if (!player) start();
-      stage.requestFullscreen?.();
-      player?.frame.focus();
-    });
+    // Fullscreen is the same for every game: the shared stage, never a per-game hook.
+    const fullscreenBtn = document.getElementById('fullscreen');
+    if (fullscreenBtn instanceof HTMLButtonElement) {
+      const fullscreen = attachStageFullscreen(stage, fullscreenBtn);
+      fullscreenBtn.addEventListener('click', () => {
+        if (!player) start();
+        void fullscreen.toggle().then((entered) => {
+          // Keep the toolbar focused in the CSS fallback so Escape reaches this document.
+          // Native fullscreen keeps the game focused; the browser's own Escape exits it.
+          if (entered === 'css') fullscreenBtn.focus();
+          else player?.frame.focus();
+        });
+      });
+    }
   }
 </script>

@@ -76,17 +76,19 @@ export function mountPlayer(host: HTMLElement, game: PlayerGame, opts: PlayerOpt
   frame.className = 'mg-frame';
   frame.title = game.title;
   frame.setAttribute('sandbox', 'allow-scripts allow-pointer-lock');
-  frame.setAttribute('allow', 'autoplay; gamepad; accelerometer; gyroscope');
+  frame.setAttribute('allow', 'autoplay; gamepad; accelerometer; gyroscope; fullscreen');
+  frame.allowFullscreen = true;
   frame.setAttribute('referrerpolicy', 'no-referrer');
   host.replaceChildren(frame);
-  frame.focus();
+  // CSS immersive keeps focus on the toolbar so Escape reaches the portal. The frame is cross-origin.
+  if (host.dataset.immersive !== '1') frame.focus();
 
   let destroyed = false;
   let srcSet = false;
   let sessionStartTracked = false;
 
   const onLoad = () => {
-    frame.focus();
+    if (host.dataset.immersive !== '1') frame.focus();
     // A PAUSE posted before boot.js was listening is lost; re-send the current state to the fresh document.
     if (pauses.size) post('PAUSE');
     if (!destroyed && srcSet && !sessionStartTracked) {
