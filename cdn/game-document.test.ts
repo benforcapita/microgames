@@ -42,7 +42,9 @@ function harness(opts: { cdnOrigin?: string } = {}) {
       // PostgREST coerces eq.<v> against the int column: a non-numeric value is a 400 — that 400 is
       // exactly what used to turn into a 502 before this validation moved to the path boundary.
       if (!/^\d+$/.test(eq('version'))) return new Response('invalid input syntax for type integer', { status: 400 });
-      return Response.json([]);
+      // A versioned asset is served only with a finalized 'uploaded' row; every fixture object counts.
+      const key = `${eq('game_id')}/${eq('version')}/${decodeURIComponent(eq('path'))}`;
+      return Response.json(FILES[key] !== undefined ? [{ status: 'uploaded' }] : []);
     }
     const m = /\/storage\/v1\/object\/authenticated\/games\/([^/]+)\/(.+)$/.exec(u.pathname);
     if (m && FILES[`${m[1]}/${decodeURIComponent(m[2])}`] !== undefined) return new Response(FILES[`${m[1]}/${decodeURIComponent(m[2])}`]);

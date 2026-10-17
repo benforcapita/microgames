@@ -302,9 +302,10 @@ export function createHandler(cfg) {
 
       const isDoc = asset?.path === 'index.html';
       if (asset && !isDoc) {
-        // A rejected upload must not stay downloadable just because its object is still in the bucket.
-        // index.html is the game document, not a manifest asset, so this check does not apply to it.
-        if ((await assetRowStatus(id, asset.version, asset.path)) === 'rejected') return send(res, 404, 'Not found');
+        // Only a finalized upload may be served: the manifest row must say 'uploaded'. That blocks
+        // rejected files and UP-2a orphans (bytes PUT to a signed URL but never finalized), which
+        // have no row at all. index.html is the game document, not a manifest asset — exempt.
+        if ((await assetRowStatus(id, asset.version, asset.path)) !== 'uploaded') return send(res, 404, 'Not found');
       }
 
       const entry = await fetchObject(`${id}/${asset ? (isDoc ? 'index.html' : asset.key) : file}`);
