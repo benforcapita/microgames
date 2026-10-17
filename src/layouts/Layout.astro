@@ -118,9 +118,9 @@ const nav = [
     nav { gap: 0.6rem; }
     nav a.me { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   }
-  /* Logged-out row is full-bleed under 384px so Log in fits without sideways scroll. */
-  @media (max-width: 383px) {
-    .site-header .wrap:has(a[href^='/login']) { width: 100%; gap: 0.5rem; }
+  /* With the 1rem inset, logo + Log in + Sign up + Upload is 384px. Hide Upload until it fits. */
+  @media (max-width: 384px) {
+    .site-header .wrap:has(a[href^='/login']) a[href='/upload'] { display: none; }
   }
   @media (max-width: 420px) {
     .xs-hide { display: none; }
