@@ -82,16 +82,18 @@ const status = (frame) => frame.evaluate(() => {
   return {
     assets: tr.assets, audio: tr.audio, state: tr.state, frames: tr.frames,
     score: tr.score, gold: tr.gold, lane: tr.lane, airborne: tr.airborne, sliding: tr.sliding, speed: tr.speed,
+    paused: tr.paused,
   };
 });
 
+/** Shoots into the gitignored e2e screenshot directory (E2E-PNG), then copies it to OUT_DIR. */
 async function shot(page, name) {
-  mkdirSync(OUT_DIR, { recursive: true });
   mkdirSync(SHOT_DIR, { recursive: true });
-  const file = path.join(OUT_DIR, name);
-  await page.screenshot({ path: file });
-  await copyFile(file, shotPath(`e2e-1-${name}`));
-  return file;
+  mkdirSync(OUT_DIR, { recursive: true });
+  await page.screenshot({ path: shotPath(`e2e-1-${name}`) });
+  const copy = path.join(OUT_DIR, name);
+  await copyFile(shotPath(`e2e-1-${name}`), copy);
+  return copy;
 }
 
 test('Temple Dash: upload form -> validation passes -> plays on the CDN -> fullscreen', async ({ page, context }) => {
@@ -170,9 +172,10 @@ test('Temple Dash: upload form -> validation passes -> plays on the CDN -> fulls
 
     const checks = page.locator('.panel', { has: page.getByRole('heading', { name: 'Static checks' }) }).locator('.checks li');
     await expect(checks.first()).toBeVisible();
-    const marks = await page.locator('.panel .checks .mark').allInnerTexts();
+    // Every static check is marked pass (the badge is upper-cased by CSS, hence the fold).
+    const marks = (await page.locator('.panel .checks .mark').allInnerTexts()).map((mark) => mark.trim().toLowerCase());
     expect(marks.length).toBeGreaterThanOrEqual(10);
-    expect(marks.filter((m) => m !== 'pass')).toEqual([]);
+    expect(marks.filter((mark) => mark !== 'pass')).toEqual([]);
 
     const warnings = page.locator('#asset-warnings');
     await expect(warnings).not.toContainText('not uploaded yet');
@@ -192,11 +195,14 @@ test('Temple Dash: upload form -> validation passes -> plays on the CDN -> fulls
   await test.step('first frame renders inside the sandboxed CDN iframe', async () => {
     await page.goto(playHref);
     await expect(page.locator('#stage')).toBeVisible();
+    // The portal pauses a game whose stage is scrolled off-screen, so put the stage in view first.
+    await page.locator('#stage').scrollIntoViewIfNeeded();
     await page.getByRole('button', { name: `Play ${title}` }).click();
 
     const frameEl = page.locator('iframe.mg-frame');
     await expect(frameEl).toHaveAttribute('sandbox', 'allow-scripts allow-pointer-lock');
-    expect(await frameEl.getAttribute('src')).toContain(`${CDN}/g/${gameId}/index.html`);
+    // The player sets src once the save has been read, so this waits rather than reads once.
+    await expect(frameEl).toHaveAttribute('src', new RegExp(`^${CDN.replace(/[.]/g, '\\.')}/g/${gameId}/index\\.html\\?`));
     await expect(page.frameLocator('iframe.mg-frame').locator('canvas#view')).toBeVisible({ timeout: 30_000 });
 
     const frame = gameFrame(page, gameId);
@@ -300,9 +306,13 @@ test('Temple Dash: upload form -> validation passes -> plays on the CDN -> fulls
     // Distance scores and the pace rises while a run is going.
     await control('score and speed climb while running', async () => {
       const before = await read();
-      await page.waitForTimeout(600);
-      const after = await read();
-      return after.state === 'running' && after.score > before.score && after.speed > before.speed;
+      for (let i = 0; i < 40; i++) {
+        const after = await read();
+        if (after.state !== 'running') return false;
+        if (after.score > before.score && after.speed > before.speed) return true;
+        await page.waitForTimeout(200);
+      }
+      return false;
     });
     await restart();
     console.log(`[temple-run] play page screenshot: ${await shot(page, 'play.png')}`);

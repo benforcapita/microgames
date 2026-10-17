@@ -52,7 +52,7 @@ No third-party or CC0 downloads are included; nothing is fetched at build or run
 
 | File | Bytes | What it is | License |
 | --- | --- | --- | --- |
-| `index.html` | 145217 | built single-file game (assets inlined as `data:` URLs) | self-made (this repo) |
+| `index.html` | 145482 | built single-file game (assets inlined as `data:` URLs) | self-made (this repo) |
 | `src/game.html` | — | game source, with the `/*__MG_ASSETS__*/` asset placeholder | self-made (this repo) |
 | `tools/make-assets.mjs` | — | draws every sprite, synthesizes every sound | self-made (this repo) |
 | `tools/build.mjs` | — | inlines `assets/**` into `index.html` | self-made (this repo) |
@@ -77,7 +77,7 @@ the two `.mjs` build scripts that live inside this game folder.
 ## Test hook
 
 The game exposes a read-only `window.templeRun` status object (`assets`, `audio`, `state`, `frames`,
-`score`, `gold`, `lane`, `airborne`, `sliding`, `speed`) so `e2e/temple-run.spec.mjs` can assert that
+`score`, `gold`, `lane`, `airborne`, `sliding`, `speed`, `paused`) so `e2e/temple-run.spec.mjs` can assert that
 every sprite decoded, the music loop is playing, and the controls moved the runner — without reaching
 into the game's internals. It is the fixture's test contract, not part of the Meshground SDK.
 

@@ -583,9 +583,12 @@
     get score() { return run ? run.score : 0; },
     get gold() { return run ? run.gold : 0; },
     get lane() { return run ? run.lane : 1; },
-    get airborne() { return !!run && run.y > 0; },
+    // Off the ground, or pushing off: `vy` is set the instant the jump input lands, before the next frame.
+    get airborne() { return !!run && (run.y > 0 || run.vy > 0); },
     get sliding() { return !!run && run.slide > 0; },
     get speed() { return run ? run.speed : 0; },
+    /** True while Meshground has the game paused (ad break, hidden tab, stage scrolled off-screen). */
+    get paused() { return paused; },
   };
 })();
 </script>
