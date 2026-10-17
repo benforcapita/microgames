@@ -7,15 +7,15 @@ const SECRET = 'test-preview-secret';
 const PORTAL = 'http://127.0.0.1:4321';
 const STAGES: Record<string, string> = { live0001: 'live', pend0001: 'pending' };
 const FILES: Record<string, string> = {
-  'v1/index.html': '<!doctype html><html><head></head><body>lvl</body></html>',
-  'v1/sprites/hero.png': 'PNGDATA',
-  'v1/audio/jump.ogg': 'OGGDATA',
-  'v1/fonts/pixel.woff2': 'WOFF2',
-  'v1/data/level.json': '{"a":1}',
-  'v1/readme.txt': 'hi',
-  'v1/sprites/hidden.png': 'SECRET',
-  'v1/evil.php': '<?php',
-  'v1/page.svgz': 'x',
+  'index.html': '<!doctype html><html><head></head><body>lvl</body></html>',
+  '1/sprites/hero.png': 'PNGDATA',
+  '1/audio/jump.ogg': 'OGGDATA',
+  '1/fonts/pixel.woff2': 'WOFF2',
+  '1/data/level.json': '{"a":1}',
+  '1/readme.txt': 'hi',
+  '1/sprites/hidden.png': 'SECRET',
+  '1/evil.php': '<?php',
+  '1/page.svgz': 'x',
 };
 
 function harness() {
@@ -27,11 +27,15 @@ function harness() {
       const id = (u.searchParams.get('id') ?? '').replace(/^eq\./, '');
       return new Response(JSON.stringify(STAGES[id] ? [{ stage: STAGES[id] }] : []));
     }
+    if (u.pathname === '/rest/v1/game_validations') {
+      const id = (u.searchParams.get('game_id') ?? '').replace(/^eq\./, '');
+      return new Response(JSON.stringify(STAGES[id] ? [{ version: 1 }] : []), { status: 200 });
+    }
     if (u.pathname === '/rest/v1/game_assets') {
       const id = (u.searchParams.get('game_id') ?? '').replace(/^eq\./, '');
       const version = (u.searchParams.get('version') ?? '').replace(/^eq\./, '');
       const assetPath = decodeURIComponent((u.searchParams.get('path') ?? '').replace(/^eq\./, ''));
-      const status = id === 'live0001' && version === 'v1' && assetPath === 'sprites/hidden.png' ? 'rejected' : null;
+      const status = id === 'live0001' && version === '1' && assetPath === 'sprites/hidden.png' ? 'rejected' : null;
       return new Response(JSON.stringify(status ? [{ status }] : []), { status: 200 });
     }
     const m = /\/storage\/v1\/object\/authenticated\/games\/([^/]+)\/(.+)$/.exec(u.pathname);
@@ -63,37 +67,37 @@ describe('AS-3 versioned asset serving', () => {
       'readme.txt': 'text/plain; charset=utf-8',
     };
     for (const [p, type] of Object.entries(cases)) {
-      const r = await get(`/g/live0001/v1/${p}`);
+      const r = await get(`/g/live0001/1/${p}`);
       assert.equal(r.status, 200, p);
       assert.equal(r.headers['content-type'], type, p);
     }
   });
   it('does not serve an object whose manifest row is rejected', async () => {
     const { get, calls } = harness();
-    const hidden = await get('/g/live0001/v1/sprites/hidden.png');
+    const hidden = await get('/g/live0001/1/sprites/hidden.png');
     assert.equal(hidden.status, 404);
     assert.equal(hidden.body, 'Not found');
     assert.ok(!calls.some((c) => c.includes('hidden.png') && c.includes('/storage/')));
-    const shown = await get('/g/live0001/v1/sprites/hero.png');
+    const shown = await get('/g/live0001/1/sprites/hero.png');
     assert.equal(shown.status, 200);
     assert.equal(shown.body, 'PNGDATA');
   });
   it('404s extensions outside the allowlist (even if the object exists)', async () => {
     const { get, calls } = harness();
     for (const p of ['evil.php', 'page.svgz', 'noext', 'index.htm', 'x.exe', 'x.sh'])
-      assert.equal((await get(`/g/live0001/v1/${p}`)).status, 404, p);
+      assert.equal((await get(`/g/live0001/1/${p}`)).status, 404, p);
     assert.ok(!calls.some((c) => c.includes('evil.php')), 'disallowed paths never reach Storage');
   });
   it('404s missing assets, unknown games and gated stages', async () => {
     const { get } = harness();
-    assert.equal((await get('/g/live0001/v1/missing.png')).status, 404);
+    assert.equal((await get('/g/live0001/1/missing.png')).status, 404);
     assert.equal((await get('/g/live0001/v2/sprites/hero.png')).status, 404);
-    assert.equal((await get('/g/unknown01/v1/sprites/hero.png')).status, 404);
-    assert.equal((await get('/g/pend0001/v1/sprites/hero.png')).status, 404);
+    assert.equal((await get('/g/unknown01/1/sprites/hero.png')).status, 404);
+    assert.equal((await get('/g/pend0001/1/sprites/hero.png')).status, 404);
   });
   it('keeps the preview token gate (private, no-store) for unreleased games', async () => {
     const { get } = harness();
-    const r = await get(`/g/pend0001/v1/sprites/hero.png?pt=${mintPreviewToken(SECRET, 'pend0001')}`);
+    const r = await get(`/g/pend0001/1/sprites/hero.png?pt=${mintPreviewToken(SECRET, 'pend0001')}`);
     assert.equal(r.status, 200);
     assert.equal(r.headers['cache-control'], 'private, no-store');
     assert.equal(r.headers['x-content-type-options'], 'nosniff');
@@ -101,51 +105,51 @@ describe('AS-3 versioned asset serving', () => {
   it('sends nosniff and a long immutable cache on versioned assets', async () => {
     const { get } = harness();
     for (const p of ['sprites/hero.png', 'audio/jump.ogg', 'fonts/pixel.woff2', 'data/level.json', 'readme.txt']) {
-      const r = await get(`/g/live0001/v1/${p}`);
+      const r = await get(`/g/live0001/1/${p}`);
       assert.equal(r.headers['x-content-type-options'], 'nosniff', p);
       assert.equal(r.headers['cache-control'], IMMUTABLE, p);
       assert.equal(r.headers['cache-control'], 'public, max-age=31536000, immutable');
     }
-    assert.equal((await get('/g/live0001/v1/missing.png')).headers['x-content-type-options'], 'nosniff');
+    assert.equal((await get('/g/live0001/1/missing.png')).headers['x-content-type-options'], 'nosniff');
   });
   it('injects the runtime into HTML only, never into assets', async () => {
     const { get } = harness();
-    const html = await get('/g/live0001/v1/index.html');
+    const html = await get('/g/live0001/1/index.html');
     assert.equal(html.status, 200);
     assert.equal(html.headers['content-type'], 'text/html; charset=utf-8');
     assert.match(html.body, /__mgBoot/);
     assert.equal(html.headers['cache-control'], 'no-cache');
     assert.match(html.headers['content-security-policy'], /frame-ancestors/);
     for (const p of ['sprites/hero.png', 'data/level.json', 'readme.txt']) {
-      const r = await get(`/g/live0001/v1/${p}`);
+      const r = await get(`/g/live0001/1/${p}`);
       assert.doesNotMatch(r.body, /__mgBoot|<script/, p);
-      assert.equal(r.body, `${FILES[`v1/${p}`]}`);
+      assert.equal(r.body, `${FILES[`1/${p}`]}`);
     }
   });
   it('rejects .., backslash and encoded / double-encoded traversal', async () => {
     const { get, calls } = harness();
     const bad = [
-      '/g/live0001/v1/../v1/readme.txt',
-      '/g/live0001/../live0001/v1/readme.txt',
-      '/g/live0001/v1/./readme.txt',
-      '/g/live0001/v1/sprites\\..\\readme.txt',
-      '/g/live0001/v1\\readme.txt',
-      '/g/live0001/v1/%2e%2e/v1/readme.txt',
-      '/g/live0001/v1/%2E%2E/v1/readme.txt',
-      '/g/live0001/v1/.%2e/readme.txt',
-      '/g/live0001/v1/sprites%2fhero.png',
-      '/g/live0001/v1/sprites%2Fhero.png',
-      '/g/live0001/v1/sprites%5chero.png',
-      '/g/live0001/v1/%252e%252e/readme.txt',
-      '/g/live0001/v1/sprites%252fhero.png',
-      '/g/live0001/v1/sprites%255chero.png',
-      '/g/live0001/v1/.hidden.txt',
-      '/g/live0001/v1//readme.txt',
-      '/g/live0001/v1/readme.txt%00.png',
+      '/g/live0001/1/../1/readme.txt',
+      '/g/live0001/../live0001/1/readme.txt',
+      '/g/live0001/1/./readme.txt',
+      '/g/live0001/1/sprites\\..\\readme.txt',
+      '/g/live0001/1\\readme.txt',
+      '/g/live0001/1/%2e%2e/1/readme.txt',
+      '/g/live0001/1/%2E%2E/1/readme.txt',
+      '/g/live0001/1/.%2e/readme.txt',
+      '/g/live0001/1/sprites%2fhero.png',
+      '/g/live0001/1/sprites%2Fhero.png',
+      '/g/live0001/1/sprites%5chero.png',
+      '/g/live0001/1/%252e%252e/readme.txt',
+      '/g/live0001/1/sprites%252fhero.png',
+      '/g/live0001/1/sprites%255chero.png',
+      '/g/live0001/1/.hidden.txt',
+      '/g/live0001/1//readme.txt',
+      '/g/live0001/1/readme.txt%00.png',
     ];
     for (const p of bad) assert.equal((await get(p)).status, 404, p);
     assert.equal(calls.filter((c) => c.includes('/storage/')).length, 0, 'nothing reached Storage');
-    assert.ok(isTraversal('/a/%252E%252e/b') && isTraversal('a\\b') && !isTraversal('/g/live0001/v1/readme.txt'));
+    assert.ok(isTraversal('/a/%252E%252e/b') && isTraversal('a\\b') && !isTraversal('/g/live0001/1/readme.txt'));
   });
   it('legacy index.html / thumb routes are unchanged', async () => {
     const { get } = harness();

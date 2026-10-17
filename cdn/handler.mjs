@@ -43,7 +43,9 @@ export const IMMUTABLE = 'public, max-age=31536000, immutable';
 // Proving games can still be rejected/replaced, so their assets must not be pinned in shared caches for a year.
 export const SHORT_CACHE = 'public, max-age=60, must-revalidate';
 const HOST_RE = /^[A-Za-z0-9.-]+(:\d{1,5})?$/;
-const VERSION_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$/;
+// game_assets.version is an int column: only a plain decimal version is a real path. Anything else
+// is a 404 here at the boundary — passing it to PostgREST used to surface as a 502.
+const VERSION_RE = /^\d{1,9}$/;
 // No leading dot (so no `.`, `..` or dotfiles), no separators, no encodings.
 const SEGMENT_RE = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$/;
 const MAX_ASSET_DEPTH = 8;
@@ -59,12 +61,13 @@ export function isTraversal(rawPath) {
 
 /** Parse `/g/<id>/<version>/<path...>`; null unless every part matches the allowlist. */
 export function parseAssetPath(segments) {
-  const [version, ...parts] = segments;
-  if (!VERSION_RE.test(version ?? '') || !parts.length || parts.length > MAX_ASSET_DEPTH) return null;
+  const [versionSeg, ...parts] = segments;
+  const version = VERSION_RE.test(versionSeg ?? '') ? Number(versionSeg) : NaN;
+  if (!Number.isSafeInteger(version) || version < 1 || !parts.length || parts.length > MAX_ASSET_DEPTH) return null;
   if (!parts.every((seg) => SEGMENT_RE.test(seg))) return null;
   const ext = parts[parts.length - 1].split('.').pop().toLowerCase();
   if (!parts[parts.length - 1].includes('.') || !Object.hasOwn(ASSET_MIME, ext)) return null;
-  return { key: `${version}/${parts.join('/')}`, ext, version };
+  return { key: `${version}/${parts.join('/')}`, ext, version, path: parts.join('/') };
 }
 
 // Boot only. The upload preview sets its own capture flag; do not add one here.
@@ -182,6 +185,7 @@ export function createHandler(cfg) {
   // still runs on every request, so a deleted or rejected game stops being served within TTL_MS.
   const TTL_MS = cfg.ttlMs ?? 30_000;
   const stages = lruCache({ now, ttlMs: TTL_MS, maxBytes: 300 * 64 });
+  const versions = lruCache({ now, ttlMs: TTL_MS, maxBytes: 300 * 64 });
   const objects = lruCache({ now, ttlMs: cfg.objectTtlMs ?? 5 * 60_000, maxBytes: cfg.cacheBytes ?? 96 * 1024 * 1024 });
   const headers = { apikey: SECRET };
   if (SECRET.startsWith('eyJ')) headers.Authorization = `Bearer ${SECRET}`;
@@ -218,6 +222,21 @@ export function createHandler(cfg) {
   async function gameStage(id) {
     const hit = stages.get(id);
     return hit ? hit.value : loadStage(id);
+  }
+
+  const loadVersion = coalesce(async (id) => {
+    const res = await doFetch(`${SUPABASE_URL}/rest/v1/game_validations?select=version&game_id=eq.${encodeURIComponent(id)}&order=version.desc&limit=1`, { headers });
+    if (!res.ok) throw new Error(`version lookup failed: HTTP ${res.status}`);
+    const rows = await res.json();
+    // Same definition the portal uses for the bundle version (asset-manifest.ts gameBundleVersion):
+    // the latest validation's version, defaulting to 1 for a game that was never validated.
+    const version = Array.isArray(rows) ? Number(rows[0]?.version) : NaN;
+    return versions.set(id, Number.isSafeInteger(version) && version >= 1 ? version : 1).value;
+  });
+  /** The game's current bundle version. Throws on lookup errors (not cached, fail closed). */
+  async function gameVersion(id) {
+    const hit = versions.get(id);
+    return hit ? hit.value : loadVersion(id);
   }
 
   /** Row status for one versioned asset, or null when the manifest has no row. Throws on lookup errors. */
@@ -263,13 +282,32 @@ export function createHandler(cfg) {
       if (!stage || (!PUBLIC_STAGES.has(stage) && !preview)) return send(res, 404, 'Not found');
       const privateCache = preview ? { 'Cache-Control': 'private, no-store' } : null;
 
-      if (asset) {
-        // A rejected upload must not stay downloadable just because its object is still in the bucket.
-        const assetPath = asset.key.slice(asset.version.length + 1);
-        if ((await assetRowStatus(id, asset.version, assetPath)) === 'rejected') return send(res, 404, 'Not found');
+      // The game document lives at its versioned URL so relative paths resolve inside
+      // /g/<id>/<version>/ — where the asset files actually are — and so the CSP can name exactly
+      // that folder as the game's own asset origin. The unversioned URL redirects there (the
+      // browser keeps the #mgs fragment); a versioned document URL for a version that is not the
+      // game's current one does not exist, so it is a 404.
+      if (!asset) {
+        if (file === 'index.html') {
+          const version = await gameVersion(id);
+          return send(res, 302, undefined, {
+            Location: `/g/${id}/${version}/index.html${url.search}`,
+            'Cache-Control': 'no-cache',
+            ...privateCache,
+          });
+        }
+      } else if (asset.path === 'index.html' && asset.version !== (await gameVersion(id))) {
+        return send(res, 404, 'Not found');
       }
 
-      const entry = await fetchObject(`${id}/${asset ? asset.key : file}`);
+      const isDoc = asset?.path === 'index.html';
+      if (asset && !isDoc) {
+        // A rejected upload must not stay downloadable just because its object is still in the bucket.
+        // index.html is the game document, not a manifest asset, so this check does not apply to it.
+        if ((await assetRowStatus(id, asset.version, asset.path)) === 'rejected') return send(res, 404, 'Not found');
+      }
+
+      const entry = await fetchObject(`${id}/${asset ? (isDoc ? 'index.html' : asset.key) : file}`);
       if (!entry.value) return send(res, 404, 'Not found');
       const { body, etag } = entry.value;
 

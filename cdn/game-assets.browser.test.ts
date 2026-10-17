@@ -26,7 +26,7 @@ describe('AS-5 game loads its own assets under the enforced CSP (Chromium)', { s
     player = await listen((_req, res) => {
       res.writeHead(200, { 'Content-Type': 'text/html' });
       res.end(`<!doctype html><iframe id="game" sandbox="allow-scripts allow-pointer-lock" referrerpolicy="no-referrer"
-        src="${cdn}/g/assetgm1/v1/index.html?embed=${encodeURIComponent(player)}"></iframe>`);
+        src="${cdn}/g/assetgm1/1/index.html?embed=${encodeURIComponent(player)}"></iframe>`);
     });
     handle = fixtureHandler({ webOrigins: player, cdnOrigin: cdn }).handle as http.RequestListener;
   });
@@ -52,6 +52,6 @@ describe('AS-5 game loads its own assets under the enforced CSP (Chromium)', { s
     assert.equal(stolen, false);
     assert.ok(violations.some((v) => v.includes('othergm1')), 'CSP reported the cross-game load');
     assert.ok(!requests.some((r) => r.includes('/g/othergm1/')), `other game never requested: ${requests.join(' | ')}`);
-    assert.ok(requests.some((r) => r.startsWith('GET /g/assetgm1/v1/add.wasm') && r.endsWith('origin=null')), 'wasm fetched in CORS mode from the opaque origin');
+    assert.ok(requests.some((r) => r.startsWith('GET /g/assetgm1/1/add.wasm') && r.endsWith('origin=null')), 'wasm fetched in CORS mode from the opaque origin');
   });
 });

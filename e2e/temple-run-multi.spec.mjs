@@ -141,11 +141,12 @@ test('Temple Dash multi-file: upload, add files on the Files page, every asset l
 
   // Uploading the game does not also upload the files it references: the creator adds them on the
   // Files page afterwards, exactly like the "Add file" form on /games/<slug>/assets offers.
-  const slug = await test.step('add every asset file through the Files page', async () => {
-    await page.goto('/me');
-    await page.getByRole('link', { name: 'Assets' }).click();
-    await page.waitForURL(/\/games\/[^/]+\/assets$/);
-    const slug = new URL(page.url()).pathname.split('/')[2];
+  // (The slug is the slugified unique title — /me is avoided here on purpose: it renders the
+  // thumbnail from the CDN, and a pending-stage answer would be cached for ~30 s.)
+  const slug = `temple-dash-files-${stamp}`;
+  await test.step('add every asset file through the Files page', async () => {
+    await page.goto(`/games/${slug}/assets`);
+    await expect(page.getByRole('heading', { name: title })).toBeVisible();
 
     const addForm = page.locator('form.add');
     await expect(addForm).toBeVisible();
@@ -162,7 +163,6 @@ test('Temple Dash multi-file: upload, add files on the Files page, every asset l
     await expect(rows).toHaveCount(ASSET_FILES.length);
     await expect(page.locator('td.path')).toHaveText(ASSET_FILES.slice().sort());
     await expect(page.locator('tbody td:nth-child(3)')).toHaveText(ASSET_FILES.map(() => 'uploaded'));
-    return slug;
   });
 
   await test.step('validation finishes with a pass', async () => {
@@ -189,6 +189,9 @@ test('Temple Dash multi-file: upload, add files on the Files page, every asset l
     // document, which is the URL every relative asset path resolves against.
     await expect(frameEl).toHaveAttribute('src', new RegExp(`^${CDN.replace(/[.]/g, '\\.')}/g/${gameId}/index\\.html\\?`));
 
+    // The game document lives at its versioned URL once the frame has navigated; wait for the
+    // navigation (and the canvas it renders) before reading frame.url().
+    await expect(page.frameLocator('iframe.mg-frame').locator('canvas#view')).toBeVisible({ timeout: 30_000 });
     const frame = gameFrame(page, gameId);
     await expect.poll(() => frame.url(), { timeout: 15_000 })
       .toMatch(new RegExp(`^${CDN.replace(/[.]/g, '\\.')}/g/${gameId}/\\d+/index\\.html`));
@@ -203,7 +206,6 @@ test('Temple Dash multi-file: upload, add files on the Files page, every asset l
       document.addEventListener('securitypolicyviolation', (e) => w.__cspViolations.push(`${e.violatedDirective} ${e.blockedURI}`));
     });
 
-    await expect(page.frameLocator('iframe.mg-frame').locator('canvas#view')).toBeVisible({ timeout: 30_000 });
     await expect.poll(async () => (await status(frame)).frames, { timeout: 15_000 }).toBeGreaterThan(1);
 
     // All eight sprites were fetched and decoded; audio needs a first user input (contract rule 5).

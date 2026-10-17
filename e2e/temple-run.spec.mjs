@@ -69,9 +69,9 @@ function validationStore(env) {
   };
 }
 
-/** The game document inside the sandboxed, opaque-origin CDN iframe. */
+/** The game document inside the sandboxed, opaque-origin CDN iframe (served at its versioned URL). */
 function gameFrame(page, gameId) {
-  const frame = page.frames().find((f) => f.url().includes(`/g/${gameId}/index.html`));
+  const frame = page.frames().find((f) => f.url().includes(`/g/${gameId}/`) && f.url().includes('index.html'));
   expect(frame, 'game iframe on the CDN origin').toBeTruthy();
   return frame;
 }
@@ -358,9 +358,11 @@ test('Temple Dash: upload form -> validation passes -> plays on the CDN -> fulls
   });
 
   await test.step('no failed requests and no console errors', async () => {
-    // Every response recorded since the play page opened, including the game document on the CDN origin.
-    const gameDocument = responses.filter((r) => r.url.startsWith(`${CDN}/g/${gameId}/index.html`));
+    // Every response recorded since the play page opened: the canonical document URL redirects to
+    // the versioned document, which is what serves a 200.
+    const gameDocument = responses.filter((r) => r.url.includes(`/g/${gameId}/`) && new URL(r.url).pathname.endsWith('/index.html'));
     expect(gameDocument.map((r) => r.status)).toContain(200);
+    expect(gameDocument.some((r) => r.status === 302 && new URL(r.url).pathname === `/g/${gameId}/index.html`)).toBe(true);
     const bad = responses.filter((r) => r.status >= 400);
     expect(bad, `failed responses: ${JSON.stringify(bad)}`).toEqual([]);
     expect(requestFailures).toEqual([]);

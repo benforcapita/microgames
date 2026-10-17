@@ -17,6 +17,10 @@ function harness(opts: { previewSecret?: string; now?: () => number } = {}) {
       const id = (u.searchParams.get('id') ?? '').replace(/^eq\./, '');
       return new Response(JSON.stringify(GAMES[id] ? [{ stage: GAMES[id] }] : []), { status: 200 });
     }
+    if (u.pathname === '/rest/v1/game_validations') {
+      const id = (u.searchParams.get('game_id') ?? '').replace(/^eq\./, '');
+      return new Response(JSON.stringify(GAMES[id] ? [{ version: 1 }] : []), { status: 200 });
+    }
     const m = /\/storage\/v1\/object\/authenticated\/games\/([^/]+)\/(.+)$/.exec(u.pathname);
     if (m && GAMES[m[1]]) return new Response(m[2] === 'index.html' ? `<!doctype html><canvas id="${m[1]}"></canvas>` : 'IMG', { status: 200 });
     return new Response('nope', { status: 404 });
@@ -40,7 +44,7 @@ describe('SP-6 CDN stage gate', () => {
   it('serves live and proving games', async () => {
     const { get } = harness();
     for (const id of ['live0001', 'prov0001']) {
-      const r = await get(`/g/${id}/index.html`);
+      const r = await get(`/g/${id}/1/index.html`);
       assert.equal(r.status, 200, id);
       assert.match(r.body, new RegExp(`canvas id="${id}"`));
       assert.equal((await get(`/g/${id}/thumb.webp`)).status, 200);
@@ -56,7 +60,7 @@ describe('SP-6 CDN stage gate', () => {
   it('pending and rejected are 200 with a valid owner token, and not publicly cacheable', async () => {
     const { get } = harness();
     for (const id of ['pend0001', 'rejt0001']) {
-      const r = await get(`/g/${id}/index.html?embed=${encodeURIComponent(PORTAL)}&pt=${tok(id)}`);
+      const r = await get(`/g/${id}/1/index.html?embed=${encodeURIComponent(PORTAL)}&pt=${tok(id)}`);
       assert.equal(r.status, 200, id);
       assert.equal(r.headers['cache-control'], 'private, no-store');
       assert.equal((await get(`/g/${id}/thumb.webp?pt=${tok(id)}`)).status, 200);
@@ -80,43 +84,43 @@ describe('SP-6 CDN stage gate', () => {
   });
   it('tokens never verify without CDN_PREVIEW_SECRET', async () => {
     const { get } = harness({ previewSecret: '' });
-    assert.equal((await get(`/g/pend0001/index.html?pt=${tok('pend0001')}`)).status, 404);
+    assert.equal((await get(`/g/pend0001/1/index.html?pt=${tok('pend0001')}`)).status, 404);
     assert.equal(mintPreviewToken('', 'pend0001'), null);
   });
   it('a token is useless for a live game it was not needed for, and does not unlock other ids', async () => {
     const { get } = harness();
-    assert.equal((await get(`/g/live0001/index.html?pt=${tok('pend0001')}`)).status, 200); // live is public anyway
+    assert.equal((await get(`/g/live0001/1/index.html?pt=${tok('pend0001')}`)).status, 200); // live is public anyway
     assert.equal((await get(`/g/rejt0001/index.html?pt=${tok('pend0001')}`)).status, 404);
   });
   it('?source: CORS only for the portal origin, never *', async () => {
     const { get } = harness();
-    const fromPortal = await get('/g/live0001/index.html?source', { origin: PORTAL });
+    const fromPortal = await get('/g/live0001/1/index.html?source', { origin: PORTAL });
     assert.equal(fromPortal.status, 200);
     assert.equal(fromPortal.headers['access-control-allow-origin'], PORTAL);
     assert.equal(fromPortal.headers.vary, 'Origin, Accept-Encoding');
     for (const origin of ['https://evil.example', 'null', 'http://127.0.0.1:9999']) {
-      const r = await get('/g/live0001/index.html?source', { origin });
+      const r = await get('/g/live0001/1/index.html?source', { origin });
       assert.equal(r.status, 200);
       assert.equal(r.headers['access-control-allow-origin'], undefined, origin);
     }
-    const none = await get('/g/live0001/index.html?source');
+    const none = await get('/g/live0001/1/index.html?source');
     assert.equal(none.headers['access-control-allow-origin'], undefined);
-    assert.equal((await get('/g/pend0001/index.html?source', { origin: PORTAL })).status, 404); // same stage rule
-    assert.equal((await get(`/g/pend0001/index.html?source&pt=${tok('pend0001')}`, { origin: PORTAL })).headers['access-control-allow-origin'], PORTAL);
+    assert.equal((await get('/g/pend0001/1/index.html?source', { origin: PORTAL })).status, 404); // same stage rule
+    assert.equal((await get(`/g/pend0001/1/index.html?source&pt=${tok('pend0001')}`, { origin: PORTAL })).headers['access-control-allow-origin'], PORTAL);
   });
   it('stays cookieless: never sets cookies', async () => {
     const { get } = harness();
-    for (const p of ['/g/live0001/index.html', `/g/pend0001/index.html?pt=${tok('pend0001')}`, '/g/live0001/index.html?source'])
+    for (const p of ['/g/live0001/1/index.html', `/g/pend0001/1/index.html?pt=${tok('pend0001')}`, '/g/live0001/1/index.html?source'])
       assert.equal((await get(p, { cookie: 'sb-access-token=x' })).headers['set-cookie'], undefined);
   });
   it('caches the stage lookup for ~30s', async () => {
     let t = 1_000_000;
     const { get, calls } = harness({ now: () => t });
-    await get('/g/live0001/index.html');
-    await get('/g/live0001/index.html');
+    await get('/g/live0001/1/index.html');
+    await get('/g/live0001/1/index.html');
     assert.equal(calls.filter((c) => c.includes('/rest/v1/games')).length, 1);
     t += 31_000;
-    await get('/g/live0001/index.html');
+    await get('/g/live0001/1/index.html');
     assert.equal(calls.filter((c) => c.includes('/rest/v1/games')).length, 2);
   });
 });
@@ -129,6 +133,7 @@ describe('CDN delivery performance', () => {
     const gate = new Promise<void>((r) => (release = r));
     const fakeFetch = async (url: string) => {
       calls.push(url);
+      if (url.includes('/rest/v1/game_validations')) return new Response(JSON.stringify([{ version: 1 }]));
       if (url.includes('/rest/v1/games')) return new Response(JSON.stringify([{ stage: 'live' }]));
       await gate;
       return new Response(url.endsWith('index.html') ? BIG : 'IMG');
@@ -150,18 +155,18 @@ describe('CDN delivery performance', () => {
   it('compresses game HTML with brotli or gzip per Accept-Encoding, and varies on it', async () => {
     const { get, release } = bigHarness();
     release();
-    const br = await get('/g/live0001/index.html', { 'accept-encoding': 'gzip, deflate, br' });
+    const br = await get('/g/live0001/1/index.html', { 'accept-encoding': 'gzip, deflate, br' });
     assert.equal(br.headers['content-encoding'], 'br');
     assert.match(br.headers.vary, /Accept-Encoding/);
     const html = zlib.brotliDecompressSync(br.raw!).toString('utf8');
     assert.match(html, /window\.__mgBoot/);
     assert.ok(br.raw!.length < html.length / 4, `${br.raw!.length} vs ${html.length}`);
 
-    const gz = await get('/g/live0001/index.html', { 'accept-encoding': 'gzip' });
+    const gz = await get('/g/live0001/1/index.html', { 'accept-encoding': 'gzip' });
     assert.equal(gz.headers['content-encoding'], 'gzip');
     assert.equal(zlib.gunzipSync(gz.raw!).toString('utf8'), html);
 
-    const plain = await get('/g/live0001/index.html', { 'accept-encoding': 'br;q=0, identity' });
+    const plain = await get('/g/live0001/1/index.html', { 'accept-encoding': 'br;q=0, identity' });
     assert.equal(plain.headers['content-encoding'], undefined);
     assert.equal(plain.raw!.toString('utf8'), html);
     assert.equal(Number(plain.headers['content-length']), plain.raw!.length);
@@ -178,7 +183,7 @@ describe('CDN delivery performance', () => {
   it('answers If-None-Match with 304 and no body (game HTML and thumbnails)', async () => {
     const { get, release } = bigHarness();
     release();
-    for (const path of ['/g/live0001/index.html', '/g/live0001/thumb.webp']) {
+    for (const path of ['/g/live0001/1/index.html', '/g/live0001/thumb.webp']) {
       const first = await get(path);
       assert.ok(first.headers.etag, path);
       const again = await get(path, { 'if-none-match': first.headers.etag });
@@ -188,22 +193,22 @@ describe('CDN delivery performance', () => {
       assert.equal((await get(path, { 'if-none-match': '"stale"' })).status, 200);
     }
     // The CSP still rides on the 304 so the browser refreshes it for this embedder.
-    const html = await get('/g/live0001/index.html');
-    const revalidated = await get('/g/live0001/index.html', { 'if-none-match': html.headers.etag });
+    const html = await get('/g/live0001/1/index.html');
+    const revalidated = await get('/g/live0001/1/index.html', { 'if-none-match': html.headers.etag });
     assert.match(revalidated.headers['content-security-policy'], /frame-ancestors/);
   });
 
   it('game HTML ETag differs from the raw source ETag (boot.js is part of the document)', async () => {
     const { get, release } = bigHarness();
     release();
-    const game = await get('/g/live0001/index.html');
-    const source = await get('/g/live0001/index.html?source');
+    const game = await get('/g/live0001/1/index.html');
+    const source = await get('/g/live0001/1/index.html?source');
     assert.notEqual(game.headers.etag, source.headers.etag);
   });
 
   it('coalesces concurrent cache misses into one Storage fetch', async () => {
     const { get, calls, release } = bigHarness();
-    const pending = Array.from({ length: 5 }, () => get('/g/live0001/index.html', { 'accept-encoding': 'br' }));
+    const pending = Array.from({ length: 5 }, () => get('/g/live0001/1/index.html', { 'accept-encoding': 'br' }));
     await new Promise((r) => setTimeout(r, 10));
     release();
     const results = await Promise.all(pending);
