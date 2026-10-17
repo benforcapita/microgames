@@ -74,8 +74,6 @@ const versionTotal = async (id) => {
   return Number(row.total);
 };
 
-test.describe.configure({ mode: 'serial' });
-
 test.afterAll(async () => {
   await sql.end({ timeout: 1 }).catch(() => {});
 });
