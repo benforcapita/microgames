@@ -81,10 +81,11 @@ The game exposes a read-only `window.templeRun` status object (`assets`, `audio`
 every sprite decoded, the music loop is playing, and the controls moved the runner — without reaching
 into the game's internals. It is the fixture's test contract, not part of the Meshground SDK.
 
-## Known platform gap (not fixed here, see /tmp/e2e1-bugs.md)
+## Platform note (fixed in UP-1)
 
-Uploaded games get a `game_assets` manifest and the CDN can serve versioned files from
-`/g/<id>/<version>/<path>`, but the portal always frames `/g/<id>/index.html`, whose CSP has no
-own-asset source and whose relative paths resolve one directory above the versioned folder. So
-separate asset files cannot be loaded by an uploaded game today. Inlining is the working path, and it
-also keeps this fixture at zero missing-asset warnings.
+Uploaded games get a `game_assets` manifest and the CDN serves versioned files from
+`/g/<id>/<version>/<path>`. Since UP-1 the document URL `/g/<id>/index.html` redirects to
+`/g/<id>/<version>/index.html`, so relative paths resolve inside the versioned folder and the
+document CSP allows that one origin. The multi-file variant of this game lives in
+`e2e/fixtures/temple-run-multi` (see its spec, `e2e/temple-run-multi.spec.mjs`). This single-file
+fixture stays inlined on purpose — it is the zero-dependency baseline.

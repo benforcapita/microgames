@@ -11,10 +11,12 @@
  */
 import { deflateSync } from 'node:zlib';
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+// --out <dir> lets sibling fixtures (temple-run-multi) reuse this generator for their own copy.
+const outAt = process.argv.indexOf('--out');
+const ROOT = outAt >= 0 ? resolve(process.argv[outAt + 1]) : join(dirname(fileURLToPath(import.meta.url)), '..');
 const SPRITES = join(ROOT, 'assets', 'sprites');
 const AUDIO = join(ROOT, 'assets', 'audio');
 

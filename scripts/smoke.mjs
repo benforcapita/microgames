@@ -180,8 +180,14 @@ try {
   await check('/api/auth/logout', `${WEB}/api/auth/logout`, 303, { method: 'POST' });
 
   console.log('--- game CDN');
-  for (const g of seed) await check(`${CDN}/g/${g.id}/index.html`, `${CDN}/g/${g.id}/index.html`, 200, { auth: false });
-  await check(`${CDN}/g/${game.id}/index.html?source`, `${CDN}/g/${game.id}/index.html?source`, 200, { auth: false });
+  // UP-1: the unversioned document URL redirects to the game's versioned URL, where it is served.
+  for (const g of seed) {
+    await check(`${CDN}/g/${g.id}/index.html`, `${CDN}/g/${g.id}/index.html`, 302, { auth: false, verify: expectLoc(new RegExp(`^/g/${g.id}/\\d+/index\\.html$`)) });
+    const versioned = `/g/${g.id}/1/index.html`;
+    await check(`${CDN}${versioned}`, `${CDN}${versioned}`, 200, { auth: false });
+  }
+  await check(`${CDN}/g/${game.id}/index.html?source`, `${CDN}/g/${game.id}/index.html?source`, 302, { auth: false, verify: expectLoc(new RegExp(`^/g/${game.id}/\\d+/index\\.html\\?source$`)) });
+  await check(`${CDN}/g/${game.id}/1/index.html?source`, `${CDN}/g/${game.id}/1/index.html?source`, 200, { auth: false });
 } catch (e) {
   console.error(`[smoke] ${e.message}`);
   failed++;

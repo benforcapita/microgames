@@ -43,7 +43,7 @@ test('seed game loads in the sandboxed iframe and sends telemetry', async ({ pag
 
   // Explicit ready() posts __MG_READY, which the portal records as ready telemetry. Once only.
   const readyEv = waitTelemetry('ready');
-  const gameFrame = page.frames().find((f) => f.url().includes(`/g/${GAME_ID}/index.html`));
+  const gameFrame = page.frames().find((f) => f.url().includes(`/g/${GAME_ID}/`) && f.url().includes('index.html'));
   expect(gameFrame, 'game iframe').toBeTruthy();
   await gameFrame.evaluate(() => {
     const mg = window.Meshground;
