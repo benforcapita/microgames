@@ -9,6 +9,7 @@ import {
   assetUsage,
   assessAssetUpload,
   findGameAsset,
+  gameTooBigMessage,
   saveFinalizedAsset,
 } from '../../../../../lib/server/asset-upload';
 import { SUPABASE_SERVICE_KEY } from '../../../../../lib/server/config';
@@ -97,6 +98,19 @@ export const POST: APIRoute = async ({ request, params, locals }) => {
     if (decision.kind === 'store' || decision.kind === 'reject') {
       const saved = await saveFinalizedAsset(sql, storage, game.id, version, decision, bytes);
       if (!saved.ok) {
+        // The DB function is the authoritative cap check: a concurrent winner can turn a
+        // pre-checked 'store' into a cap denial between assess and the row write.
+        if (saved.code === 'cap') {
+          return deny({ status: 409, error: 'cap', message: ASSET_UPLOAD_MESSAGES.cap, flash: { error: 'cap' } });
+        }
+        if (saved.code === 'too-big') {
+          return deny({
+            status: 413,
+            error: 'too-big',
+            message: gameTooBigMessage(saved.totalBytes),
+            flash: { error: 'too-big', total: String(saved.totalBytes) },
+          });
+        }
         return deny({ status: 500, error: 'storage', message: ASSET_UPLOAD_MESSAGES.storage, flash: { error: 'storage' } });
       }
       if (decision.kind === 'store') {

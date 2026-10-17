@@ -1,0 +1,229 @@
+// UP-3: private.record_game_asset is the one authoritative game_assets write. It locks the
+// game's row, re-checks the file and byte caps inside the same statement as the write, and
+// ignores 'rejected' rows for both caps. Runs only against a local stack.
+import assert from 'node:assert/strict';
+import { readdirSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { describe, it } from 'node:test';
+import { fileURLToPath } from 'node:url';
+import postgres from 'postgres';
+
+const supabaseDir = join(dirname(fileURLToPath(import.meta.url)), '..');
+const MIGRATION = '20261017120000_record_game_asset';
+const MAX_FILES = 200;
+const MAX_BYTES = 4194304;
+const FN = `private.record_game_asset(text, integer, text, text, text, integer, text, text, text, integer, bigint)`;
+
+describe('record_game_asset migration file', () => {
+  it('sorts after every existing migration', () => {
+    const names = readdirSync(join(supabaseDir, 'migrations')).sort();
+    assert.equal(names.at(-1), `${MIGRATION}.sql`);
+  });
+});
+
+function localDbUrl(): string | undefined {
+  const raw = process.env.DATABASE_URL ?? 'postgresql://postgres:postgres@127.0.0.1:54322/postgres';
+  try {
+    const host = new URL(raw).hostname;
+    if (host !== '127.0.0.1' && host !== 'localhost') return undefined;
+  } catch {
+    return undefined;
+  }
+  return raw;
+}
+
+async function connect(t: { skip: (message?: string) => void }, max = 1): Promise<postgres.Sql | undefined> {
+  const dbUrl = localDbUrl();
+  if (!dbUrl) {
+    t.skip('refusing to run record_game_asset SQL against a non-local database');
+    return undefined;
+  }
+  const sql = postgres(dbUrl, { connect_timeout: 3, max, idle_timeout: 1 });
+  try {
+    await sql`select 1`;
+    return sql;
+  } catch {
+    await sql.end({ timeout: 1 }).catch(() => {});
+    t.skip('local supabase is not running');
+    return undefined;
+  }
+}
+
+async function makeGame(sql: postgres.Sql, sizeBytes = 0): Promise<string> {
+  const id = `rga-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  await sql`
+    insert into public.games (id, slug, creator, title, stage, size_bytes)
+    values (${id}, ${id}, 'stub', 'Record', 'proving', ${sizeBytes})
+  `;
+  return id;
+}
+
+type CallResult = {
+  result: string;
+  total_bytes: string | number | null;
+  prev_status: string | null;
+  prev_size_bytes: number | null;
+};
+
+const call = (
+  sql: postgres.Sql,
+  gameId: string,
+  path: string,
+  opts: {
+    status?: string;
+    sizeBytes?: number | null;
+    rejectReason?: string | null;
+    version?: number;
+    maxFiles?: number;
+    maxBytes?: number;
+  } = {},
+) => sql<CallResult[]>`
+  select result, total_bytes, prev_status, prev_size_bytes
+  from private.record_game_asset(
+    ${gameId}, ${opts.version ?? 1}, ${path}, 'image', ${opts.status ?? 'uploaded'},
+    ${opts.sizeBytes ?? 10}, ${opts.status === 'uploaded' || opts.status === undefined ? 'a'.repeat(64) : null},
+    'creator', ${opts.rejectReason ?? null}, ${opts.maxFiles ?? MAX_FILES}, ${opts.maxBytes ?? MAX_BYTES})
+`.then((rows) => rows[0]);
+
+describe('private.record_game_asset', () => {
+  it('is a security-definer function only service_role and postgres may execute', async (t) => {
+    const sql = await connect(t);
+    if (!sql) return;
+    try {
+      const [migration] = await sql<{ version: string }[]>`
+        select version from supabase_migrations.schema_migrations where version = '20261017120000'
+      `;
+      assert.equal(migration?.version, '20261017120000');
+
+      const [fn] = await sql<{ prosecdef: boolean; proacl: string[] | null }[]>`
+        select p.prosecdef, p.proacl
+        from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+        where n.nspname = 'private' and p.proname = 'record_game_asset'
+      `;
+      assert.equal(fn?.prosecdef, true);
+      // No grant may name PUBLIC (an acl item with an empty grantee). Only postgres and
+      // service_role hold EXECUTE.
+      assert.ok(fn?.proacl?.every((acl) => !acl.startsWith('=')), `proacl: ${JSON.stringify(fn?.proacl)}`);
+
+      const [priv] = await sql<{ anon: boolean; authenticated: boolean; service: boolean }[]>`
+        select has_function_privilege('anon', ${FN}, 'EXECUTE') as anon,
+               has_function_privilege('authenticated', ${FN}, 'EXECUTE') as authenticated,
+               has_function_privilege('service_role', ${FN}, 'EXECUTE') as service
+      `;
+      assert.deepEqual({ ...priv }, { anon: false, authenticated: false, service: true });
+    } finally {
+      await sql.end({ timeout: 1 }).catch(() => {});
+    }
+  });
+
+  it('serializes concurrent writers: at 199 files exactly one of eight is admitted', async (t) => {
+    const sql = await connect(t, 8);
+    if (!sql) return;
+    const gameId = await makeGame(sql);
+    try {
+      await sql`
+        insert into public.game_assets (game_id, version, path, expected_type, status, source)
+        select ${gameId}, 1, 'fill-' || g::text || '.png', 'image', 'missing', 'scan'
+        from generate_series(1, 199) g
+      `;
+      const results = await Promise.all(
+        Array.from({ length: 8 }, (_, i) => call(sql, gameId, `race-${i}.png`)),
+      );
+      assert.equal(results.filter((r) => r?.result === 'ok').length, 1);
+      assert.equal(results.filter((r) => r?.result === 'cap').length, 7);
+      const [count] = await sql<{ n: number }[]>`
+        select count(*)::int as n from public.game_assets where game_id = ${gameId} and status <> 'rejected'
+      `;
+      assert.equal(count?.n, MAX_FILES);
+    } finally {
+      await sql`delete from public.games where id = ${gameId}`.catch(() => {});
+      await sql.end({ timeout: 1 }).catch(() => {});
+    }
+  });
+
+  it('serializes concurrent writers: the 4 MB version cap cannot be overshot', async (t) => {
+    const sql = await connect(t, 4);
+    if (!sql) return;
+    const codeBytes = 100;
+    const gameId = await makeGame(sql, codeBytes);
+    try {
+      const room = MAX_BYTES - codeBytes;
+      const each = Math.floor(room * 0.45);
+      const results = await Promise.all(
+        Array.from({ length: 4 }, (_, i) => call(sql, gameId, `big-${i}.png`, { sizeBytes: each })),
+      );
+      assert.equal(results.filter((r) => r?.result === 'ok').length, 2);
+      for (const r of results.filter((x) => x?.result !== 'ok')) {
+        assert.equal(r?.result, 'too-big');
+        assert.ok(Number(r?.total_bytes) > MAX_BYTES);
+      }
+      const [total] = await sql<{ total: number }[]>`
+        select coalesce(sum(size_bytes), 0)::int as total
+        from public.game_assets where game_id = ${gameId} and status = 'uploaded'
+      `;
+      assert.ok(codeBytes + (total?.total ?? 0) <= MAX_BYTES);
+    } finally {
+      await sql`delete from public.games where id = ${gameId}`.catch(() => {});
+      await sql.end({ timeout: 1 }).catch(() => {});
+    }
+  });
+
+  it('ignores rejected rows for both caps, and a rejected write never hits them', async (t) => {
+    const sql = await connect(t);
+    if (!sql) return;
+    const gameId = await makeGame(sql);
+    try {
+      // Over the file cap and at the byte cap if they counted — they must not.
+      await sql`
+        insert into public.game_assets (game_id, version, path, expected_type, status, size_bytes, source)
+        select ${gameId}, 1, 'rej-' || g::text || '.png', 'image', 'rejected', ${MAX_BYTES}, 'scan'
+        from generate_series(1, 220) g
+      `;
+      const ok = await call(sql, gameId, 'new.png');
+      assert.equal(ok?.result, 'ok');
+      // Replacing the row just written reports the displaced state for a possible revert.
+      const again = await call(sql, gameId, 'new.png', { sizeBytes: 20 });
+      assert.equal(again?.result, 'ok');
+      assert.equal(again?.prev_status, 'uploaded');
+      assert.equal(again?.prev_size_bytes, 10);
+      // Rejected writes skip the caps entirely.
+      const rej = await call(sql, gameId, 'rejected-anyway.png', { status: 'rejected', sizeBytes: null, rejectReason: 'bad file' });
+      assert.equal(rej?.result, 'ok');
+      const [row] = await sql<{ status: string; reject_reason: string }[]>`
+        select status, reject_reason from public.game_assets where game_id = ${gameId} and path = 'rejected-anyway.png'
+      `;
+      assert.equal(row?.status, 'rejected');
+      assert.equal(row?.reject_reason, 'bad file');
+    } finally {
+      await sql`delete from public.games where id = ${gameId}`.catch(() => {});
+      await sql.end({ timeout: 1 }).catch(() => {});
+    }
+  });
+
+  it('caps a rejected row revived at the file cap, and reports a missing game', async (t) => {
+    const sql = await connect(t);
+    if (!sql) return;
+    const gameId = await makeGame(sql);
+    try {
+      await sql`
+        insert into public.game_assets (game_id, version, path, expected_type, status, source)
+        select ${gameId}, 1, 'fill-' || g::text || '.png', 'image', 'missing', 'scan'
+        from generate_series(1, 200) g
+      `;
+      await sql`
+        insert into public.game_assets (game_id, version, path, expected_type, status, source)
+        values (${gameId}, 1, 'retry.png', 'image', 'rejected', 'scan')
+      `;
+      const revive = await call(sql, gameId, 'retry.png');
+      assert.equal(revive?.result, 'cap');
+      const replaced = await call(sql, gameId, 'fill-1.png');
+      assert.equal(replaced?.result, 'ok');
+      assert.equal(replaced?.prev_status, 'missing');
+      const gone = await call(sql, 'no-such-game', 'x.png');
+      assert.equal(gone?.result, 'not-found');
+    } finally {
+      await sql`delete from public.games where id = ${gameId}`.catch(() => {});
+      await sql.end({ timeout: 1 }).catch(() => {});
+    }
+  });
+});

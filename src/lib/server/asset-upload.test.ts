@@ -132,6 +132,14 @@ describe('asset upload paths', () => {
     if (capped.kind === 'flash') assert.equal(capped.code, 'cap');
     const replaced = assessAssetUpload(input({ fileCount: MAX_ASSET_FILES }));
     assert.equal(replaced.kind, 'store');
+    // A rejected row does not count toward the cap, so reviving it is a new counted row.
+    const revive = assessAssetUpload(input({
+      adding: true,
+      fileCount: MAX_ASSET_FILES,
+      existing: { ...listed, status: 'rejected' },
+    }));
+    assert.equal(revive.kind, 'flash');
+    if (revive.kind === 'flash') assert.equal(revive.code, 'cap');
   });
 
   it('builds a bucket key only for a safe game, version, and normalized path', () => {

@@ -138,7 +138,10 @@ export function assessAssetSign(input: AssessAssetSignInput): AssetSignDecision 
   if (!isUploadExtension(extensionOf(path))) return deny(400, 'path', ASSET_UPLOAD_MESSAGES.path, { error: 'path' });
 
   const row = input.existing && input.existing.path === path ? input.existing : null;
-  if (!row && input.usage.fileCount >= MAX_ASSET_FILES) return deny(409, 'cap', ASSET_UPLOAD_MESSAGES.cap, { error: 'cap' });
+  // Rejected rows do not count toward the cap; reviving one adds a counted row again.
+  if ((!row || row.status === 'rejected') && input.usage.fileCount >= MAX_ASSET_FILES) {
+    return deny(409, 'cap', ASSET_UPLOAD_MESSAGES.cap, { error: 'cap' });
+  }
 
   const previous = row?.status === 'uploaded' ? (row.sizeBytes ?? 0) : 0;
   const nextTotal = versionBytesAfterUpload(input.usage.codeBytes, input.usage.uploadedBytes, previous, input.sizeBytes);

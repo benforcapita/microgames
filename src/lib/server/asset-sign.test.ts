@@ -106,7 +106,7 @@ describe('UP-2a assessAssetSign', () => {
     if (!rate.ok) assert.equal(rate.error, 'rate');
   });
 
-  it('enforces the 200-file cap only for a path with no existing row', () => {
+  it('enforces the 200-file cap only for a path with no counted row', () => {
     const atCap = usage({ fileCount: MAX_ASSET_FILES });
     const r = assessAssetSign({ ...base, usage: atCap });
     assert.equal(r.ok, false);
@@ -117,6 +117,23 @@ describe('UP-2a assessAssetSign', () => {
       existing: { path: 'sfx/jump.wav', expectedType: 'audio', status: 'missing', sizeBytes: null, source: 'scan' },
     });
     assert.equal(replacing.ok, true);
+  });
+
+  it('rejected rows are free of the cap, but reviving one at the cap is denied', () => {
+    const atCap = usage({ fileCount: MAX_ASSET_FILES });
+    const revive = assessAssetSign({
+      ...base,
+      usage: atCap,
+      existing: { path: 'sfx/jump.wav', expectedType: 'audio', status: 'rejected', sizeBytes: null, source: 'scan' },
+    });
+    assert.equal(revive.ok, false);
+    if (!revive.ok) assert.equal(revive.error, 'cap');
+    // Below the cap the same rejected row is a normal sign again.
+    const ok = assessAssetSign({
+      ...base,
+      existing: { path: 'sfx/jump.wav', expectedType: 'audio', status: 'rejected', sizeBytes: null, source: 'scan' },
+    });
+    assert.equal(ok.ok, true);
   });
 
   it('enforces the 4 MB version cap against the declared size', () => {
