@@ -599,7 +599,7 @@ function scene6(t) { // 38–46: logo
   const url = easeOut(prog(t, 44.0, 44.5));
   if (url > 0) {
     ctx.save(); ctx.globalAlpha = url; ctx.font = `500 34px ${MONO}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.fillStyle = C.muted; ctx.fillText('meshground.com', W / 2, 1000 + (1 - url) * 14);
+    ctx.fillStyle = C.muted; ctx.fillText('meshground.app', W / 2, 1000 + (1 - url) * 14);
     ctx.restore();
   }
   const fade = prog(t, 45.2, 46);

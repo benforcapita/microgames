@@ -1,9 +1,9 @@
 import { safeNext } from './safe-next';
 
 /** Production portal. Confirmation and magic-link redirects are allowed here. */
-export const PORTAL_ORIGIN = 'https://meshground.com';
-/** Other production hosts that serve the same portal: www, and the Vercel project's default domain. */
-export const PORTAL_ALIASES = new Set([PORTAL_ORIGIN, 'https://www.meshground.com', 'https://meshgrounds.vercel.app']);
+export const PORTAL_ORIGIN = 'https://www.meshground.app';
+/** Other production hosts that serve the same portal: apex, and the Vercel project's default domain. */
+export const PORTAL_ALIASES = new Set([PORTAL_ORIGIN, 'https://meshground.app', 'https://meshgrounds.vercel.app']);
 
 /**
  * Vercel preview hosts for the portal project (team benteam2).

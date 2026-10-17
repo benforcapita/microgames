@@ -32,7 +32,7 @@ repo/worktree root). Below, `V=.cursor/skills/verify-meshgrounds/scripts/vmg.sh`
    `node -e 'console.log(new URL(process.env.DATABASE_URL).host)'` → `127.0.0.1:<our db port>`.
 3. **Never touch hosted Supabase or Vercel.** No `supabase link/db push/functions deploy`, no Vercel
    MCP/CLI writes, no `npm run check:pg-net` against hosted. Checks against production
-   (`https://meshground.com`, `https://meshgrounds.vercel.app`, the CDN) are **GET/HEAD only**: no POST,
+   (`https://www.meshground.app`, `https://meshgrounds.vercel.app`, the CDN) are **GET/HEAD only**: no POST,
    no form submissions, no login, no uploads, no telemetry beacons (so no headless browser that clicks
    Play on prod — it POSTs `/api/telemetry`). `curl -sI` / `curl -s -o /dev/null -D -` only.
 4. **Kill only your own PIDs.** `vmg.sh` records portal/CDN PIDs in `/tmp/vmg-state-<id>/*.pid` (started

@@ -22,7 +22,7 @@ Preconditions:
 - **Source + dist.** `npm run build && npm run check:copy -- --dist` → `site copy: clean (…)`, exit 0. Tee into `$($V evidence money-copy-guard)/check-copy.txt`.
 - **Rendered pages.** `for p in / /creators /games /upload /play/stack-tower; do curl -s http://127.0.0.1:55668$p > $D/$(echo $p|tr / _).html; done` then `$V exec -- node --input-type=module -e 'import {findMoneyClaims,findPaymentPromises,findSiteMoneyTerms} from "./src/lib/money-claims.ts"; import fs from "node:fs"; for (const f of process.argv.slice(1)) { const h=fs.readFileSync(f,"utf8"); console.log(f, JSON.stringify([...findMoneyClaims(h),...findPaymentPromises(h),...findSiteMoneyTerms(h)])) }' $D/*.html` → every line ends `[]`.
 - **Negative control.** Temporarily add a term to a scratch copy (not the repo) and run `scanText` from `scripts/check-site-copy.mjs` on it to see the guard fire; never commit it.
-- **Production (GET-only).** `curl -s https://meshground.com/ > $D/prod-home.html` and run the same node check.
+- **Production (GET-only).** `curl -s https://www.meshground.app/ > $D/prod-home.html` and run the same node check.
 
 ## Gotchas
 
