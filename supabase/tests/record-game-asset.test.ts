@@ -10,7 +10,7 @@ import postgres from 'postgres';
 import { assetWriteAddsCountedRow } from '../../src/lib/server/asset-upload.ts';
 
 const supabaseDir = join(dirname(fileURLToPath(import.meta.url)), '..');
-const MIGRATION = '20261017120000_record_game_asset';
+const MIGRATION = '20261017190000_record_game_asset_cap_on_add';
 const MAX_FILES = 200;
 const MAX_BYTES = 4194304;
 const FN = `private.record_game_asset(text, integer, text, text, text, integer, text, text, text, integer, bigint)`;
@@ -92,9 +92,9 @@ describe('private.record_game_asset', () => {
     if (!sql) return;
     try {
       const [migration] = await sql<{ version: string }[]>`
-        select version from supabase_migrations.schema_migrations where version = '20261017120000'
+        select version from supabase_migrations.schema_migrations where version = '20261017190000'
       `;
-      assert.equal(migration?.version, '20261017120000');
+      assert.equal(migration?.version, '20261017190000');
 
       const [fn] = await sql<{ prosecdef: boolean; proacl: string[] | null }[]>`
         select p.prosecdef, p.proacl
