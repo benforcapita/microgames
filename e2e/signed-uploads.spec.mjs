@@ -328,6 +328,30 @@ test('UP-2a signed URL cannot replace a finalized asset without finalize', async
   await c.dispose();
 });
 
+test('UP-2a sign rejects control characters in the path with 400, before any storage/DB work', async () => {
+  const c = await ctx();
+  await signup(c, 'ctl');
+  const game = await uploadGame(c, `UP2a ctl ${uniq()}`);
+
+  // A NUL or other control character must get the same {error, message} 400 finalize and the
+  // legacy multipart POST return — never a 500 from Postgres choking on the path parameter.
+  for (const path of ['x.png\u0000.wav', '%00x.png', 'x\u001f.png']) {
+    const r = await sign(c, game.slug, { path, size: SMALL_WAV.length, contentType: 'audio/wav' });
+    expect(r.status(), JSON.stringify(path)).toBe(400);
+    const body = await r.json();
+    expect(body.error, JSON.stringify(path)).toBe('control');
+    expect(body.message, JSON.stringify(path)).toBe('That path contains a NUL or a control character.');
+  }
+
+  // Nothing may be staged or written for the rejected paths.
+  const staging = await gamesBucket().list(`${game.id}/_staging`);
+  expect(staging.error).toBeNull();
+  expect(staging.data ?? [], 'no staged object may be created').toEqual([]);
+  const [count] = await sql`select count(*)::int as n from public.game_assets where game_id = ${game.id}`;
+  expect(count.n, 'no asset row may be written').toBe(0);
+  await c.dispose();
+});
+
 test('UP-2a finalize re-checks the whole-version 4 MB cap', async () => {
   const c = await ctx();
   await signup(c, 'total');
