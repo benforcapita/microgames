@@ -8,6 +8,7 @@ import { test, expect, request as pwRequest } from '@playwright/test';
 import postgres from 'postgres';
 import { createClient } from '@supabase/supabase-js';
 import { localSupabaseEnv } from '../scripts/lib/local-supabase.mjs';
+import { GAME_VERSION_MAX_BYTES } from '../src/lib/asset-limits.ts';
 
 const WEB = `http://127.0.0.1:${process.env.E2E_WEB_PORT ?? 4721}`;
 const CDN = `http://127.0.0.1:${process.env.E2E_CDN_PORT ?? 4722}`;
@@ -324,5 +325,46 @@ test('UP-2a signed URL cannot replace a finalized asset without finalize', async
   const still = await fetch(assetUrl(game.id, 'sfx/beep.wav'));
   expect(still.status).toBe(200);
   expect(Buffer.from(await still.arrayBuffer()).equals(v1), 'CDN must keep serving the finalized bytes').toBe(true);
+  await c.dispose();
+});
+
+test('UP-2a finalize re-checks the whole-version 4 MB cap', async () => {
+  const c = await ctx();
+  await signup(c, 'total');
+  const game = await uploadGame(c, `UP2a total ${uniq()}`);
+  const [g] = await sql`select size_bytes from public.games where id = ${game.id}`;
+  const room = GAME_VERSION_MAX_BYTES - g.size_bytes;
+  // Every file fits on its own, and every sign sees the version total still under the cap
+  // (no finalized rows yet). Finalized one after another, they would take the version past
+  // 4 MB — the cap must be re-checked against the version's real bytes at finalize.
+  const size = Math.floor(room * 0.45);
+  const staged = [];
+  for (let i = 0; i < 4; i++) {
+    const path = `bulk/f${i}.wav`;
+    const s = await sign(c, game.slug, { path, size, contentType: 'audio/wav' });
+    expect(s.status(), `sign ${path}`).toBe(200);
+    const j = await s.json();
+    expect((await putSigned(j.url, wav(size), 'audio/wav')).status).toBe(200);
+    staged.push({ path, ...j });
+  }
+
+  const replies = [];
+  for (const it of staged) replies.push(await finalize(c, game.slug, { path: it.path, uploadId: it.uploadId }));
+  expect(replies[0].status(), 'first file fits').toBe(200);
+  expect(replies[1].status(), 'second file still fits').toBe(200);
+  for (const r of replies.slice(2)) {
+    expect(r.status(), 'a finalize that would pass the version cap is refused').toBe(413);
+    expect((await r.json()).error).toBe('too-big');
+  }
+  for (const it of staged.slice(2)) {
+    expect(await objectExists(it.uploadPath), `staged object for ${it.path} must be deleted`).toBe(false);
+    expect(await objectExists(`${game.id}/1/${it.path}`), `no served object for ${it.path}`).toBe(false);
+    // A 'rejected' audit row is allowed; nothing may be counted as uploaded for that path.
+    const [row] = await sql`select status from public.game_assets where game_id = ${game.id} and path = ${it.path}`;
+    expect(row?.status ?? 'absent', `${it.path} must not be an uploaded asset`).not.toBe('uploaded');
+    expect((await fetch(assetUrl(game.id, it.path))).status, `${it.path} is never served`).toBe(404);
+  }
+  const [count] = await sql`select count(*)::int as n from public.game_assets where game_id = ${game.id} and version = 1 and status = 'uploaded'`;
+  expect(count.n, 'only the two admitted files count toward the version').toBe(2);
   await c.dispose();
 });
