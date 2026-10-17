@@ -2,6 +2,7 @@
 // game's row, re-checks the file and byte caps inside the same statement as the write, and
 // ignores 'rejected' rows for both caps. Runs only against a local stack.
 import assert from 'node:assert/strict';
+import { randomBytes } from 'node:crypto';
 import { readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
@@ -68,7 +69,7 @@ type CallResult = {
 };
 
 const call = (
-  sql: postgres.Sql,
+  sql: postgres.Sql | postgres.TransactionSql,
   gameId: string,
   path: string,
   opts: {
@@ -311,6 +312,108 @@ describe('private.record_game_asset', () => {
     } finally {
       await sql`delete from public.games where id = ${gameId}`.catch(() => {});
       await sql.end({ timeout: 1 }).catch(() => {});
+    }
+  });
+
+  it('holds a NO KEY UPDATE lock on the game row: a 2nd call waits, a referencing insert does not', async (t) => {
+    // The cap checks above still pass with a weaker games-row lock while two writers
+    // interleave their check and write — QA #78 only caught FOR SHARE / no lock by chance.
+    // Hold the lock on connection A inside an open transaction: on connection B a second
+    // call must queue on the row and trip lock_timeout, while an insert that merely
+    // references public.games (FOR KEY SHARE through the FK check) must go through at once.
+    // Together that pins the lock to NO KEY UPDATE — FOR UPDATE would block the insert too.
+    const a = await connect(t);
+    if (!a) return;
+    const b = await connect(t);
+    if (!b) {
+      await a.end({ timeout: 1 }).catch(() => {});
+      return;
+    }
+    const gameId = await makeGame(a);
+    const uniq = randomBytes(4).toString('hex');
+    // Deterministic hand-off, no sleeps: B starts once A's record_game_asset has returned
+    // (the lock is held); A keeps its transaction open until B ran both probes, then rolls
+    // back so nothing it wrote survives.
+    let signalLockHeld!: () => void;
+    let signalBDone!: () => void;
+    const lockHeld = new Promise<void>((resolve) => (signalLockHeld = resolve));
+    const bDone = new Promise<void>((resolve) => (signalBDone = resolve));
+    const rollback = new Error('roll back the lock-holding transaction');
+    try {
+      const aTxn = a
+        .begin(async (tx) => {
+          try {
+            const res = await call(tx, gameId, `lk/${uniq}-a.png`);
+            assert.equal(res?.result, 'ok');
+            // The lock is really held while B runs: every FOR-<row lock> clause takes
+            // exactly RowShareLock on the table (they differ only at row level — that is
+            // what B's probes pin below), while a select with no locking clause would
+            // leave an AccessShareLock here too.
+            const held = await tx<{ mode: string }[]>`
+              select l.mode
+              from pg_locks l
+              join pg_class c on c.oid = l.relation
+              join pg_namespace n on n.oid = c.relnamespace
+              where n.nspname = 'public' and c.relname = 'games'
+                and l.locktype = 'relation' and l.granted and l.pid = pg_backend_pid()
+            `;
+            assert.deepEqual(
+              held.map((l) => l.mode).sort(),
+              ['RowShareLock'],
+              'record_game_asset must take a row lock on the games row',
+            );
+          } finally {
+            signalLockHeld();
+          }
+          await bDone;
+          throw rollback;
+        })
+        .then(
+          () => 'committed',
+          (e: unknown) => (e === rollback ? 'rolled back' : `a-error: ${e}`),
+        );
+      await lockHeld;
+
+      // A second writer must queue on the row lock and hit lock_timeout — with FOR SHARE,
+      // FOR KEY SHARE or no lock it returns immediately.
+      const second = await b
+        .begin(async (tx) => {
+          await tx`set local lock_timeout = '700ms'`;
+          await call(tx, gameId, `lk/${uniq}-b.png`);
+        })
+        .then(
+          () => null,
+          (e: unknown) => e,
+        );
+      assert.ok(
+        second instanceof postgres.PostgresError,
+        `the second record_game_asset on the same game must block on the row lock and fail, got: ${String(second)}`,
+      );
+      assert.equal(second.code, '55P03');
+
+      // But an insert that only references the games row must not wait: its FK check takes
+      // FOR KEY SHARE, which conflicts with FOR UPDATE but not with FOR NO KEY UPDATE.
+      const fkErr = await b
+        .begin(async (tx) => {
+          await tx`set local lock_timeout = '700ms'`;
+          await tx`
+            insert into public.game_assets (game_id, version, path, expected_type, status, source)
+            values (${gameId}, 1, ${`lk/${uniq}-scan.png`}, 'image', 'missing', 'scan')
+          `;
+        })
+        .then(
+          () => null,
+          (e: unknown) => e,
+        );
+      assert.equal(fkErr, null, `an insert referencing the game must not wait on the upload lock: ${String(fkErr)}`);
+
+      signalBDone();
+      assert.equal(await aTxn, 'rolled back');
+    } finally {
+      signalBDone();
+      await a`delete from public.games where id = ${gameId}`.catch(() => {});
+      await a.end({ timeout: 1 }).catch(() => {});
+      await b.end({ timeout: 1 }).catch(() => {});
     }
   });
 });
