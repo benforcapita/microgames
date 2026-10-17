@@ -8,13 +8,13 @@ import { SHOT_DIR, shotPath } from '../../e2e/shots.mjs';
 
 describe('e2e screenshots stay out of git', () => {
   it('no e2e spec writes into docs/', () => {
-    for (const f of fs.readdirSync('e2e').filter((x) => x.endsWith('.mjs'))) {
+    for (const f of fs.readdirSync('e2e').filter((x) => x.endsWith('.mjs') || x.endsWith('.ts'))) {
       const src = fs.readFileSync(path.join('e2e', f), 'utf8');
       assert.doesNotMatch(src, /path:\s*['"`]docs\//, f);
     }
   });
   it('every screenshot call uses shotPath()', () => {
-    for (const f of fs.readdirSync('e2e').filter((x) => x.endsWith('.spec.mjs'))) {
+    for (const f of fs.readdirSync('e2e').filter((x) => x.endsWith('.spec.mjs') || x.endsWith('.spec.ts'))) {
       const src = fs.readFileSync(path.join('e2e', f), 'utf8');
       for (const m of src.matchAll(/screenshot\(\{\s*path:\s*([^,}]+)/g)) assert.match(m[1], /^shotPath\(/, `${f}: ${m[1]}`);
     }

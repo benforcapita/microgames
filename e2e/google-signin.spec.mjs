@@ -14,6 +14,24 @@ for (const [name, path] of [['login', '/login'], ['signup', '/signup']]) {
     await expect(page.locator('form[action="/api/auth/login"] input[name="email"]')).toBeVisible();
     for (const [vp, size] of [['desktop', { width: 1280, height: 800 }], ['390', { width: 390, height: 844 }]]) {
       await page.setViewportSize(size);
+      const box = (sel) => page.locator(sel).evaluate((el) => {
+        const r = el.getBoundingClientRect();
+        return { x: r.x, y: r.y, w: r.width, h: r.height };
+      });
+      const [gsi, divider, submit] = await Promise.all([box('.gsi-btn'), box('.or'), box('form.form button')]);
+      for (const part of [divider, submit]) {
+        expect(Math.abs(part.x - gsi.x), `${name} ${vp} x`).toBeLessThan(1);
+        expect(Math.abs(part.w - gsi.w), `${name} ${vp} width`).toBeLessThan(1);
+      }
+      const header = page.locator('header');
+      const login = header.getByRole('link', { name: 'Log in', exact: true });
+      const signup = header.getByRole('link', { name: 'Sign up', exact: true });
+      await expect(login).toBeVisible();
+      await expect(signup).toBeVisible();
+      const [loginBox, signupBox] = await Promise.all([login.boundingBox(), signup.boundingBox()]);
+      expect(Math.abs(loginBox.y + loginBox.height / 2 - (signupBox.y + signupBox.height / 2)), `${name} ${vp} header`).toBeLessThan(1);
+      const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+      expect(overflow, `${name} ${vp} overflow`).toBeLessThanOrEqual(0);
       await page.screenshot({ path: shotPath(`ga-1-${name}-${vp}.png`), fullPage: true });
     }
   });

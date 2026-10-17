@@ -59,7 +59,7 @@ const nav = [
           <span>mesh<b>ground</b></span>
         </a>
         <nav class="row">
-          {nav.map((n) => <a href={n.href} aria-current={path.startsWith(n.href) ? 'page' : undefined}>{n.label}</a>)}
+          {nav.map((n) => <a class="navlink" href={n.href} aria-current={path.startsWith(n.href) ? 'page' : undefined}>{n.label}</a>)}
           {
             profile ? (
               <a href="/me" class="me" aria-current={path === '/me' ? 'page' : undefined}>@{profile.handle}</a>
@@ -106,16 +106,21 @@ const nav = [
   .logo { flex-shrink: 0; display: flex; align-items: center; gap: 0.55rem; text-decoration: none; font: 500 1.15rem var(--mono); letter-spacing: -0.02em; }
   .logo b { color: var(--accent); }
   nav { gap: 1.25rem; flex-wrap: nowrap; min-width: 0; }
-  nav .btn { white-space: nowrap; }
+  nav a { white-space: nowrap; }
   nav a:not(.btn) { text-decoration: none; color: var(--muted); font-weight: 600; font-size: 0.92rem; }
   nav a:not(.btn):hover, nav a[aria-current='page'] { color: var(--text); }
   nav a.me { font-family: var(--mono); color: var(--accent); }
   .site-footer { border-top: 1px solid var(--line); padding: 1.5rem 0; margin-top: 3rem; font-size: 0.85rem; }
   .site-footer a { text-decoration: none; }
-  @media (max-width: 640px) {
-    nav a:not(.btn):not(.me) { display: none; }
+  /* Section links hide until Log in, Sign up, and Upload fit on one line (741px). */
+  @media (max-width: 740px) {
+    nav a.navlink { display: none; }
     nav { gap: 0.6rem; }
-    nav a.me { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    nav a.me { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  }
+  /* With the 1rem inset, logo + Log in + Sign up + Upload is 384px. Hide Upload until it fits. */
+  @media (max-width: 384px) {
+    .site-header .wrap:has(a[href^='/login']) a[href='/upload'] { display: none; }
   }
   @media (max-width: 420px) {
     .xs-hide { display: none; }
