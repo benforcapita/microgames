@@ -132,3 +132,46 @@ test('fullscreen exit sits inside the stage for every game', async ({ page, brow
     }
   }
 });
+
+test('restart keeps the exit button inside the stage', async ({ page, browserName }, testInfo) => {
+  const immersive = browserName === 'webkit' || testInfo.project.name === 'iphone';
+  await markPlayable();
+  await page.goto('/play/stack-tower');
+  const toolbar = page.locator('#fullscreen');
+  const exit = page.locator('#stage [data-fullscreen-exit]');
+  await expect(page.locator('#stage')).toBeVisible();
+  await toolbar.click();
+  await expect(exit).toBeVisible();
+  const entered = await stageState(page);
+  if (immersive) expect(entered.native).toBe(false);
+  else expect(entered.native).toBe(true);
+
+  await page.locator('iframe.mg-frame').evaluate((frame) => {
+    frame.dataset.remountMark = '1';
+  });
+  // Restart lives in the toolbar, outside the fullscreened stage, so the click is delivered to that button.
+  await page.locator('#restart').evaluate((button) => {
+    button.click();
+  });
+  await expect(page.locator('iframe.mg-frame')).toHaveCount(1);
+  await expect(page.locator('iframe[data-remount-mark]')).toHaveCount(0);
+
+  await expect(exit).toBeVisible();
+  expect(await exit.evaluate((button) => button.parentElement?.id)).toBe('stage');
+  const stayed = await stageState(page);
+  if (immersive) {
+    expect(stayed.native).toBe(false);
+    expect(stayed.position).toBe('fixed');
+  } else {
+    expect(stayed.native).toBe(true);
+  }
+
+  await exit.click();
+  await expect(toolbar).toHaveText('⛶ Fullscreen');
+  await expect(toolbar).toHaveAttribute('aria-label', 'Fullscreen');
+  await expect(exit).toHaveCount(0);
+  expect(await page.evaluate(() => document.fullscreenElement)).toBeNull();
+  if (immersive) {
+    expect(await page.locator('#stage').evaluate((el) => getComputedStyle(el).position)).toBe('relative');
+  }
+});
