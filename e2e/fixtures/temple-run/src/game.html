@@ -1,0 +1,583 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="meshground:input-support" content="both">
+<title>Temple Dash</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; background: #0b0a08; overflow: hidden; }
+  body { font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; color: #f4f1e8; touch-action: none; }
+  #view { display: block; width: 100%; height: 100%; }
+  .hud { position: fixed; inset: 0; pointer-events: none; display: grid; }
+  .top { align-self: start; display: flex; gap: 1.2rem; padding: 0.8rem 1rem; font-weight: 700; text-shadow: 0 2px 6px #000; }
+  .top span { font-variant-numeric: tabular-nums; }
+  .gold { color: #ffce3d; }
+  .card {
+    place-self: center; text-align: center; padding: 1.2rem 1.6rem; max-width: 26rem;
+    background: #0b0a08cc; border: 2px solid #ffce3d; border-radius: 12px; text-shadow: 0 2px 6px #000;
+  }
+  .card h1 { margin: 0 0 0.4rem; font-size: 1.6rem; letter-spacing: 0.06em; }
+  .card p { margin: 0.35rem 0; font-size: 0.85rem; line-height: 1.5; color: #e6e0cd; }
+  .card[hidden] { display: none; }
+  .big { font-size: 2rem; color: #ffce3d; margin: 0.4rem 0; }
+</style>
+</head>
+<body>
+<canvas id="view" width="960" height="540"></canvas>
+<div class="hud">
+  <div class="top">
+    <span id="hud-score">SCORE 0</span>
+    <span id="hud-gold" class="gold">GOLD 0</span>
+    <span id="hud-best">BEST 0</span>
+  </div>
+  <div class="card" id="card">
+    <h1 id="card-title">TEMPLE DASH</h1>
+    <p id="card-score" class="big" hidden></p>
+    <p id="card-hint">Swipe or use the arrow keys to switch lanes. Up = jump the stone blocks, down = slide under the bars.</p>
+    <p id="card-action">Tap or press any key to run</p>
+  </div>
+</div>
+<script>
+/* Temple Dash — a three-lane endless runner built for the Meshground runtime contract v1.
+ * Everything (sprites, music, sound effects) is inlined below as data: URLs by tools/build.mjs,
+ * so the game is a single self-contained file and makes no network requests at all. */
+(function () {
+  'use strict';
+
+  /* ---------------------------------------------------------------- assets */
+  // ASSETS[path] = "data:<mime>;base64,…"; built from e2e/fixtures/temple-run/assets/**.
+  var ASSETS = /*__MG_ASSETS__*/{};
+
+  var images = {};
+  var buffers = {};
+  var assetState = { total: 0, loaded: 0, failed: 0 };
+  var audioState = { total: 0, decoded: 0, failed: 0, musicPlaying: false };
+
+  function base64Bytes(dataUrl) {
+    var binary = atob(dataUrl.slice(dataUrl.indexOf(',') + 1));
+    var bytes = new Uint8Array(binary.length);
+    for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+  }
+
+  Object.keys(ASSETS).forEach(function (path) {
+    if (path.slice(-4) !== '.png') return;
+    assetState.total++;
+    var img = new Image();
+    img.onload = function () { assetState.loaded++; };
+    img.onerror = function () { assetState.failed++; };
+    img.src = ASSETS[path];
+    images[path] = img;
+  });
+
+  var sprite = function (name) {
+    var img = images['sprites/' + name + '.png'];
+    return img && img.complete && img.naturalWidth > 0 ? img : null;
+  };
+
+  /* ----------------------------------------------------------------- audio */
+  var audio = null, musicGain = null, musicSource = null, muted = false;
+
+  function startAudio() {
+    if (audio) return;
+    var Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return;
+    try { audio = new Ctx(); } catch (err) { return; }
+    musicGain = audio.createGain();
+    musicGain.gain.value = 0.35;
+    musicGain.connect(audio.destination);
+    Object.keys(ASSETS).forEach(function (path) {
+      if (path.slice(-4) !== '.wav') return;
+      audioState.total++;
+      var bytes = base64Bytes(ASSETS[path]);
+      audio.decodeAudioData(
+        bytes.buffer,
+        function (decoded) {
+          buffers[path] = decoded;
+          audioState.decoded++;
+          if (path === 'audio/music-loop.wav') playMusic();
+        },
+        function () { audioState.failed++; },
+      );
+    });
+  }
+
+  function playMusic() {
+    if (!audio || !buffers['audio/music-loop.wav'] || musicSource) return;
+    musicSource = audio.createBufferSource();
+    musicSource.buffer = buffers['audio/music-loop.wav'];
+    musicSource.loop = true;
+    musicSource.connect(musicGain);
+    musicSource.start(0);
+    audioState.musicPlaying = true;
+  }
+
+  function sfx(name, volume) {
+    var buffer = buffers['audio/' + name + '.wav'];
+    if (!audio || !buffer || muted) return;
+    var source = audio.createBufferSource();
+    var gain = audio.createGain();
+    gain.gain.value = volume === undefined ? 0.5 : volume;
+    source.buffer = buffer;
+    source.connect(gain);
+    gain.connect(audio.destination);
+    source.start(0);
+  }
+
+  /* ------------------------------------------------------------------ world */
+  var LANES = 3;
+  var LANE_W = 1.55;
+  var ROAD_HALF = 2.4;
+  var WALL_H = 2.6;
+  var PLAYER_Z = 5.5;
+  var FAR_Z = 58;
+  var SPAWN_Z = 56;
+  var GRAVITY = 26;
+  var JUMP_V = 9.2;
+  var SLIDE_TIME = 0.55;
+  var RUNWAY = 44;
+  var BEST_KEY = 'templeDash.best';
+
+  var canvas = document.getElementById('view');
+  var ctx = canvas.getContext('2d');
+  var hud = {
+    score: document.getElementById('hud-score'),
+    gold: document.getElementById('hud-gold'),
+    best: document.getElementById('hud-best'),
+    card: document.getElementById('card'),
+    title: document.getElementById('card-title'),
+    cardScore: document.getElementById('card-score'),
+    hint: document.getElementById('card-hint'),
+    action: document.getElementById('card-action'),
+  };
+
+  var state = 'title';
+  var run = null;
+  var best = 0;
+  try { best = Math.max(0, parseInt(localStorage.getItem(BEST_KEY), 10) || 0); } catch (err) { best = 0; }
+
+  function newRun() {
+    return {
+      lane: 1, laneX: 0, y: 0, vy: 0, slide: 0,
+      speed: 9, distance: 0, gold: 0, score: 0,
+      // RUNWAY metres of clear corridor at the start of every run, so the first obstacle is dodgeable.
+      things: [], nextSpawn: RUNWAY, runCycle: 0, shake: 0,
+    };
+  }
+
+  function spawn(z) {
+    var kind = Math.random();
+    var lane = Math.floor(Math.random() * LANES);
+    if (kind < 0.42) run.things.push({ kind: 'block', lane: lane, z: z, gone: false });
+    else if (kind < 0.66) run.things.push({ kind: 'bar', lane: lane, z: z, gone: false });
+    else {
+      // A short line of gold in one lane.
+      var count = 3 + Math.floor(Math.random() * 3);
+      for (var i = 0; i < count; i++) run.things.push({ kind: 'coin', lane: lane, z: z + i * 1.6, gone: false });
+    }
+  }
+
+  /* ------------------------------------------------------------------ input */
+  var paused = false;
+
+  function move(direction) {
+    if (state !== 'running' || paused) return;
+    var next = Math.min(LANES - 1, Math.max(0, run.lane + direction));
+    if (next !== run.lane) run.lane = next;
+  }
+
+  function jump() {
+    if (state !== 'running' || paused || run.y > 0) return;
+    run.vy = JUMP_V;
+    run.slide = 0;
+    sfx('sfx-jump', 0.4);
+  }
+
+  function slide() {
+    if (state !== 'running' || paused) return;
+    run.slide = SLIDE_TIME;
+    if (run.y > 0) run.vy = -JUMP_V; // drop out of a jump straight into a slide
+    sfx('sfx-jump', 0.25);
+  }
+
+  function act(action) {
+    startAudio();
+    if (state === 'title' || state === 'over') {
+      if (action === 'start' || action === 'up' || action === 'down') begin();
+      return;
+    }
+    if (action === 'left') move(-1);
+    else if (action === 'right') move(1);
+    else if (action === 'up') jump();
+    else if (action === 'down') slide();
+  }
+
+  var KEYS = {
+    ArrowLeft: 'left', KeyA: 'left',
+    ArrowRight: 'right', KeyD: 'right',
+    ArrowUp: 'up', KeyW: 'up', Space: 'up',
+    ArrowDown: 'down', KeyS: 'down',
+    Enter: 'start', KeyR: 'start',
+  };
+
+  window.addEventListener('keydown', function (event) {
+    var action = KEYS[event.code];
+    if (!action) {
+      startAudio();
+      return;
+    }
+    event.preventDefault();
+    act(action);
+  });
+
+  // Touch: swipes in four directions, tap to start or jump. Pointer events cover a mouse drag too.
+  var touchStart = null;
+  var SWIPE = 24;
+
+  function gestureStart(x, y) { touchStart = { x: x, y: y, t: performance.now() }; }
+
+  function gestureEnd(x, y) {
+    if (!touchStart) return;
+    var dx = x - touchStart.x;
+    var dy = y - touchStart.y;
+    touchStart = null;
+    if (Math.abs(dx) < SWIPE && Math.abs(dy) < SWIPE) {
+      act(state === 'running' ? 'up' : 'start');
+      return;
+    }
+    if (Math.abs(dx) > Math.abs(dy)) act(dx > 0 ? 'right' : 'left');
+    else act(dy > 0 ? 'down' : 'up');
+  }
+
+  canvas.addEventListener('touchstart', function (event) {
+    var touch = event.changedTouches[0];
+    gestureStart(touch.clientX, touch.clientY);
+    event.preventDefault();
+  }, { passive: false });
+  canvas.addEventListener('touchmove', function (event) { event.preventDefault(); }, { passive: false });
+  canvas.addEventListener('touchend', function (event) {
+    var touch = event.changedTouches[0];
+    gestureEnd(touch.clientX, touch.clientY);
+    event.preventDefault();
+  }, { passive: false });
+  canvas.addEventListener('pointerdown', function (event) {
+    if (event.pointerType === 'touch') return; // the touch handlers already own this gesture
+    gestureStart(event.clientX, event.clientY);
+  });
+  canvas.addEventListener('pointerup', function (event) {
+    if (event.pointerType === 'touch') return;
+    gestureEnd(event.clientX, event.clientY);
+  });
+
+  /* ------------------------------------------------------------------ rounds */
+  function begin() {
+    run = newRun();
+    state = 'running';
+    hud.card.hidden = true;
+    playMusic();
+  }
+
+  function finish() {
+    state = 'over';
+    sfx('sfx-hit', 0.6);
+    if (run.score > best) {
+      best = run.score;
+      try { localStorage.setItem(BEST_KEY, String(best)); } catch (err) { /* saves are optional */ }
+    }
+    hud.title.textContent = 'GAME OVER';
+    hud.cardScore.hidden = false;
+    hud.cardScore.textContent = run.score + ' PTS';
+    hud.hint.textContent = 'Gold collected: ' + run.gold + ' · Best: ' + best;
+    hud.action.textContent = 'Tap or press R to run again';
+    hud.card.hidden = false;
+    if (window.Meshground && window.Meshground.gameOver) window.Meshground.gameOver(run.score);
+  }
+
+  /* ------------------------------------------------------------------- step */
+  function step(dt) {
+    if (state !== 'running') return;
+    run.speed = Math.min(30, run.speed + dt * 0.42);
+    run.distance += run.speed * dt;
+    run.score = Math.floor(run.distance) + run.gold * 25;
+
+    var target = (run.lane - 1) * LANE_W;
+    run.laneX += (target - run.laneX) * Math.min(1, dt * 12);
+
+    if (run.vy !== 0 || run.y > 0) {
+      run.vy -= GRAVITY * dt;
+      run.y += run.vy * dt;
+      if (run.y <= 0) { run.y = 0; run.vy = 0; }
+    }
+    if (run.slide > 0) run.slide = Math.max(0, run.slide - dt);
+    if (run.shake > 0) run.shake = Math.max(0, run.shake - dt * 3);
+    run.runCycle += dt * (run.speed * 0.9);
+
+    // nextSpawn is a world distance; things appear at the far end of the corridor.
+    while (run.distance + SPAWN_Z >= run.nextSpawn) {
+      spawn(run.nextSpawn - run.distance);
+      run.nextSpawn += 9 + Math.random() * 7;
+    }
+
+    var sliding = run.slide > 0;
+    var airborne = run.y > 0.45;
+    for (var i = 0; i < run.things.length; i++) {
+      var thing = run.things[i];
+      thing.z -= run.speed * dt;
+      if (thing.gone || thing.z > PLAYER_Z + 0.6 || thing.z < PLAYER_Z - 1.1) continue;
+      if (thing.lane !== run.lane) continue;
+      if (thing.kind === 'coin') {
+        thing.gone = true;
+        run.gold++;
+        run.shake = 0.2;
+        sfx('sfx-coin', 0.45);
+      } else if (thing.kind === 'block' ? !airborne : !sliding) {
+        thing.gone = true;
+        finish();
+        return;
+      }
+    }
+    run.things = run.things.filter(function (thing) { return thing.z > PLAYER_Z - 2 && !thing.gone; });
+  }
+
+  /* ------------------------------------------------------------------- draw */
+  var width = 960, height = 540, dpr = 1;
+
+  function resize() {
+    dpr = Math.min(2, window.devicePixelRatio || 1);
+    width = Math.max(320, window.innerWidth);
+    height = Math.max(240, window.innerHeight);
+    canvas.width = Math.round(width * dpr);
+    canvas.height = Math.round(height * dpr);
+    canvas.style.width = width + 'px';
+    canvas.style.height = height + 'px';
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // Pinhole projection: one world unit is SCALE/z screen pixels, the road surface sits
+  // 1.35 units below the camera, and everything is drawn far-to-near.
+  function horizon() { return height * 0.42; }
+  function scaleAt(z) { return (height * 0.9) / Math.max(0.6, z); }
+  function screenY(z) { return horizon() + scaleAt(z) * 1.35; }
+  function screenX(worldX, z) { return width / 2 + worldX * scaleAt(z); }
+  function spriteScale(z) { return scaleAt(z) / 70; }
+
+  /** How far the scrolling stone courses have moved inside one `step`-deep slice. */
+  function offsetAt(shift, step) { return shift % step; }
+
+  function drawRoad(shift) {
+    var top = horizon();
+    var sky = ctx.createLinearGradient(0, 0, 0, top);
+    sky.addColorStop(0, '#060a06');
+    sky.addColorStop(1, '#3b3218');
+    ctx.fillStyle = sky;
+    ctx.fillRect(0, 0, width, top + 2);
+    // Torchlight haze at the vanishing point.
+    var glow = ctx.createRadialGradient(width / 2, top, 0, width / 2, top, height * 0.35);
+    glow.addColorStop(0, 'rgba(255,206,61,0.30)');
+    glow.addColorStop(1, 'rgba(255,206,61,0)');
+    ctx.fillStyle = glow;
+    ctx.fillRect(0, 0, width, top + 2);
+    // Jungle canopy hanging over the corridor.
+    ctx.fillStyle = '#0a1409';
+    for (var x = 0; x < width; x += 16) {
+      var leaf = 24 + 18 * Math.sin(x / 61) + 12 * Math.sin(x / 23);
+      ctx.fillRect(x, 0, 17, leaf);
+    }
+    // Everything below the horizon that is not road or wall is darkness.
+    ctx.fillStyle = '#080705';
+    ctx.fillRect(0, top, width, height - top);
+
+    var near = 0.9, far = FAR_Z;
+    var yNearEdge = screenY(near), yFarEdge = screenY(far);
+
+    // Side walls (from a little further back, so they frame the lanes instead of filling the screen),
+    // shaded from dark at the vanishing point to lit at the near end, with stone courses for depth.
+    [-1, 1].forEach(function (side) {
+      var wallNear = 1.6;
+      var xNear = screenX(side * ROAD_HALF, wallNear);
+      var xFar = screenX(side * ROAD_HALF, far);
+      var yn = screenY(wallNear), yf = screenY(far);
+      var shade = ctx.createLinearGradient(xFar, 0, xNear, 0);
+      shade.addColorStop(0, '#241f17');
+      shade.addColorStop(1, side < 0 ? '#544a39' : '#60553f');
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(xNear, yn);
+      ctx.lineTo(xFar, yf);
+      ctx.lineTo(xFar, yf - WALL_H * scaleAt(far));
+      ctx.lineTo(xNear, yn - WALL_H * scaleAt(wallNear));
+      ctx.closePath();
+      ctx.fillStyle = shade;
+      ctx.fill();
+      ctx.clip();
+      ctx.strokeStyle = 'rgba(20,16,11,0.5)';
+      ctx.lineWidth = Math.max(1, height / 400);
+      for (var z = far; z > wallNear; z -= 2.4) {
+        var zz = z - offsetAt(shift, 2.4);
+        if (zz <= wallNear) continue;
+        var x1 = screenX(side * ROAD_HALF, zz);
+        var y1 = screenY(zz);
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x1, y1 - WALL_H * scaleAt(zz));
+        ctx.stroke();
+      }
+      for (var b = 1; b <= 3; b++) {
+        ctx.beginPath();
+        ctx.moveTo(xNear, yn - (WALL_H * b / 4) * scaleAt(wallNear));
+        ctx.lineTo(xFar, yf - (WALL_H * b / 4) * scaleAt(far));
+        ctx.stroke();
+      }
+      ctx.restore();
+    });
+
+    // Road surface, textured with the stone tile per depth slice.
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(screenX(-ROAD_HALF, near), yNearEdge);
+    ctx.lineTo(screenX(-ROAD_HALF, far), yFarEdge);
+    ctx.lineTo(screenX(ROAD_HALF, far), yFarEdge);
+    ctx.lineTo(screenX(ROAD_HALF, near), yNearEdge);
+    ctx.closePath();
+    ctx.fillStyle = '#6b6050';
+    ctx.fill();
+    ctx.clip();
+    var tile = sprite('tile-stone');
+    var step = 2.4;
+    var offset = offsetAt(shift, step);
+    for (var z = far; z > near; z -= step) {
+      var zz = z - offset;
+      if (zz <= near) continue;
+      var yFar = screenY(zz + step);
+      var yNear = screenY(zz);
+      var left = screenX(-ROAD_HALF, zz);
+      var right = screenX(ROAD_HALF, zz);
+      if (yNear - yFar < 0.6) continue;
+      if (tile) ctx.drawImage(tile, left, yFar, Math.max(1, right - left), Math.max(1, yNear - yFar));
+      else {
+        ctx.fillStyle = (Math.round(zz / step) % 2) ? '#6b6050' : '#5d5445';
+        ctx.fillRect(left, yFar, right - left, yNear - yFar);
+      }
+      ctx.fillStyle = 'rgba(32,26,18,0.55)';
+      ctx.fillRect(left, yNear - Math.max(1, (yNear - yFar) * 0.06), right - left, Math.max(1, (yNear - yFar) * 0.06));
+    }
+    // Lane seams between the three lanes.
+    ctx.strokeStyle = 'rgba(40,33,22,0.8)';
+    ctx.lineWidth = Math.max(1, height / 300);
+    [-LANE_W / 2, LANE_W / 2].forEach(function (lx) {
+      ctx.beginPath();
+      ctx.moveTo(screenX(lx, near), yNearEdge);
+      ctx.lineTo(screenX(lx, far), yFarEdge);
+      ctx.stroke();
+    });
+    ctx.restore();
+  }
+
+  function drawSprite(img, x, y, scale, anchorBottom) {
+    if (!img) return;
+    var w = img.naturalWidth * scale;
+    var h = img.naturalHeight * scale;
+    ctx.drawImage(img, Math.round(x - w / 2), Math.round(anchorBottom ? y - h : y - h / 2), Math.round(w), Math.round(h));
+  }
+
+  function drawThing(thing) {
+    var z = thing.z;
+    if (z <= 1 || z > FAR_Z) return;
+    var scale = spriteScale(z);
+    var x = screenX((thing.lane - 1) * LANE_W, z);
+    var y = screenY(z);
+    if (thing.kind === 'coin') {
+      var bob = Math.sin(performance.now() / 180 + thing.z) * scaleAt(z) * 0.08;
+      drawSprite(sprite('coin'), x, y - scaleAt(z) * 0.5 + bob, scale, false);
+    } else if (thing.kind === 'block') {
+      drawSprite(sprite('obstacle-block'), x, y, scale, true);
+    } else {
+      // Overhead bar: hangs at head height, so the runner has to slide.
+      drawSprite(sprite('obstacle-bar'), x, y - scaleAt(z) * 0.95, scale, false);
+    }
+  }
+
+  function drawPlayer() {
+    var z = PLAYER_Z;
+    var scale = spriteScale(z);
+    var ground = screenY(z);
+    var lane = run ? run.laneX : 0;
+    var x = screenX(lane, z);
+    var y = ground - (run ? run.y : 0) * scaleAt(z) * 0.42;
+    ctx.fillStyle = 'rgba(0,0,0,0.45)';
+    ctx.beginPath();
+    ctx.ellipse(x, ground, scaleAt(z) * 0.26, scaleAt(z) * 0.07, 0, 0, Math.PI * 2);
+    ctx.fill();
+    if (run && run.slide > 0) drawSprite(sprite('runner-slide'), x, y, scale, true);
+    else if (run && run.y > 0) drawSprite(sprite('runner-jump'), x, y, scale, true);
+    else drawSprite(sprite(Math.floor((run ? run.runCycle : 0) * 0.6) % 2 ? 'runner-run-b' : 'runner-run-a'), x, y, scale, true);
+  }
+
+  function draw() {
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    if (run && run.shake > 0) ctx.translate((Math.random() - 0.5) * run.shake * 12, (Math.random() - 0.5) * run.shake * 12);
+    ctx.clearRect(0, 0, width, height);
+    drawRoad(run ? run.distance : 0);
+    if (run) {
+      var sorted = run.things.slice().sort(function (a, b) { return b.z - a.z; });
+      for (var i = 0; i < sorted.length; i++) drawThing(sorted[i]);
+    }
+    drawPlayer();
+
+    hud.score.textContent = 'SCORE ' + (run ? run.score : 0);
+    hud.gold.textContent = 'GOLD ' + (run ? run.gold : 0);
+    hud.best.textContent = 'BEST ' + best;
+  }
+
+  /* ------------------------------------------------------------------- loop */
+  var last = performance.now();
+  var frames = 0;
+  var readyCalled = false;
+
+  function frame(now) {
+    var dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    if (!paused) step(dt);
+    draw();
+    frames++;
+    if (!readyCalled) {
+      readyCalled = true;
+      if (window.Meshground && window.Meshground.ready) window.Meshground.ready();
+    }
+    window.requestAnimationFrame(frame);
+  }
+  window.requestAnimationFrame(frame);
+
+  /* --------------------------------------------------------- platform hooks */
+  if (window.Meshground) {
+    if (window.Meshground.declare) window.Meshground.declare({ inputSupport: 'both' });
+    if (window.Meshground.onPause) window.Meshground.onPause(function () { paused = true; muted = true; });
+    if (window.Meshground.onResume) window.Meshground.onResume(function () { paused = false; muted = false; last = performance.now(); });
+  }
+
+  /* ------------------------------------------------- status (used by the e2e spec)
+   * Read-only view of what loaded and what the run is doing, so a test can assert
+   * "every sprite decoded, the music is playing, the player changed lane" without
+   * reaching into the game's internals. */
+  window.templeRun = {
+    get assets() { return { total: assetState.total, loaded: assetState.loaded, failed: assetState.failed }; },
+    get audio() { return { total: audioState.total, decoded: audioState.decoded, failed: audioState.failed, musicPlaying: audioState.musicPlaying }; },
+    get state() { return state; },
+    get frames() { return frames; },
+    get score() { return run ? run.score : 0; },
+    get gold() { return run ? run.gold : 0; },
+    get lane() { return run ? run.lane : 1; },
+    // Off the ground, or pushing off: `vy` is set the instant the jump input lands, before the next frame.
+    get airborne() { return !!run && (run.y > 0 || run.vy > 0); },
+    get sliding() { return !!run && run.slide > 0; },
+    get speed() { return run ? run.speed : 0; },
+    /** True while Meshground has the game paused (ad break, hidden tab, stage scrolled off-screen). */
+    get paused() { return paused; },
+  };
+})();
+</script>
+</body>
+</html>
