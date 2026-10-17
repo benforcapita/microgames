@@ -7,12 +7,13 @@ import { dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import postgres from 'postgres';
-import { assetWriteAddsCountedRow } from '../../src/lib/server/asset-upload.ts';
+import { GAME_VERSION_MAX_BYTES, MAX_ASSET_FILES, assetWriteAddsCountedRow } from '../../src/lib/server/asset-upload.ts';
 
 const supabaseDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 const MIGRATION = '20261017190000_record_game_asset_cap_on_add';
-const MAX_FILES = 200;
-const MAX_BYTES = 4194304;
+// The caps are parameters of the function; the tests pass the same values the routes do.
+const MAX_FILES = MAX_ASSET_FILES;
+const MAX_BYTES = GAME_VERSION_MAX_BYTES;
 const FN = `private.record_game_asset(text, integer, text, text, text, integer, text, text, text, integer, bigint)`;
 
 describe('record_game_asset migration file', () => {
@@ -96,12 +97,15 @@ describe('private.record_game_asset', () => {
       `;
       assert.equal(migration?.version, '20261017190000');
 
-      const [fn] = await sql<{ prosecdef: boolean; proacl: string[] | null }[]>`
-        select p.prosecdef, p.proacl
+      const [fn] = await sql<{ prosecdef: boolean; proacl: string[] | null; proconfig: string[] | null }[]>`
+        select p.prosecdef, p.proacl, p.proconfig
         from pg_proc p join pg_namespace n on n.oid = p.pronamespace
         where n.nspname = 'private' and p.proname = 'record_game_asset'
       `;
       assert.equal(fn?.prosecdef, true);
+      // search_path is pinned to '' so unqualified names can never resolve somewhere the
+      // caller's session controls (every name in the body is already schema-qualified).
+      assert.deepEqual(fn?.proconfig, ['search_path=""']);
       // No grant may name PUBLIC (an acl item with an empty grantee). Only postgres and
       // service_role hold EXECUTE.
       assert.ok(fn?.proacl?.every((acl) => !acl.startsWith('=')), `proacl: ${JSON.stringify(fn?.proacl)}`);
@@ -163,6 +167,42 @@ describe('private.record_game_asset', () => {
         from public.game_assets where game_id = ${gameId} and status = 'uploaded'
       `;
       assert.ok(codeBytes + (total?.total ?? 0) <= MAX_BYTES);
+    } finally {
+      await sql`delete from public.games where id = ${gameId}`.catch(() => {});
+      await sql.end({ timeout: 1 }).catch(() => {});
+    }
+  });
+
+  it('bills a replace for the byte delta, crediting the displaced size', async (t) => {
+    const sql = await connect(t);
+    if (!sql) return;
+    const codeBytes = 100;
+    const gameId = await makeGame(sql, codeBytes);
+    try {
+      // code + 3 assets ≈ 3.9 MiB — under the 4 MiB version cap. Replacing one file with
+      // the same number of bytes must fit: the displaced row's old size is credited back
+      // (QA #78 S6: crediting zero would double-count and wrongly answer too-big).
+      const each = Math.floor(MAX_BYTES * 0.325);
+      await sql`
+        insert into public.game_assets (game_id, version, path, expected_type, status, size_bytes, source)
+        select ${gameId}, 1, 'd-' || g::text || '.png', 'image', 'uploaded', ${each}, 'scan'
+        from generate_series(1, 3) g
+      `;
+      assert.ok(codeBytes + 3 * each <= MAX_BYTES, 'fixture itself is under the cap');
+      const same = await call(sql, gameId, 'd-1.png', { sizeBytes: each });
+      assert.equal(same?.result, 'ok');
+      assert.equal(same?.prev_status, 'uploaded');
+      assert.equal(same?.prev_size_bytes, each);
+
+      // A larger replace still counts only the delta: pushing the version over 4 MiB is
+      // too-big, and the denied write leaves the displaced row untouched.
+      const bigger = await call(sql, gameId, 'd-2.png', { sizeBytes: each * 2 });
+      assert.equal(bigger?.result, 'too-big');
+      assert.ok(Number(bigger?.total_bytes) > MAX_BYTES);
+      const [row] = await sql<{ size_bytes: number }[]>`
+        select size_bytes from public.game_assets where game_id = ${gameId} and path = 'd-2.png'
+      `;
+      assert.equal(row?.size_bytes, each);
     } finally {
       await sql`delete from public.games where id = ${gameId}`.catch(() => {});
       await sql.end({ timeout: 1 }).catch(() => {});
