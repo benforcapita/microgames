@@ -14,6 +14,7 @@ const FILES: Record<string, string> = {
   '1/data/level.json': '{"a":1}',
   '1/readme.txt': 'hi',
   '1/sprites/hidden.png': 'SECRET',
+  '1/sprites/orphan.png': 'ORPHAN',
   '1/evil.php': '<?php',
   '1/page.svgz': 'x',
 };
@@ -35,7 +36,10 @@ function harness() {
       const id = (u.searchParams.get('game_id') ?? '').replace(/^eq\./, '');
       const version = (u.searchParams.get('version') ?? '').replace(/^eq\./, '');
       const assetPath = decodeURIComponent((u.searchParams.get('path') ?? '').replace(/^eq\./, ''));
-      const status = id === 'live0001' && version === '1' && assetPath === 'sprites/hidden.png' ? 'rejected' : null;
+      let status: string | null = null;
+      if (id === 'live0001' && version === '1' && assetPath === 'sprites/hidden.png') status = 'rejected';
+      else if (id === 'live0001' && version === '1' && assetPath === 'sprites/orphan.png') status = null; // stored object, never finalized: no row
+      else if (STAGES[id] && FILES[`${version}/${assetPath}`] !== undefined) status = 'uploaded';
       return new Response(JSON.stringify(status ? [{ status }] : []), { status: 200 });
     }
     const m = /\/storage\/v1\/object\/authenticated\/games\/([^/]+)\/(.+)$/.exec(u.pathname);
@@ -81,6 +85,16 @@ describe('AS-3 versioned asset serving', () => {
     const shown = await get('/g/live0001/1/sprites/hero.png');
     assert.equal(shown.status, 200);
     assert.equal(shown.body, 'PNGDATA');
+  });
+  it('UP-2a: does not serve a stored object that was never finalized (no manifest row)', async () => {
+    const { get, calls } = harness();
+    const orphan = await get('/g/live0001/1/sprites/orphan.png');
+    assert.equal(orphan.status, 404);
+    assert.equal(orphan.body, 'Not found');
+    assert.ok(!calls.some((c) => c.includes('orphan.png') && c.includes('/storage/')), 'the bytes are never fetched');
+    assert.ok(calls.some((c) => c.includes('/rest/v1/game_assets') && c.includes('orphan')), 'the row lookup ran');
+    const finalized = await get('/g/live0001/1/sprites/hero.png');
+    assert.equal(finalized.status, 200);
   });
   it('404s extensions outside the allowlist (even if the object exists)', async () => {
     const { get, calls } = harness();

@@ -19,7 +19,15 @@ export function fixtureHandler(opts: { webOrigins?: string; cdnOrigin?: string }
       const id = (u.searchParams.get('game_id') ?? '').replace(/^eq\./, '');
       return new Response(JSON.stringify(STAGES[id] ? [{ version: 1 }] : []));
     }
-    if (u.pathname === '/rest/v1/game_assets') return new Response('[]', { status: 200 });
+    if (u.pathname === '/rest/v1/game_assets') {
+      // The CDN serves a versioned asset only with a finalized 'uploaded' row. Every object that
+      // exists in a fixture dir counts as finalized; everything else has no row (orphan uploads).
+      const id = (u.searchParams.get('game_id') ?? '').replace(/^eq\./, '');
+      const version = (u.searchParams.get('version') ?? '').replace(/^eq\./, '');
+      const assetPath = decodeURIComponent((u.searchParams.get('path') ?? '').replace(/^eq\./, ''));
+      const file = DIRS[id] ? new URL(`./${DIRS[id]}/${version}/${assetPath}`, import.meta.url) : null;
+      return new Response(JSON.stringify(file && fs.existsSync(file) ? [{ status: 'uploaded' }] : []), { status: 200 });
+    }
     const m = /\/storage\/v1\/object\/authenticated\/games\/([^/]+)\/(.+)$/.exec(u.pathname);
     const file = m && DIRS[m[1]] ? new URL(`./${DIRS[m[1]]}/${m[2]}`, import.meta.url) : null;
     if (file && fs.existsSync(file)) return new Response(fs.readFileSync(file));

@@ -100,7 +100,7 @@ const SCRIPT_EXTENSIONS = new Set<UploadExtension>(['js', 'mjs']);
 
 export type StoredAssetType = ExpectedType | 'wasm';
 
-function isUploadExtension(ext: string): ext is UploadExtension {
+export function isUploadExtension(ext: string): ext is UploadExtension {
   return Object.prototype.hasOwnProperty.call(UPLOAD_MIME, ext);
 }
 
@@ -123,26 +123,26 @@ function isDecodedTraversal(value: string): boolean {
  * or a traversal that appears only after percent-decoding (`%252e%252e` → `..`).
  * Literal `../` is left for the path check so the upload page can still flash it.
  */
-export function assetPathRejection(raw: string): { status: 400; message: string } | null {
-  if (/%(?![0-9A-Fa-f]{2})/.test(raw)) return { status: 400, message: ASSET_UPLOAD_MESSAGES.encoding };
-  if (hasControlChar(raw)) return { status: 400, message: ASSET_UPLOAD_MESSAGES.control };
+export function assetPathRejection(raw: string): { status: 400; code: 'encoding' | 'control' | 'path'; message: string } | null {
+  if (/%(?![0-9A-Fa-f]{2})/.test(raw)) return { status: 400, code: 'encoding', message: ASSET_UPLOAD_MESSAGES.encoding };
+  if (hasControlChar(raw)) return { status: 400, code: 'control', message: ASSET_UPLOAD_MESSAGES.control };
   let decoded = raw;
   for (let pass = 0; pass < 8 && /%[0-9A-Fa-f]{2}/.test(decoded); pass++) {
     let next: string;
     try {
       next = decodeURIComponent(decoded);
     } catch {
-      return { status: 400, message: ASSET_UPLOAD_MESSAGES.encoding };
+      return { status: 400, code: 'encoding', message: ASSET_UPLOAD_MESSAGES.encoding };
     }
     if (next === decoded) break;
     decoded = next;
-    if (hasControlChar(decoded)) return { status: 400, message: ASSET_UPLOAD_MESSAGES.control };
-    if (isDecodedTraversal(decoded)) return { status: 400, message: ASSET_UPLOAD_MESSAGES.path };
+    if (hasControlChar(decoded)) return { status: 400, code: 'control', message: ASSET_UPLOAD_MESSAGES.control };
+    if (isDecodedTraversal(decoded)) return { status: 400, code: 'path', message: ASSET_UPLOAD_MESSAGES.path };
   }
   return null;
 }
 
-function hasControlChar(value: string): boolean {
+export function hasControlChar(value: string): boolean {
   for (let i = 0; i < value.length; i++) {
     const c = value.charCodeAt(i);
     if (c <= 0x1f || c === 0x7f) return true;
@@ -157,6 +157,15 @@ export function createAssetUploadLimiter(now?: () => number) {
 }
 
 export const assetUploadsByUser = createAssetUploadLimiter();
+
+/**
+ * What the version total becomes if `incomingBytes` join: code plus every uploaded asset,
+ * minus the bytes of the file being replaced. Shared by the direct upload and the signed-upload
+ * sign/finalize checks so the 4 MB rule has one source of truth.
+ */
+export function versionBytesAfterUpload(codeBytes: number, uploadedBytes: number, previousBytes: number, incomingBytes: number): number {
+  return Math.max(0, codeBytes) + Math.max(0, uploadedBytes - previousBytes) + incomingBytes;
+}
 
 export function gameTooBigMessage(totalBytes: number): string {
   return `This file would bring your game to ${formatGameMb(totalBytes)} MB; the whole game, code plus assets, must stay under 4 MB`;
@@ -213,7 +222,7 @@ export interface AssessAssetInput {
 export type AssetUploadDecision =
   | { kind: 'login' }
   | { kind: 'not-found' }
-  | { kind: 'bad-request'; status: 400; message: string }
+  | { kind: 'bad-request'; status: 400; code: 'encoding' | 'control' | 'path'; message: string }
   | { kind: 'flash'; code: AssetFlashCode }
   | {
       kind: 'reject';
@@ -254,14 +263,14 @@ export function assessAssetUpload(input: AssessAssetInput): AssetUploadDecision 
   if (!input.userId) return { kind: 'login' };
   if (!input.ownerId || input.userId !== input.ownerId) return { kind: 'not-found' };
   const pathError = assetPathRejection(input.rawPath);
-  if (pathError) return { kind: 'bad-request', status: 400, message: pathError.message };
+  if (pathError) return { kind: 'bad-request', status: 400, code: pathError.code, message: pathError.message };
   if (!input.rateAllowed) return { kind: 'flash', code: 'rate' };
   if (input.bytes.byteLength === 0) return { kind: 'flash', code: 'empty' };
 
   const canonical = canonicalAssetPath(input.rawPath);
   if (canonical.kind !== 'path') return { kind: 'flash', code: 'path' };
   const path = canonical.path;
-  if (hasControlChar(path)) return { kind: 'bad-request', status: 400, message: ASSET_UPLOAD_MESSAGES.control };
+  if (hasControlChar(path)) return { kind: 'bad-request', status: 400, code: 'control', message: ASSET_UPLOAD_MESSAGES.control };
 
   const ext = extensionOf(path);
   if (!isUploadExtension(ext)) return { kind: 'flash', code: 'path' };
@@ -297,7 +306,7 @@ export function assessAssetUpload(input: AssessAssetInput): AssetUploadDecision 
   }
 
   const previous = row?.status === 'uploaded' ? (row.sizeBytes ?? 0) : 0;
-  const nextTotal = Math.max(0, input.codeBytes) + Math.max(0, input.uploadedBytes - previous) + input.bytes.byteLength;
+  const nextTotal = versionBytesAfterUpload(input.codeBytes, input.uploadedBytes, previous, input.bytes.byteLength);
   if (nextTotal > GAME_VERSION_MAX_BYTES) {
     return rejectRow(path, expectedType, source, 'too-big', gameTooBigMessage(nextTotal), { totalBytes: nextTotal });
   }
@@ -529,6 +538,53 @@ export async function saveAssetDecision(
   if (previous?.status === 'rejected') {
     const removed = await storage.remove(objectPath);
     if (removed.error) return { ok: false, code: 'storage' };
+  }
+  await writeAssetRow(sql, {
+    gameId,
+    version,
+    path: decision.path,
+    expectedType: decision.expectedType,
+    status: 'rejected',
+    sizeBytes: null,
+    sha256: null,
+    source: decision.source,
+    rejectReason: decision.message,
+  });
+  return { ok: true };
+}
+
+/**
+ * UP-2a: record the outcome of a signed-upload finalize. On 'store' the scanned bytes are
+ * copied to the served object path (upsert — a legit replacement overwrites the previous
+ * file) and the row marked 'uploaded'; on 'reject' the row is marked 'rejected'. The caller
+ * deletes the staged object — the finalize route removes it on every exit path. A failed
+ * final copy leaves nothing servable and returns the storage error.
+ */
+export async function saveFinalizedAsset(
+  sql: AssetDb,
+  storage: AssetStorage,
+  gameId: string,
+  version: number,
+  decision: Extract<AssetUploadDecision, { kind: 'store' | 'reject' }>,
+  bytes: Uint8Array,
+): Promise<{ ok: true } | { ok: false; code: 'storage' }> {
+  if (decision.kind === 'store') {
+    const objectPath = assetObjectPath(gameId, version, decision.path);
+    if (!objectPath) return { ok: false, code: 'storage' };
+    const put = await storage.upload(objectPath, bytes, decision.contentType);
+    if (put.error) return { ok: false, code: 'storage' };
+    await writeAssetRow(sql, {
+      gameId,
+      version,
+      path: decision.path,
+      expectedType: decision.expectedType,
+      status: 'uploaded',
+      sizeBytes: decision.sizeBytes,
+      sha256: decision.sha256,
+      source: decision.source,
+      rejectReason: null,
+    });
+    return { ok: true };
   }
   await writeAssetRow(sql, {
     gameId,

@@ -1,0 +1,116 @@
+import type { APIRoute } from 'astro';
+import { gameBundleVersion } from '../../../../../lib/server/asset-manifest';
+import { canonicalAssetPath } from '../../../../../lib/server/asset-scan';
+import { parseAssetFinalizeBody, stagedObjectPath } from '../../../../../lib/server/asset-sign';
+import {
+  ASSET_UPLOAD_MESSAGES,
+  assetPathRejection,
+  assetUsage,
+  assessAssetUpload,
+  findGameAsset,
+  saveFinalizedAsset,
+} from '../../../../../lib/server/asset-upload';
+import { SUPABASE_SERVICE_KEY } from '../../../../../lib/server/config';
+import { sql } from '../../../../../lib/server/db';
+import { getGame } from '../../../../../lib/server/games';
+import { bucket } from '../../../../../lib/server/supabase';
+
+const json = (body: unknown, status = 200) =>
+  new Response(JSON.stringify(body), {
+    status,
+    headers: { 'content-type': 'application/json', 'cache-control': 'private, no-store' },
+  });
+
+const deny = (d: { status: number; error: string; message: string }) =>
+  json({ error: d.error, message: d.message }, d.status);
+
+/**
+ * UP-2a: after the browser PUT bytes to the signed URL — which targets a staging object the CDN
+ * can never serve — the server reads the staged bytes, runs the same type/size/content scans the
+ * multipart POST applies, re-checks the caps against the real size, copies them to the asset's
+ * object path and writes the 'uploaded' row. `uploadId` binds the call to one sign call's staged
+ * object. The staged object is deleted in every case.
+ */
+export const POST: APIRoute = async ({ request, params, locals }) => {
+  if (!locals.user) return json({ error: 'unauthorized', message: 'Log in to upload files.' }, 401);
+  const slug = params.slug ?? '';
+  const game = await getGame(slug, { includeUnpublished: true });
+  if (!game || game.ownerId !== locals.user.id) return json({ error: 'not-found', message: 'Not found' }, 404);
+
+  const body = parseAssetFinalizeBody(await request.json().catch(() => null));
+  if (!body) return json({ error: 'bad-request', message: 'Expected JSON {path, uploadId}.' }, 400);
+  const pathError = assetPathRejection(body.path);
+  if (pathError) return json({ error: pathError.code, message: pathError.message }, 400);
+
+  const version = await gameBundleVersion(sql, game.id);
+  const canonical = canonicalAssetPath(body.path);
+  const assetPath = canonical.kind === 'path' ? canonical.path : null;
+  const stagedPath = assetPath ? stagedObjectPath(SUPABASE_SERVICE_KEY, game.id, version, assetPath, body.uploadId) : null;
+  if (!assetPath || !stagedPath) return json({ error: 'not-uploaded', message: 'Nothing was uploaded to that path.' }, 404);
+
+  const stored = await bucket().download(stagedPath);
+  if (stored.error || !stored.data) {
+    const missing = stored.error === null || (typeof stored.error.status === 'number' && stored.error.status < 500);
+    return json(
+      { error: missing ? 'not-uploaded' : 'storage', message: missing ? 'Nothing was uploaded to that path.' : 'The file could not be stored. Try again.' },
+      missing ? 404 : 500,
+    );
+  }
+  const bytes = new Uint8Array(await stored.data.arrayBuffer());
+
+  const storage = {
+    upload: async (path: string, body: Uint8Array, contentType: string) => {
+      const put = await bucket().upload(path, body, { contentType, upsert: true });
+      return { error: put.error ? { message: put.error.message } : null };
+    },
+    remove: async (path: string) => {
+      const removed = await bucket().remove([path]);
+      return { error: removed.error ? { message: removed.error.message } : null };
+    },
+  };
+
+  try {
+    const [existing, usage] = await Promise.all([
+      findGameAsset(sql, game.id, version, assetPath),
+      assetUsage(sql, game.id, version),
+    ]);
+    // Same scan + caps as the multipart upload; adding: true because signing already admitted
+    // the path like the creator "Add file" form. The rate limit was spent at sign time.
+    const decision = assessAssetUpload({
+      userId: locals.user.id,
+      ownerId: game.ownerId,
+      rawPath: body.path,
+      adding: true,
+      bytes,
+      existing,
+      codeBytes: usage.codeBytes,
+      uploadedBytes: usage.uploadedBytes,
+      fileCount: usage.fileCount,
+      rateAllowed: true,
+    });
+
+    if (decision.kind === 'store' || decision.kind === 'reject') {
+      const saved = await saveFinalizedAsset(sql, storage, game.id, version, decision, bytes);
+      if (!saved.ok) return json({ error: 'storage', message: ASSET_UPLOAD_MESSAGES.storage }, 500);
+      if (decision.kind === 'store') {
+        return json({ path: decision.path, sizeBytes: decision.sizeBytes, warning: decision.warning });
+      }
+      return deny({ status: decision.code === 'too-big' ? 413 : 400, error: decision.code, message: decision.message });
+    }
+
+    if (decision.kind === 'bad-request') return deny({ status: 400, error: decision.code, message: decision.message });
+    if (decision.kind === 'login') return deny({ status: 401, error: 'unauthorized', message: 'Log in to upload files.' });
+    if (decision.kind === 'not-found') return deny({ status: 404, error: 'not-found', message: 'Not found' });
+    const status = decision.code === 'cap' ? 409 : decision.code === 'rate' ? 429 : 400;
+    return deny({ status, error: decision.code, message: ASSET_UPLOAD_MESSAGES[decision.code] });
+  } catch (error) {
+    // Fixed body — the real error (a failed usage read, a failed row write) is server-side only.
+    console.error(`Finalize failed for game ${game.id} ${stagedPath}`, error);
+    return json({ error: 'storage', message: ASSET_UPLOAD_MESSAGES.storage }, 500);
+  } finally {
+    // One cleanup site: the staged object is deleted on every exit — success, every denial
+    // ('flash' and 'bad-request' never get a row) and every failure, thrown or returned.
+    const removed = await storage.remove(stagedPath).catch((error: unknown) => ({ error: { message: String(error) } }));
+    if (removed.error) console.error(`Finalize cleanup failed for game ${game.id} ${stagedPath}`, removed.error);
+  }
+};
