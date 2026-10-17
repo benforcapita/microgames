@@ -16,58 +16,17 @@ import { test, expect } from '@playwright/test';
 import { shotPath, SHOT_DIR } from './shots.mjs';
 import { localSupabaseEnv } from '../scripts/lib/local-supabase.mjs';
 import { validateGame } from '../supabase/functions/validate-game/validate.ts';
+import { createRestStore } from '../supabase/functions/validate-game/rest-store.ts';
 
 const FIXTURE = path.join(import.meta.dirname, 'fixtures', 'temple-run');
 const CDN = `http://127.0.0.1:${process.env.E2E_CDN_PORT ?? 4722}`;
+const validationStore = () => { const e = localSupabaseEnv(); return createRestStore(e.PUBLIC_SUPABASE_URL, e.SUPABASE_SECRET_KEY); };
 // The ticket asks for these two screenshots at a fixed place; they are also copied into the usual
 // gitignored e2e screenshot directory so `vmg.sh down` collects them as evidence.
-const OUT_DIR = process.env.TEMPLE_RUN_SHOT_DIR ?? '/workspace/e2e1-shots';
+const OUT_DIR = process.env.TEMPLE_RUN_SHOT_DIR ?? path.join(SHOT_DIR, 'temple-run');
 
 const SPRITES = 8; // assets/sprites/*.png
 const SOUNDS = 4; // assets/audio/*.wav (one music loop + three effects)
-
-/** The Edge Function's Store, backed by the local stack's REST + Storage APIs (same calls as its index.ts). */
-function validationStore(env) {
-  const key = env.SUPABASE_SECRET_KEY;
-  const headers = { apikey: key, Authorization: `Bearer ${key}` };
-  const rest = async (query, init = {}) => {
-    const res = await fetch(`${env.PUBLIC_SUPABASE_URL}/rest/v1/${query}`, {
-      ...init,
-      headers: { ...headers, 'Content-Type': 'application/json', ...init.headers },
-    });
-    if (!res.ok) throw new Error(`${query}: HTTP ${res.status} ${await res.text()}`);
-    return res.json();
-  };
-  const eq = (value) => `eq.${encodeURIComponent(value)}`;
-  return {
-    async gameStage(gameId) {
-      const [row] = await rest(`games?select=stage&id=${eq(gameId)}`);
-      return row?.stage ?? null;
-    },
-    async bundle(gameId) {
-      const res = await fetch(`${env.PUBLIC_SUPABASE_URL}/storage/v1/object/games/${gameId}/index.html`, { headers });
-      return res.ok ? new Uint8Array(await res.arrayBuffer()) : null;
-    },
-    async findValidation(gameId, sha256) {
-      const [row] = await rest(`game_validations?select=id,status,bundle_sha256,version&game_id=${eq(gameId)}&bundle_sha256=${eq(sha256)}`);
-      return row ?? null;
-    },
-    async recordValidation({ gameId, sha256, status, report }) {
-      const [row] = await rest('rpc/record_game_validation', {
-        method: 'POST',
-        body: JSON.stringify({ p_game_id: gameId, p_sha256: sha256, p_status: status, p_report: report }),
-      });
-      return row ? { row, stage: row.stage } : null;
-    },
-    async applyStoredVerdict(gameId, sha256) {
-      const [row] = await rest('rpc/apply_stored_validation', {
-        method: 'POST',
-        body: JSON.stringify({ p_game_id: gameId, p_sha256: sha256 }),
-      });
-      return row?.stage ?? null;
-    },
-  };
-}
 
 /** The game document inside the sandboxed, opaque-origin CDN iframe (served at its versioned URL). */
 function gameFrame(page, gameId) {
@@ -160,7 +119,7 @@ test('Temple Dash: upload form -> validation passes -> plays on the CDN -> fulls
   await test.step('validation finishes with a pass and no missing-asset warnings', async () => {
     await expect(page.locator('#submission .badge.pending')).toHaveText('Pending');
 
-    const result = await validateGame(validationStore(localSupabaseEnv()), gameId);
+    const result = await validateGame(validationStore(), gameId);
     expect(result.httpStatus, JSON.stringify(result.body)).toBe(200);
     expect(result.body.status).toBe('passed');
     expect(result.body.failed).toEqual([]);

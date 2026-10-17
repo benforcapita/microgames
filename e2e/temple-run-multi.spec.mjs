@@ -8,15 +8,17 @@
 // own module runs in-process against the real Storage bundle and the real record_game_validation
 // RPC (the local stack has no edge-runtime), so the verdict and stage change are production code.
 import { mkdirSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
+import { copyFile, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { test, expect } from '@playwright/test';
 import { shotPath, SHOT_DIR } from './shots.mjs';
 import { localSupabaseEnv } from '../scripts/lib/local-supabase.mjs';
 import { validateGame } from '../supabase/functions/validate-game/validate.ts';
+import { createRestStore } from '../supabase/functions/validate-game/rest-store.ts';
 
 const FIXTURE = path.join(import.meta.dirname, 'fixtures', 'temple-run-multi');
 const CDN = `http://127.0.0.1:${process.env.E2E_CDN_PORT ?? 4722}`;
+const validationStore = () => { const e = localSupabaseEnv(); return createRestStore(e.PUBLIC_SUPABASE_URL, e.SUPABASE_SECRET_KEY); };
 
 // The twelve separate files the game fetches, relative to the document's versioned URL.
 const SPRITES = [
@@ -31,49 +33,7 @@ const SPRITES = [
 ];
 const SOUNDS = ['audio/music-loop.wav', 'audio/sfx-coin.wav', 'audio/sfx-hit.wav', 'audio/sfx-jump.wav'];
 const ASSET_FILES = [...SOUNDS, ...SPRITES];
-
-/** The Edge Function's Store, backed by the local stack's REST + Storage APIs (same calls as its index.ts). */
-function validationStore(env) {
-  const key = env.SUPABASE_SECRET_KEY;
-  const headers = { apikey: key, Authorization: `Bearer ${key}` };
-  const rest = async (query, init = {}) => {
-    const res = await fetch(`${env.PUBLIC_SUPABASE_URL}/rest/v1/${query}`, {
-      ...init,
-      headers: { ...headers, 'Content-Type': 'application/json', ...init.headers },
-    });
-    if (!res.ok) throw new Error(`${query}: HTTP ${res.status} ${await res.text()}`);
-    return res.json();
-  };
-  const eq = (value) => `eq.${encodeURIComponent(value)}`;
-  return {
-    async gameStage(gameId) {
-      const [row] = await rest(`games?select=stage&id=${eq(gameId)}`);
-      return row?.stage ?? null;
-    },
-    async bundle(gameId) {
-      const res = await fetch(`${env.PUBLIC_SUPABASE_URL}/storage/v1/object/games/${gameId}/index.html`, { headers });
-      return res.ok ? new Uint8Array(await res.arrayBuffer()) : null;
-    },
-    async findValidation(gameId, sha256) {
-      const [row] = await rest(`game_validations?select=id,status,bundle_sha256,version&game_id=${eq(gameId)}&bundle_sha256=${eq(sha256)}`);
-      return row ?? null;
-    },
-    async recordValidation({ gameId, sha256, status, report }) {
-      const [row] = await rest('rpc/record_game_validation', {
-        method: 'POST',
-        body: JSON.stringify({ p_game_id: gameId, p_sha256: sha256, p_status: status, p_report: report }),
-      });
-      return row ? { row, stage: row.stage } : null;
-    },
-    async applyStoredVerdict(gameId, sha256) {
-      const [row] = await rest('rpc/apply_stored_validation', {
-        method: 'POST',
-        body: JSON.stringify({ p_game_id: gameId, p_sha256: sha256 }),
-      });
-      return row?.stage ?? null;
-    },
-  };
-}
+const OUT_DIR = process.env.TEMPLE_RUN_SHOT_DIR ?? path.join(SHOT_DIR, 'temple-run-multi');
 
 /** The game document inside the sandboxed, opaque-origin CDN iframe (at its versioned URL). */
 function gameFrame(page, gameId) {
@@ -93,8 +53,11 @@ const status = (frame) => frame.evaluate(() => {
 
 async function shot(page, name) {
   mkdirSync(SHOT_DIR, { recursive: true });
+  mkdirSync(OUT_DIR, { recursive: true });
   await page.screenshot({ path: shotPath(`up-1-${name}`) });
-  return shotPath(`up-1-${name}`);
+  const copy = path.join(OUT_DIR, `up-1-${name}`);
+  await copyFile(shotPath(`up-1-${name}`), copy);
+  return copy;
 }
 
 test('Temple Dash multi-file: upload, add files on the Files page, every asset loads on play', async ({ page }) => {
@@ -166,7 +129,7 @@ test('Temple Dash multi-file: upload, add files on the Files page, every asset l
   });
 
   await test.step('validation finishes with a pass', async () => {
-    const result = await validateGame(validationStore(localSupabaseEnv()), gameId);
+    const result = await validateGame(validationStore(), gameId);
     expect(result.httpStatus, JSON.stringify(result.body)).toBe(200);
     expect(result.body.status).toBe('passed');
     expect(result.body.failed).toEqual([]);
