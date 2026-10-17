@@ -10,6 +10,7 @@
  * The checks reuse asset-upload.ts (paths, caps, limiter) so the two upload paths apply
  * identical rules; only the transport differs.
  */
+import crypto from 'node:crypto';
 import { canonicalAssetPath, extensionOf } from './asset-scan.ts';
 import {
   ASSET_UPLOAD_MESSAGES,
@@ -42,11 +43,53 @@ export function parseAssetSignBody(body: unknown): AssetSignBody | null {
   return { path: raw.path, sizeBytes: raw.size, contentType: raw.contentType };
 }
 
-export function parseAssetFinalizeBody(body: unknown): { path: string } | null {
+export function parseAssetFinalizeBody(body: unknown): { path: string; uploadId: string } | null {
   if (!body || typeof body !== 'object') return null;
   const raw = body as Record<string, unknown>;
   if (typeof raw.path !== 'string' || raw.path.length === 0 || raw.path.length > 512) return null;
-  return { path: raw.path };
+  if (typeof raw.uploadId !== 'string' || raw.uploadId.length === 0 || raw.uploadId.length > 256) return null;
+  return { path: raw.path, uploadId: raw.uploadId };
+}
+
+// --- Staged uploads -----------------------------------------------------------
+//
+// A signed URL may never target a path the CDN serves: whoever holds the URL could PUT unscanned
+// bytes straight onto the vetted object and skip finalize. Signed URLs therefore write to a
+// private staging object, `<game>/_staging/<nonce>` — a version segment the CDN path parser can
+// never accept (only `\d{1,9}` parses) — and finalize copies the scanned bytes to the real path.
+//
+// The opaque `uploadId` binds a staged object to its sign call so finalize cannot be pointed at
+// another staged object: `<nonce>.<base64url hmac(game, version, path, nonce)>`. The secret is
+// injected so this module stays pure (the endpoint passes SUPABASE_SERVICE_KEY).
+
+const UPLOAD_ID_SCOPE = 'mg-asset-upload-v1';
+const NONCE_RE = /^[A-Za-z0-9_-]{16,32}$/;
+const UPLOAD_ID_RE = /^([A-Za-z0-9_-]{16,32})\.([A-Za-z0-9_-]{43})$/;
+const GAME_ID_RE = /^[A-Za-z0-9_-]{6,16}$/;
+
+function uploadIdSignature(secret: string, gameId: string, version: number, path: string, nonce: string): string {
+  return crypto.createHmac('sha256', secret).update(`${UPLOAD_ID_SCOPE}:${gameId}:${version}:${path}:${nonce}`).digest('base64url');
+}
+
+export function mintAssetUploadId(secret: string, gameId: string, version: number, path: string): { uploadId: string; nonce: string } {
+  const nonce = crypto.randomBytes(12).toString('base64url');
+  return { uploadId: `${nonce}.${uploadIdSignature(secret, gameId, version, path, nonce)}`, nonce };
+}
+
+/**
+ * The staged object key for a finalize call, or null when the uploadId is absent, malformed,
+ * not bound to this game/version/path, or unsafe to join. A verified nonce is the only way in.
+ */
+export function stagedObjectPath(secret: string, gameId: string, version: number, path: string, uploadId: string): string | null {
+  if (!GAME_ID_RE.test(gameId) || !Number.isInteger(version) || version < 1) return null;
+  const m = UPLOAD_ID_RE.exec(uploadId);
+  if (!m) return null;
+  const [nonce, sig] = [m[1], m[2]];
+  if (!NONCE_RE.test(nonce)) return null;
+  const want = Buffer.from(uploadIdSignature(secret, gameId, version, path, nonce));
+  const got = Buffer.from(sig);
+  if (want.length !== got.length || !crypto.timingSafeEqual(want, got)) return null;
+  return `${gameId}/_staging/${nonce}`;
 }
 
 /** Every denial is `{error}` plus an HTTP status, so the route shells stay thin. */

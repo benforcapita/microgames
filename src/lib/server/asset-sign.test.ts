@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { GAME_VERSION_MAX_BYTES, MAX_ASSET_FILES, type AssetUsage } from './asset-upload.ts';
-import { assessAssetSign, parseAssetFinalizeBody, parseAssetSignBody } from './asset-sign.ts';
+import { assessAssetSign, mintAssetUploadId, parseAssetFinalizeBody, parseAssetSignBody, stagedObjectPath } from './asset-sign.ts';
 
 const OWNER = 'owner-1';
 const usage = (over: Partial<AssetUsage> = {}): AssetUsage => ({ codeBytes: 1000, uploadedBytes: 2000, fileCount: 3, ...over });
@@ -35,9 +35,44 @@ describe('UP-2a parseAssetSignBody', () => {
     ]) {
       assert.equal(parseAssetSignBody(bad), null, JSON.stringify(bad));
     }
-    assert.deepEqual(parseAssetFinalizeBody({ path: 'a.png' }), { path: 'a.png' });
-    assert.equal(parseAssetFinalizeBody({ path: 4 }), null);
+    assert.deepEqual(parseAssetFinalizeBody({ path: 'a.png', uploadId: 'u' }), { path: 'a.png', uploadId: 'u' });
+    assert.equal(parseAssetFinalizeBody({ path: 'a.png' }), null);
+    assert.equal(parseAssetFinalizeBody({ path: 4, uploadId: 'u' }), null);
+    assert.equal(parseAssetFinalizeBody({ path: 'a.png', uploadId: 4 }), null);
     assert.equal(parseAssetFinalizeBody(null), null);
+  });
+});
+
+describe('UP-2a uploadId binding and staging path', () => {
+  const SECRET = 'test-service-key';
+  it('mints an uploadId that resolves to the staged object for the same game/version/path', () => {
+    const { uploadId, nonce } = mintAssetUploadId(SECRET, 'gameId01', 3, 'sfx/jump.wav');
+    assert.match(uploadId, /^[A-Za-z0-9_-]{16}\.[A-Za-z0-9_-]{43}$/);
+    assert.equal(stagedObjectPath(SECRET, 'gameId01', 3, 'sfx/jump.wav', uploadId), `gameId01/_staging/${nonce}`);
+  });
+  it('rejects a tampered, foreign, malformed or wrong-secret uploadId', () => {
+    const { uploadId } = mintAssetUploadId(SECRET, 'gameId01', 1, 'sfx/jump.wav');
+    const [nonce, sig] = uploadId.split('.');
+    for (const bad of [
+      `${nonce}.${sig.slice(0, -1)}${sig.endsWith('A') ? 'B' : 'A'}`, // tampered signature
+      `${nonce.slice(0, -1)}${nonce.endsWith('A') ? 'B' : 'A'}.${sig}`, // tampered nonce
+      'no-dot', `${nonce}`, `..${sig}`, `${nonce}.`, `.${sig}`,
+    ]) {
+      assert.equal(stagedObjectPath(SECRET, 'gameId01', 1, 'sfx/jump.wav', bad), null, bad);
+    }
+    // Bound to (game, version, path): none of these may resolve.
+    assert.equal(stagedObjectPath(SECRET, 'gameId01', 1, 'sfx/other.wav', uploadId), null);
+    assert.equal(stagedObjectPath(SECRET, 'gameId01', 2, 'sfx/jump.wav', uploadId), null);
+    assert.equal(stagedObjectPath(SECRET, 'othergm1', 1, 'sfx/jump.wav', uploadId), null);
+    assert.equal(stagedObjectPath('wrong-secret', 'gameId01', 1, 'sfx/jump.wav', uploadId), null);
+    // Unsafe to join: ids and nonces outside the charset never reach Storage.
+    assert.equal(stagedObjectPath(SECRET, '../evil', 1, 'sfx/jump.wav', uploadId), null);
+    assert.equal(stagedObjectPath(SECRET, 'gameId01', 0, 'sfx/jump.wav', uploadId), null);
+  });
+  it('the staging prefix is outside anything the CDN maps (version must be numeric)', () => {
+    const path = stagedObjectPath(SECRET, 'gameId01', 1, 'x.png', mintAssetUploadId(SECRET, 'gameId01', 1, 'x.png').uploadId);
+    assert.ok(path !== null && path.startsWith('gameId01/_staging/'), 'staged key under the game prefix');
+    assert.doesNotMatch(path.split('/')[1], /^\d{1,9}$/);
   });
 });
 

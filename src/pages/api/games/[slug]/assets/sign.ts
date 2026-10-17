@@ -1,13 +1,13 @@
 import type { APIRoute } from 'astro';
 import { gameBundleVersion } from '../../../../../lib/server/asset-manifest';
 import { canonicalAssetPath } from '../../../../../lib/server/asset-scan';
-import { assessAssetSign, parseAssetSignBody } from '../../../../../lib/server/asset-sign';
+import { assessAssetSign, mintAssetUploadId, parseAssetSignBody } from '../../../../../lib/server/asset-sign';
 import {
-  assetObjectPath,
   assetUploadsByUser,
   assetUsage,
   findGameAsset,
 } from '../../../../../lib/server/asset-upload';
+import { SUPABASE_SERVICE_KEY } from '../../../../../lib/server/config';
 import { sql } from '../../../../../lib/server/db';
 import { getGame } from '../../../../../lib/server/games';
 import { bucket } from '../../../../../lib/server/supabase';
@@ -51,20 +51,24 @@ export const POST: APIRoute = async ({ request, params, locals }) => {
   });
   if (!decision.ok) return json({ error: decision.error, message: decision.message }, decision.status);
 
-  // One object key per asset: <game>/<version>/<path>. The signed URL authorizes exactly that.
-  const objectPath = assetObjectPath(game.id, version, decision.path);
-  if (!objectPath) return json({ error: 'path', message: 'That path is not allowed.' }, 400);
-  const signed = await bucket().createSignedUploadUrl(objectPath, { upsert: true });
+  // One staging object per sign call: <game>/_staging/<nonce>. A signed URL must never write a
+  // path the CDN serves (whoever held it could overwrite vetted bytes and skip the scan), so it
+  // authorizes exactly the staged key and nothing else. The opaque uploadId binds this staged
+  // object to this game/version/path for finalize.
+  const { uploadId, nonce } = mintAssetUploadId(SUPABASE_SERVICE_KEY, game.id, version, decision.path);
+  const stagedPath = `${game.id}/_staging/${nonce}`;
+  const signed = await bucket().createSignedUploadUrl(stagedPath, { upsert: false });
   if (signed.error || !signed.data) {
     console.error(`Signed upload URL failed for game ${game.id}`, signed.error);
     return json({ error: 'storage', message: 'The file could not be stored. Try again.' }, 500);
   }
   return json({
     path: decision.path,
-    objectPath,
+    uploadId,
+    uploadPath: stagedPath,
     version,
     url: signed.data.signedUrl,
     token: signed.data.token,
-    upsert: true,
+    upsert: false,
   });
 };

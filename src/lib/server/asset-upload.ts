@@ -554,22 +554,29 @@ export async function saveAssetDecision(
 }
 
 /**
- * UP-2a: record the outcome of a signed-upload finalize. The bytes are already in the bucket
- * (the browser PUT them straight to the signed URL), so 'store' only writes the row — the CDN
- * serves the object once the row says 'uploaded'. On 'reject' the unvetted object is deleted
- * unconditionally: a signed PUT may have overwritten a previously uploaded file, so unlike
- * saveAssetDecision there is no good object to preserve and the row is marked 'rejected' either
- * way. The row is written before the delete so a removal failure can never leave an 'uploaded'
- * row pointing at bytes the scan refused.
+ * UP-2a: record the outcome of a signed-upload finalize. The unvetted bytes sit at a staging
+ * key the CDN never maps; on 'store' the scanned bytes are copied to the served object path
+ * (upsert — a legit replacement overwrites the previous file) and the row marked 'uploaded',
+ * on 'reject' the row is marked 'rejected'. The staged object is deleted in every case — an
+ * orphaned staging object is inert (unserved, uncounted) but still garbage. A failed final
+ * copy leaves nothing servable and returns the storage error.
  */
 export async function saveFinalizedAsset(
   sql: AssetDb,
-  storage: Pick<AssetStorage, 'remove'>,
+  storage: AssetStorage,
   gameId: string,
   version: number,
   decision: Extract<AssetUploadDecision, { kind: 'store' | 'reject' }>,
+  staged: { path: string; bytes: Uint8Array },
 ): Promise<{ ok: true } | { ok: false; code: 'storage' }> {
   if (decision.kind === 'store') {
+    const objectPath = assetObjectPath(gameId, version, decision.path);
+    if (!objectPath) return { ok: false, code: 'storage' };
+    const put = await storage.upload(objectPath, staged.bytes, decision.contentType);
+    if (put.error) {
+      await storage.remove(staged.path).catch(() => ({ error: null }));
+      return { ok: false, code: 'storage' };
+    }
     await writeAssetRow(sql, {
       gameId,
       version,
@@ -581,6 +588,7 @@ export async function saveFinalizedAsset(
       source: decision.source,
       rejectReason: null,
     });
+    await storage.remove(staged.path).catch(() => ({ error: null }));
     return { ok: true };
   }
   await writeAssetRow(sql, {
@@ -594,8 +602,6 @@ export async function saveFinalizedAsset(
     source: decision.source,
     rejectReason: decision.message,
   });
-  const objectPath = assetObjectPath(gameId, version, decision.path);
-  if (!objectPath) return { ok: false, code: 'storage' };
-  const removed = await storage.remove(objectPath);
+  const removed = await storage.remove(staged.path);
   return removed.error ? { ok: false, code: 'storage' } : { ok: true };
 }

@@ -1,16 +1,16 @@
 import type { APIRoute } from 'astro';
 import { gameBundleVersion } from '../../../../../lib/server/asset-manifest';
 import { canonicalAssetPath } from '../../../../../lib/server/asset-scan';
-import { parseAssetFinalizeBody } from '../../../../../lib/server/asset-sign';
+import { parseAssetFinalizeBody, stagedObjectPath } from '../../../../../lib/server/asset-sign';
 import {
   ASSET_UPLOAD_MESSAGES,
-  assetObjectPath,
   assetPathRejection,
   assetUsage,
   assessAssetUpload,
   findGameAsset,
   saveFinalizedAsset,
 } from '../../../../../lib/server/asset-upload';
+import { SUPABASE_SERVICE_KEY } from '../../../../../lib/server/config';
 import { sql } from '../../../../../lib/server/db';
 import { getGame } from '../../../../../lib/server/games';
 import { bucket } from '../../../../../lib/server/supabase';
@@ -25,10 +25,11 @@ const deny = (d: { status: number; error: string; message: string }) =>
   json({ error: d.error, message: d.message }, d.status);
 
 /**
- * UP-2a: after the browser PUT bytes to the signed URL, the server reads the stored object back,
- * runs the same type/size/content scans the multipart POST applies, re-checks the caps against
- * the real size, and only then writes the manifest row. Any failure deletes the stored object —
- * until a row says 'uploaded' the CDN will not serve it and the caps do not count it.
+ * UP-2a: after the browser PUT bytes to the signed URL — which targets a staging object the CDN
+ * can never serve — the server reads the staged bytes, runs the same type/size/content scans the
+ * multipart POST applies, re-checks the caps against the real size, copies them to the asset's
+ * object path and writes the 'uploaded' row. `uploadId` binds the call to one sign call's staged
+ * object. The staged object is deleted in every case.
  */
 export const POST: APIRoute = async ({ request, params, locals }) => {
   if (!locals.user) return json({ error: 'unauthorized', message: 'Log in to upload files.' }, 401);
@@ -37,17 +38,17 @@ export const POST: APIRoute = async ({ request, params, locals }) => {
   if (!game || game.ownerId !== locals.user.id) return json({ error: 'not-found', message: 'Not found' }, 404);
 
   const body = parseAssetFinalizeBody(await request.json().catch(() => null));
-  if (!body) return json({ error: 'bad-request', message: 'Expected JSON {path}.' }, 400);
+  if (!body) return json({ error: 'bad-request', message: 'Expected JSON {path, uploadId}.' }, 400);
   const pathError = assetPathRejection(body.path);
   if (pathError) return json({ error: pathError.code, message: pathError.message }, 400);
 
   const version = await gameBundleVersion(sql, game.id);
   const canonical = canonicalAssetPath(body.path);
   const assetPath = canonical.kind === 'path' ? canonical.path : null;
-  const objectPath = assetPath ? assetObjectPath(game.id, version, assetPath) : null;
-  if (!assetPath || !objectPath) return json({ error: 'path', message: ASSET_UPLOAD_MESSAGES.path }, 400);
+  const stagedPath = assetPath ? stagedObjectPath(SUPABASE_SERVICE_KEY, game.id, version, assetPath, body.uploadId) : null;
+  if (!assetPath || !stagedPath) return json({ error: 'not-uploaded', message: 'Nothing was uploaded to that path.' }, 404);
 
-  const stored = await bucket().download(objectPath);
+  const stored = await bucket().download(stagedPath);
   if (stored.error || !stored.data) {
     const missing = stored.error === null || (typeof stored.error.status === 'number' && stored.error.status < 500);
     return json(
@@ -57,9 +58,15 @@ export const POST: APIRoute = async ({ request, params, locals }) => {
   }
   const bytes = new Uint8Array(await stored.data.arrayBuffer());
 
-  const remove = async (path: string) => {
-    const removed = await bucket().remove([path]);
-    return { error: removed.error ? { message: removed.error.message } : null };
+  const storage = {
+    upload: async (path: string, body: Uint8Array, contentType: string) => {
+      const put = await bucket().upload(path, body, { contentType, upsert: true });
+      return { error: put.error ? { message: put.error.message } : null };
+    },
+    remove: async (path: string) => {
+      const removed = await bucket().remove([path]);
+      return { error: removed.error ? { message: removed.error.message } : null };
+    },
   };
 
   const [existing, usage] = await Promise.all([
@@ -82,7 +89,7 @@ export const POST: APIRoute = async ({ request, params, locals }) => {
   });
 
   if (decision.kind === 'store' || decision.kind === 'reject') {
-    const saved = await saveFinalizedAsset(sql, { remove }, game.id, version, decision);
+    const saved = await saveFinalizedAsset(sql, storage, game.id, version, decision, { path: stagedPath, bytes });
     if (!saved.ok) return json({ error: 'storage', message: ASSET_UPLOAD_MESSAGES.storage }, 500);
     if (decision.kind === 'store') {
       return json({ path: decision.path, sizeBytes: decision.sizeBytes, warning: decision.warning });
@@ -90,9 +97,9 @@ export const POST: APIRoute = async ({ request, params, locals }) => {
     return deny({ status: decision.code === 'too-big' ? 413 : 400, error: decision.code, message: decision.message });
   }
 
-  // 'flash' and 'bad-request' decisions never get a row; the unvetted object still has to go.
-  const removed = await remove(objectPath);
-  if (removed.error) console.error(`Finalize cleanup failed for game ${game.id} ${objectPath}`, removed.error);
+  // 'flash' and 'bad-request' decisions never get a row; the staged object still has to go.
+  const removed = await storage.remove(stagedPath);
+  if (removed.error) console.error(`Finalize cleanup failed for game ${game.id} ${stagedPath}`, removed.error);
   if (decision.kind === 'bad-request') return deny({ status: 400, error: decision.code, message: decision.message });
   if (decision.kind === 'login') return deny({ status: 401, error: 'unauthorized', message: 'Log in to upload files.' });
   if (decision.kind === 'not-found') return deny({ status: 404, error: 'not-found', message: 'Not found' });

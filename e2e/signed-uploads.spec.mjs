@@ -84,8 +84,11 @@ test('UP-2a sign: anonymous 401, non-owner 404, owner 200', async () => {
   const ok = await sign(owner, game.slug, body);
   expect(ok.status()).toBe(200);
   const data = await ok.json();
-  expect(data.url).toContain(`/object/upload/sign/games/${game.id}/1/sfx/jump.wav`);
+  // The signed URL writes a staging object, never the served path.
+  expect(data.url).toContain(`/object/upload/sign/games/${game.id}/_staging/`);
+  expect(data.url).not.toContain(`/${game.id}/1/sfx/jump.wav`);
   expect(data.token).toBeTruthy();
+  expect(data.uploadId).toBeTruthy();
   await Promise.all([owner, other, anon].map((c) => c.dispose()));
 });
 
@@ -94,16 +97,17 @@ test('UP-2a signed URL writes exactly one path', async () => {
   await signup(c, 'one');
   const game = await uploadGame(c, `UP2a single ${Date.now()}`);
   const r = await sign(c, game.slug, { path: 'sfx/a.wav', size: SMALL_WAV.length, contentType: 'audio/wav' });
-  const { url, token } = await r.json();
+  const { url, token, uploadPath } = await r.json();
+  expect(uploadPath).toMatch(new RegExp(`^${game.id}/_staging/`));
 
   expect((await putSigned(url, SMALL_WAV, 'audio/wav')).status).toBe(200);
-  expect(await objectExists(`${game.id}/1/sfx/a.wav`)).toBe(true);
+  expect(await objectExists(uploadPath)).toBe(true);
 
   // Same token, different object path -> the signature binds the path.
-  const otherPath = url.replace('/sfx/a.wav', '/sfx/b.wav');
+  const otherPath = url.replace(`/${uploadPath.split('/').pop()}`, `/deadbeefdeadbeef`);
   const bad = await putSigned(otherPath, SMALL_WAV, 'audio/wav');
   expect([400, 403]).toContain(bad.status);
-  expect(await objectExists(`${game.id}/1/sfx/b.wav`)).toBe(false);
+  expect(await objectExists(`${game.id}/_staging/deadbeefdeadbeef`)).toBe(false);
 
   // The token cannot be replayed through the client API on another path either.
   const viaApi = await service.storage.from('games').uploadToSignedUrl('other/x.png', token, PNG);
@@ -118,22 +122,24 @@ test('UP-2a finalize rejects a bad file and deletes the stored object', async ()
   await sql`update public.games set stage = 'proving' where id = ${game.id}`;
 
   const s = await sign(c, game.slug, { path: 'sprites/evil.png', size: SVG.length, contentType: 'image/png' });
-  const { url } = await s.json();
+  const { url, uploadId, uploadPath } = await s.json();
   expect((await putSigned(url, SVG, 'image/png')).status).toBe(200);
 
-  const f = await finalize(c, game.slug, { path: 'sprites/evil.png' });
+  const f = await finalize(c, game.slug, { path: 'sprites/evil.png', uploadId });
   expect(f.status()).toBe(400);
   const body = await f.json();
   expect(['markup', 'type', 'extension', 'mismatch']).toContain(body.error);
 
-  const key = `${game.id}/1/sprites/evil.png`;
-  expect(await objectExists(key), 'unvetted bytes must be deleted').toBe(false);
+  expect(await objectExists(uploadPath), 'unvetted staged bytes must be deleted').toBe(false);
+  expect(await objectExists(`${game.id}/1/sprites/evil.png`), 'no served object may be written').toBe(false);
   const [row] = await sql`select status from public.game_assets where game_id = ${game.id} and path = 'sprites/evil.png'`;
   expect(row?.status).toBe('rejected');
   expect((await fetch(assetUrl(game.id, 'sprites/evil.png'))).status, 'rejected object is never served').toBe(404);
 
   // Finalize for a path that was signed but never PUT -> 404, no row.
-  const missing = await finalize(c, game.slug, { path: 'sfx/never.wav' });
+  const s2 = await sign(c, game.slug, { path: 'sfx/never.wav', size: 10, contentType: 'audio/wav' });
+  const two = await s2.json();
+  const missing = await finalize(c, game.slug, { path: 'sfx/never.wav', uploadId: two.uploadId });
   expect(missing.status()).toBe(404);
   await c.dispose();
 });
@@ -155,15 +161,16 @@ test('UP-2a caps: file-count and 4 MB enforced at both sign and finalize', async
   const second = await sign(c, game.slug, { path: 'two.wav', size: SMALL_WAV.length, contentType: 'audio/wav' });
   expect(second.status(), 'sign is per-path; a second pending path is still legal').toBe(200);
 
-  const { url: url1 } = await ok.json();
-  const { url: url2 } = await second.json();
-  await putSigned(url1, SMALL_WAV, 'audio/wav');
-  await putSigned(url2, SMALL_WAV, 'audio/wav');
+  const one = await ok.json();
+  const two = await second.json();
+  await putSigned(one.url, SMALL_WAV, 'audio/wav');
+  await putSigned(two.url, SMALL_WAV, 'audio/wav');
 
-  expect((await finalize(c, game.slug, { path: 'one.wav' })).status()).toBe(200); // row 200
-  const capped = await finalize(c, game.slug, { path: 'two.wav' });
+  expect((await finalize(c, game.slug, { path: 'one.wav', uploadId: one.uploadId })).status()).toBe(200); // row 200
+  const capped = await finalize(c, game.slug, { path: 'two.wav', uploadId: two.uploadId });
   expect(capped.status()).toBe(409);
   expect((await capped.json()).error).toBe('cap');
+  expect(await objectExists(two.uploadPath), 'staged object deleted on cap').toBe(false);
   expect(await objectExists(`${game.id}/1/two.wav`)).toBe(false);
 
   const denied = await sign(c, game.slug, { path: 'three.wav', size: 10, contentType: 'audio/wav' });
@@ -181,12 +188,13 @@ test('UP-2a caps: file-count and 4 MB enforced at both sign and finalize', async
   // Lying about the size is caught at finalize on the real bytes.
   const lie = await sign(c, gameB.slug, { path: 'lie.wav', size: 100, contentType: 'audio/wav' });
   expect(lie.status(), 'declared small so signing passes').toBe(200);
-  const { url: lieUrl } = await lie.json();
+  const lieJson = await lie.json();
   const big = wav(room + 1024);
-  await putSigned(lieUrl, big, 'audio/wav');
-  const lieFin = await finalize(c, gameB.slug, { path: 'lie.wav' });
+  await putSigned(lieJson.url, big, 'audio/wav');
+  const lieFin = await finalize(c, gameB.slug, { path: 'lie.wav', uploadId: lieJson.uploadId });
   expect(lieFin.status()).toBe(413);
   expect((await lieFin.json()).error).toBe('too-big');
+  expect(await objectExists(lieJson.uploadPath), 'staged object deleted on reject').toBe(false);
   expect(await objectExists(`${gameB.id}/1/lie.wav`)).toBe(false);
   await c.dispose();
 });
@@ -198,12 +206,15 @@ test('UP-2a orphan upload: PUT to a signed URL is not served until finalize', as
   await sql`update public.games set stage = 'proving' where id = ${game.id}`;
 
   const s = await sign(c, game.slug, { path: 'sprites/orphan.png', size: PNG.length, contentType: 'image/png' });
-  const { url } = await s.json();
+  const { url, uploadPath } = await s.json();
   await putSigned(url, PNG, 'image/png');
-  expect(await objectExists(`${game.id}/1/sprites/orphan.png`)).toBe(true);
+  expect(await objectExists(uploadPath)).toBe(true);
 
   const res = await fetch(assetUrl(game.id, 'sprites/orphan.png'));
   expect(res.status, 'orphan bytes must not be served').toBe(404);
+  // The staging prefix is not a numeric version — the CDN cannot map it to a served object at all.
+  const stagedRoute = await fetch(`${CDN}/g/${game.id}/${uploadPath.slice(game.id.length + 1)}`);
+  expect(stagedRoute.status, 'staging path is outside the CDN route map').toBe(404);
   const [count] = await sql`select count(*)::int as n from public.game_assets where game_id = ${game.id} and status = 'uploaded'`;
   expect(count.n, 'orphan does not count as an asset').toBe(0);
   await c.dispose();
@@ -254,12 +265,12 @@ test('UP-2a happy path: sign -> PUT -> finalize -> row -> CDN 200', async () => 
 
   const s = await sign(c, game.slug, { path: 'sfx/jump.wav', size: SMALL_WAV.length, contentType: 'audio/wav' });
   expect(s.status()).toBe(200);
-  const { url, objectPath } = await s.json();
-  expect(objectPath).toBe(`${game.id}/1/sfx/jump.wav`);
+  const { url, uploadId, uploadPath } = await s.json();
+  expect(uploadPath).toMatch(new RegExp(`^${game.id}/_staging/`));
 
   expect((await putSigned(url, SMALL_WAV, 'audio/wav')).status).toBe(200);
 
-  const f = await finalize(c, game.slug, { path: 'sfx/jump.wav' });
+  const f = await finalize(c, game.slug, { path: 'sfx/jump.wav', uploadId });
   expect(f.status()).toBe(200);
   const done = await f.json();
   expect(done.path).toBe('sfx/jump.wav');
@@ -268,6 +279,7 @@ test('UP-2a happy path: sign -> PUT -> finalize -> row -> CDN 200', async () => 
   const [row] = await sql`select status, size_bytes, source from public.game_assets where game_id = ${game.id} and path = 'sfx/jump.wav'`;
   expect(row?.status).toBe('uploaded');
   expect(row?.size_bytes).toBe(SMALL_WAV.length);
+  expect(await objectExists(uploadPath), 'staged object is consumed').toBe(false);
 
   const res = await fetch(assetUrl(game.id, 'sfx/jump.wav'));
   expect(res.status).toBe(200);
