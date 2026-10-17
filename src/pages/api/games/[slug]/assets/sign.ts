@@ -49,7 +49,12 @@ export const POST: APIRoute = async ({ request, params, locals }) => {
     usage,
     rateAllowed: assetUploadsByUser.hit(locals.user.id),
   });
-  if (!decision.ok) return json({ error: decision.error, message: decision.message }, decision.status);
+  if (!decision.ok) {
+    return json(
+      { error: decision.error, message: decision.message, ...(decision.flash ? { flash: decision.flash } : {}) },
+      decision.status,
+    );
+  }
 
   // One staging object per sign call: <game>/_staging/<nonce>. A signed URL must never write a
   // path the CDN serves (whoever held it could overwrite vetted bytes and skip the scan), so it
@@ -60,7 +65,7 @@ export const POST: APIRoute = async ({ request, params, locals }) => {
   const signed = await bucket().createSignedUploadUrl(stagedPath, { upsert: false });
   if (signed.error || !signed.data) {
     console.error(`Signed upload URL failed for game ${game.id}`, signed.error);
-    return json({ error: 'storage', message: 'The file could not be stored. Try again.' }, 500);
+    return json({ error: 'storage', message: 'The file could not be stored. Try again.', flash: { error: 'storage' } }, 500);
   }
   return json({
     path: decision.path,

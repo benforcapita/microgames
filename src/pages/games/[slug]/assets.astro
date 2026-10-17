@@ -34,7 +34,7 @@ const action = `/api/games/${encodeURIComponent(slug)}/assets`;
 ---
 
 <Layout title={`${game.title} files`} noindex>
-  <section class="section wrap assets">
+  <section class="section wrap assets" data-assets-api={action} data-assets-page={page}>
     <span class="eyebrow">Game files</span>
     <h1>{game.title}</h1>
     <p class="muted">
@@ -45,6 +45,8 @@ const action = `/api/games/${encodeURIComponent(slug)}/assets`;
 
     {flash.error && <p class="panel flash bad" role="alert">{flash.error}</p>}
     {flash.notice && <p class:list={['panel', 'flash', 'ok', Astro.url.searchParams.get('warn') === '1' && 'warn']} role="status">{flash.notice}</p>}
+    <p class="panel flash bad" role="alert" id="asset-error" hidden></p>
+    <noscript><p class="panel flash bad">Adding and replacing files needs JavaScript — your browser sends them straight to storage.</p></noscript>
 
     <div class="panel table-wrap">
       {
@@ -69,7 +71,7 @@ const action = `/api/games/${encodeURIComponent(slug)}/assets`;
                   <td>{row.sizeBytes === null ? '—' : formatBytes(row.sizeBytes)}</td>
                   <td>{row.rejectReason ?? '—'}</td>
                   <td>
-                    <form method="post" action={action} enctype="multipart/form-data">
+                    <form>
                       <input type="hidden" name="path" value={row.path} />
                       <input type="file" name="file" required />
                       <button class="btn sm" type="submit">Upload</button>
@@ -85,9 +87,8 @@ const action = `/api/games/${encodeURIComponent(slug)}/assets`;
       }
     </div>
 
-    <form class="panel add" method="post" action={action} enctype="multipart/form-data">
+    <form class="panel add">
       <h2>Add file</h2>
-      <input type="hidden" name="source" value="creator" />
       <label>
         Path <small>for example sprites/extra.png</small>
         <input name="path" required maxlength="512" />
@@ -118,3 +119,12 @@ const action = `/api/games/${encodeURIComponent(slug)}/assets`;
   .add { display: grid; gap: 0.9rem; padding: 1.25rem; }
   .add h2 { margin: 0; font-size: 1.2rem; }
 </style>
+
+<script>
+  import { wireAssetUploads } from '../../../client/asset-uploads';
+
+  // UP-2b: uploads go sign -> PUT to the signed Storage URL -> finalize. Without JS the forms have
+  // no action, so a submit just reloads the page (GET, no file bytes) and the noscript note shows.
+  const root = document.querySelector<HTMLElement>('[data-assets-api]');
+  if (root) wireAssetUploads(root);
+</script>
