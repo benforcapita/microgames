@@ -271,11 +271,11 @@ describe('private.record_game_asset', () => {
             if (expected === 'cap') {
               // A denied write leaves the previous state untouched: no row, or the
               // rejected audit row it would have replaced.
-              const [row] = await sql<{ status: string }[]>`
+              const kept: { status: string }[] = await sql`
                 select status from public.game_assets
                 where game_id = ${gameId} and version = 1 and path = 'probe.png'
               `;
-              assert.equal(row?.status ?? null, status, `status=${status} counted=${counted}: cap must not write`);
+              assert.equal(kept[0]?.status ?? null, status, `status=${status} counted=${counted}: cap must not write`);
             }
           } finally {
             await sql`delete from public.games where id = ${gameId}`.catch(() => {});
