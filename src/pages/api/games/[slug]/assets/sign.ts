@@ -3,6 +3,7 @@ import { gameBundleVersion } from '../../../../../lib/server/asset-manifest';
 import { canonicalAssetPath } from '../../../../../lib/server/asset-scan';
 import { assessAssetSign, mintAssetUploadId, parseAssetSignBody } from '../../../../../lib/server/asset-sign';
 import {
+  assetPathRejection,
   assetUploadsByUser,
   assetUsage,
   findGameAsset,
@@ -33,6 +34,10 @@ export const POST: APIRoute = async ({ request, params, locals }) => {
 
   const body = parseAssetSignBody(await request.json().catch(() => null));
   if (!body) return json({ error: 'bad-request', message: 'Expected JSON {path, size, contentType}.' }, 400);
+  // Same boundary check finalize applies — a NUL or control character must be refused before
+  // the path ever reaches Postgres (a parameterized query with a NUL errors into a 500).
+  const pathError = assetPathRejection(body.path);
+  if (pathError) return json({ error: pathError.code, message: pathError.message }, 400);
 
   const version = await gameBundleVersion(sql, game.id);
   const canonical = canonicalAssetPath(body.path);
