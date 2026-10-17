@@ -4,20 +4,29 @@
 // pass, then play the game and assert every single asset loads from the CDN's versioned folder with
 // no failed responses, no console errors and no CSP violations.
 //
+// UP-2b: the Files page sends file bytes straight to Supabase Storage on a signed URL — /api sees
+// only the JSON sign/finalize calls. The upload step asserts that: every /api request while the
+// twelve files upload is small JSON metadata (never multipart, never file bytes — the WAV's RIFF
+// header included), and exactly one PUT to .../storage/v1/object/upload/sign/... carried each file.
+//
 // Validation transport is the same as e2e/temple-run.spec.mjs: the validate-game Edge Function's
 // own module runs in-process against the real Storage bundle and the real record_game_validation
 // RPC (the local stack has no edge-runtime), so the verdict and stage change are production code.
+import { randomBytes } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { copyFile, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { test, expect } from '@playwright/test';
+import { createClient } from '@supabase/supabase-js';
 import { shotPath, SHOT_DIR } from './shots.mjs';
 import { localSupabaseEnv } from '../scripts/lib/local-supabase.mjs';
 import { validateGame } from '../supabase/functions/validate-game/validate.ts';
 import { createRestStore } from '../supabase/functions/validate-game/rest-store.ts';
 
 const FIXTURE = path.join(import.meta.dirname, 'fixtures', 'temple-run-multi');
+const WEB = `http://127.0.0.1:${process.env.E2E_WEB_PORT ?? 4721}`;
 const CDN = `http://127.0.0.1:${process.env.E2E_CDN_PORT ?? 4722}`;
+const STORAGE_ORIGIN = new URL(localSupabaseEnv().PUBLIC_SUPABASE_URL).origin;
 const validationStore = () => { const e = localSupabaseEnv(); return createRestStore(e.PUBLIC_SUPABASE_URL, e.SUPABASE_SECRET_KEY); };
 
 // The twelve separate files the game fetches, relative to the document's versioned URL.
@@ -64,13 +73,29 @@ test('Temple Dash multi-file: upload, add files on the Files page, every asset l
   test.setTimeout(240_000);
   const html = await readFile(path.join(FIXTURE, 'index.html'));
   const thumb = await readFile(path.join(FIXTURE, 'thumb.png'));
-  const stamp = Date.now().toString(36);
+  // QA #74: Date.now() alone collided under parallel workers/repeats; a random suffix keeps the
+  // signup email, handle and title unique per run.
+  const stamp = `${Date.now().toString(36)}${randomBytes(3).toString('hex')}`;
   const title = `Temple Dash Files ${stamp}`;
   const handle = `trm${stamp}`.slice(0, 32);
 
   const consoleErrors = [];
   const responses = [];
   const requestFailures = [];
+  // UP-2b: every /api call on the app origin during the uploads must be small JSON metadata — the
+  // sign/finalize calls. The file bytes themselves must go to the Storage origin on a signed-URL
+  // PUT (the whole point: bytes like sfx-jump.wav never cross the app server).
+  const apiCalls = [];
+  const storagePuts = [];
+  page.on('request', (req) => {
+    const url = new URL(req.url());
+    if (url.origin === WEB && url.pathname.startsWith('/api/')) {
+      apiCalls.push({ method: req.method(), path: url.pathname, contentType: req.headers()['content-type'] ?? '', body: req.postDataBuffer() });
+    }
+    if (req.method() === 'PUT' && url.origin === STORAGE_ORIGIN && url.pathname.startsWith('/storage/v1/object/upload/sign/')) {
+      storagePuts.push({ url: req.url() });
+    }
+  });
   page.on('console', (msg) => msg.type() === 'error' && consoleErrors.push(`${new URL(msg.location().url || 'about:blank').pathname}: ${msg.text()}`));
   page.on('pageerror', (err) => consoleErrors.push(`pageerror: ${err.message}`));
   page.on('response', (res) => responses.push({ url: res.url(), status: res.status() }));
@@ -108,6 +133,8 @@ test('Temple Dash multi-file: upload, add files on the Files page, every asset l
   // thumbnail from the CDN, and a pending-stage answer would be cached for ~30 s.)
   const slug = `temple-dash-files-${stamp}`;
   await test.step('add every asset file through the Files page', async () => {
+    apiCalls.length = 0;
+    storagePuts.length = 0;
     await page.goto(`/games/${slug}/assets`);
     await expect(page.getByRole('heading', { name: title })).toBeVisible();
 
@@ -126,6 +153,33 @@ test('Temple Dash multi-file: upload, add files on the Files page, every asset l
     await expect(rows).toHaveCount(ASSET_FILES.length);
     await expect(page.locator('td.path')).toHaveText(ASSET_FILES.slice().sort());
     await expect(page.locator('tbody td:nth-child(3)')).toHaveText(ASSET_FILES.map(() => 'uploaded'));
+  });
+
+  await test.step('no file bytes crossed /api — every file PUT straight to the Storage origin', async () => {
+    // The WAV's RIFF header is the file bytes Vercel's ruleset kept blocking on /api; here it is
+    // the canary proving no /api request carried file data.
+    const riff = (await readFile(path.join(FIXTURE, 'assets', 'audio/sfx-jump.wav'))).subarray(0, 12);
+    console.log(`[temple-run-multi] /api calls during uploads: ${apiCalls.map((c) => `${c.method} ${c.path} ${c.contentType || 'no-content-type'} ${c.body?.length ?? 0}B`).join(' | ')}`);
+    expect(apiCalls.filter((c) => c.path.endsWith('/assets/sign')), 'one sign call per asset').toHaveLength(ASSET_FILES.length);
+    expect(apiCalls.filter((c) => c.path.endsWith('/assets/finalize')), 'one finalize call per asset').toHaveLength(ASSET_FILES.length);
+    for (const call of apiCalls) {
+      expect(call.contentType, `${call.method} ${call.path} carried a non-JSON body to /api`).toContain('application/json');
+      expect(call.body?.length ?? 0, `${call.method} ${call.path} body too big to be metadata`).toBeLessThan(512);
+      expect(call.body?.includes(riff) ?? false, `${call.method} ${call.path} carried the WAV header`).toBe(false);
+    }
+    // And the bytes did leave the browser: one signed-URL PUT per file, on the Storage origin,
+    // each one landing at a <game>/_staging/<nonce> object. The finalized object the server then
+    // copied out of staging reads back byte-identical to the fixture — the staged object's only
+    // writer was this browser's PUT, so the wire bytes are proven.
+    expect(storagePuts, `expected ${ASSET_FILES.length} signed-URL PUTs to ${STORAGE_ORIGIN}`).toHaveLength(ASSET_FILES.length);
+    for (const put of storagePuts) expect(put.url).toContain(`/${gameId}/_staging/`);
+    const service = createClient(localSupabaseEnv().PUBLIC_SUPABASE_URL, localSupabaseEnv().SUPABASE_SECRET_KEY, { auth: { persistSession: false } });
+    for (const rel of ASSET_FILES) {
+      const bytes = await readFile(path.join(FIXTURE, 'assets', rel));
+      const stored = await service.storage.from('games').download(`${gameId}/1/${rel}`);
+      expect(stored.error?.message ?? 'ok', `${rel} finalized object missing`).toBe('ok');
+      expect(Buffer.from(await stored.data.arrayBuffer()).equals(bytes), `${rel} stored bytes differ`).toBe(true);
+    }
   });
 
   await test.step('validation finishes with a pass', async () => {

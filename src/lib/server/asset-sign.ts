@@ -92,12 +92,18 @@ export function stagedObjectPath(secret: string, gameId: string, version: number
   return `${gameId}/_staging/${nonce}`;
 }
 
-/** Every denial is `{error}` plus an HTTP status, so the route shells stay thin. */
-export type AssetApiDenial = { ok: false; status: number; error: string; message: string };
+/**
+ * Every denial is `{error}` plus an HTTP status, so the route shells stay thin. `flash` carries
+ * the query params the Files page reloads with (the same params assetUploadQuery produces for the
+ * multipart flow), so the browser reuses assetFlashMessage for identical text — only denials whose
+ * code the flash renderer understands set it.
+ */
+export type AssetApiDenial = { ok: false; status: number; error: string; message: string; flash?: Record<string, string> };
 
 export type AssetSignDecision = AssetApiDenial | { ok: true; path: string };
 
-const deny = (status: number, error: string, message: string): AssetApiDenial => ({ ok: false, status, error, message });
+const deny = (status: number, error: string, message: string, flash?: Record<string, string>): AssetApiDenial =>
+  flash ? { ok: false, status, error, message, flash } : { ok: false, status, error, message };
 
 export interface AssessAssetSignInput {
   userId: string | null;
@@ -120,23 +126,25 @@ export function assessAssetSign(input: AssessAssetSignInput): AssetSignDecision 
   if (!input.userId) return deny(401, 'unauthorized', 'Log in to upload files.');
   if (!input.ownerId || input.userId !== input.ownerId) return deny(404, 'not-found', 'Not found');
   const pathError = assetPathRejection(input.rawPath);
-  if (pathError) return deny(pathError.status, pathError.code, pathError.message);
-  if (!input.rateAllowed) return deny(429, 'rate', ASSET_UPLOAD_MESSAGES.rate);
-  if (input.sizeBytes < 1) return deny(400, 'empty', ASSET_UPLOAD_MESSAGES.empty);
+  if (pathError) return deny(pathError.status, pathError.code, pathError.message, { error: pathError.code });
+  if (!input.rateAllowed) return deny(429, 'rate', ASSET_UPLOAD_MESSAGES.rate, { error: 'rate' });
+  if (input.sizeBytes < 1) return deny(400, 'empty', ASSET_UPLOAD_MESSAGES.empty, { error: 'empty' });
 
   const canonical = canonicalAssetPath(input.rawPath);
   if (canonical.kind !== 'path' || hasControlChar(canonical.path)) {
-    return deny(400, 'path', ASSET_UPLOAD_MESSAGES.path);
+    return deny(400, 'path', ASSET_UPLOAD_MESSAGES.path, { error: 'path' });
   }
   const path = canonical.path;
-  if (!isUploadExtension(extensionOf(path))) return deny(400, 'path', ASSET_UPLOAD_MESSAGES.path);
+  if (!isUploadExtension(extensionOf(path))) return deny(400, 'path', ASSET_UPLOAD_MESSAGES.path, { error: 'path' });
 
   const row = input.existing && input.existing.path === path ? input.existing : null;
-  if (!row && input.usage.fileCount >= MAX_ASSET_FILES) return deny(409, 'cap', ASSET_UPLOAD_MESSAGES.cap);
+  if (!row && input.usage.fileCount >= MAX_ASSET_FILES) return deny(409, 'cap', ASSET_UPLOAD_MESSAGES.cap, { error: 'cap' });
 
   const previous = row?.status === 'uploaded' ? (row.sizeBytes ?? 0) : 0;
   const nextTotal = versionBytesAfterUpload(input.usage.codeBytes, input.usage.uploadedBytes, previous, input.sizeBytes);
-  if (nextTotal > GAME_VERSION_MAX_BYTES) return deny(413, 'too-big', gameTooBigMessage(nextTotal));
+  if (nextTotal > GAME_VERSION_MAX_BYTES) {
+    return deny(413, 'too-big', gameTooBigMessage(nextTotal), { error: 'too-big', total: String(nextTotal) });
+  }
 
   return { ok: true, path };
 }

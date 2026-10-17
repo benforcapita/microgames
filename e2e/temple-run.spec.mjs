@@ -9,6 +9,7 @@
 // process against the real Storage bundle and the real `record_game_validation` RPC: the verdict and the
 // stage transition are the production ones, only the HTTP hop is missing. Every assertion afterwards is
 // about what the pages actually show.
+import { randomBytes } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { copyFile, readFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -59,7 +60,9 @@ test('Temple Dash: upload form -> validation passes -> plays on the CDN -> fulls
   test.setTimeout(240_000);
   const html = await readFile(path.join(FIXTURE, 'index.html'));
   const thumb = await readFile(path.join(FIXTURE, 'thumb.png'));
-  const stamp = Date.now().toString(36);
+  // QA #74: Date.now() alone collided under parallel workers/repeats; a random suffix keeps the
+  // signup email, handle and title unique per run.
+  const stamp = `${Date.now().toString(36)}${randomBytes(3).toString('hex')}`;
   const title = `Temple Dash ${stamp}`;
   // Local-stack-only test account, exactly like the other upload specs: an @example.com address that
   // only exists in this throwaway Supabase project.

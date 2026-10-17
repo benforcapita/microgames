@@ -33,6 +33,7 @@ export const ASSET_UPLOAD_MESSAGES = {
   storage: 'The file could not be stored. Try again.',
   encoding: 'That path is not encoded correctly.',
   control: 'That path contains a NUL or a control character.',
+  'not-uploaded': 'Nothing was uploaded to that path.',
 } as const;
 
 /**

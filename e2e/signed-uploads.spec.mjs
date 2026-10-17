@@ -411,6 +411,7 @@ test('UP-2a finalize answers a fixed 500 and deletes the staged object on a DB f
     expect(body, 'fixed error body — the real DB message is server-side only').toEqual({
       error: 'storage',
       message: 'The file could not be stored. Try again.',
+      flash: { error: 'storage' },
     });
     expect(await objectExists(uploadPath), 'staged object must be deleted on a DB failure').toBe(false);
     const [row] = await sql`select status from public.game_assets where game_id = ${game.id} and path = 'dbfail/x.png'`;
