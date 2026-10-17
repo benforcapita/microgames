@@ -17,6 +17,7 @@ import {
   GAME_VERSION_MAX_BYTES,
   MAX_ASSET_FILES,
   assetPathRejection,
+  assetWriteAddsCountedRow,
   gameTooBigMessage,
   hasControlChar,
   isUploadExtension,
@@ -139,7 +140,7 @@ export function assessAssetSign(input: AssessAssetSignInput): AssetSignDecision 
 
   const row = input.existing && input.existing.path === path ? input.existing : null;
   // Rejected rows do not count toward the cap; reviving one adds a counted row again.
-  if ((!row || row.status === 'rejected') && input.usage.fileCount >= MAX_ASSET_FILES) {
+  if (assetWriteAddsCountedRow(row?.status ?? null) && input.usage.fileCount >= MAX_ASSET_FILES) {
     return deny(409, 'cap', ASSET_UPLOAD_MESSAGES.cap, { error: 'cap' });
   }
 

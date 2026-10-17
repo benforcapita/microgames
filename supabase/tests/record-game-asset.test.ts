@@ -7,6 +7,7 @@ import { dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import postgres from 'postgres';
+import { assetWriteAddsCountedRow } from '../../src/lib/server/asset-upload.ts';
 
 const supabaseDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 const MIGRATION = '20261017120000_record_game_asset';
@@ -196,6 +197,52 @@ describe('private.record_game_asset', () => {
       assert.equal(row?.reject_reason, 'bad file');
     } finally {
       await sql`delete from public.games where id = ${gameId}`.catch(() => {});
+      await sql.end({ timeout: 1 }).catch(() => {});
+    }
+  });
+
+  it('denies the file cap only when the write would add a counted row', async (t) => {
+    const sql = await connect(t);
+    if (!sql) return;
+    try {
+      // The same case table the TS pre-checks (assessAssetUpload/assessAssetSign, which
+      // share assetWriteAddsCountedRow) are pinned to — one rule for sign, finalize and
+      // the legacy POST. `counted` is the number of non-rejected rows already on the
+      // game besides the row being written; existing games can sit over the cap because
+      // manifest scans bypass this function, so 'missing'/'uploaded' replaces must pass.
+      for (const status of [null, 'missing', 'uploaded', 'rejected'] as const) {
+        for (const counted of [MAX_FILES - 1, MAX_FILES, MAX_FILES + 100]) {
+          const gameId = await makeGame(sql);
+          try {
+            await sql`
+              insert into public.game_assets (game_id, version, path, expected_type, status, source)
+              select ${gameId}, case when g % 2 = 0 then 1 else 2 end, 'f-' || g::text || '.png', 'image', 'missing', 'scan'
+              from generate_series(1, ${counted}) g
+            `;
+            if (status !== null) {
+              await sql`
+                insert into public.game_assets (game_id, version, path, expected_type, status, source)
+                values (${gameId}, 1, 'probe.png', 'image', ${status}, 'scan')
+              `;
+            }
+            const res = await call(sql, gameId, 'probe.png');
+            const expected = assetWriteAddsCountedRow(status) && counted >= MAX_FILES ? 'cap' : 'ok';
+            assert.equal(res?.result, expected, `status=${status} counted=${counted}`);
+            if (expected === 'cap') {
+              // A denied write leaves the previous state untouched: no row, or the
+              // rejected audit row it would have replaced.
+              const [row] = await sql<{ status: string }[]>`
+                select status from public.game_assets
+                where game_id = ${gameId} and version = 1 and path = 'probe.png'
+              `;
+              assert.equal(row?.status ?? null, status, `status=${status} counted=${counted}: cap must not write`);
+            }
+          } finally {
+            await sql`delete from public.games where id = ${gameId}`.catch(() => {});
+          }
+        }
+      }
+    } finally {
       await sql.end({ timeout: 1 }).catch(() => {});
     }
   });

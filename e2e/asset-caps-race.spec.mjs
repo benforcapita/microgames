@@ -191,6 +191,60 @@ test('UP-3 race: the legacy multipart POST cannot slip past the 4 MB cap', async
   await c.dispose();
 });
 
+test('UP-3 over-cap game: the file cap denies only a write that adds a counted row', async () => {
+  const c = await ctx();
+  await signup(c, 'rovf');
+  const game = await uploadGame(c, `UP3 overcap ${uniq()}`);
+  await sql`update public.games set stage = 'proving' where id = ${game.id}`;
+
+  // 300 counted rows already on the game, spread across two versions — manifest scans
+  // bypass the cap function, so existing data can sit over 200 (QA #78 multiVersionFill).
+  // The cap may only deny a write that ADDS a counted row: filling a scanned 'missing'
+  // row or replacing an uploaded one is allowed at and over 200.
+  await sql`
+    insert into public.game_assets (game_id, version, path, expected_type, status, source)
+    select ${game.id}, 1, 'a/' || x::text || '.wav', 'audio', 'missing', 'scan'
+    from generate_series(1, 150) x
+  `;
+  await sql`insert into public.game_validations (game_id, version, status) values (${game.id}, 2, 'queued')`;
+  await sql`
+    insert into public.game_assets (game_id, version, path, expected_type, status, source)
+    select ${game.id}, 2, 'a/' || x::text || '.wav', 'audio', 'missing', 'scan'
+    from generate_series(1, 150) x
+  `;
+
+  const s = await sign(c, game.slug, { path: 'a/1.wav', size: SMALL_WAV.length, contentType: 'audio/wav' });
+  expect(s.status(), 'filling a scanned missing row adds no counted row').toBe(200);
+  const { url, uploadId, uploadPath } = await s.json();
+  expect((await putSigned(url, SMALL_WAV, 'audio/wav')).status).toBe(200);
+  const f = await finalize(c, game.slug, { path: 'a/1.wav', uploadId });
+  expect(f.status(), 'finalize must store into the existing row even over 200 counted rows').toBe(200);
+  const [row] = await sql`select status from public.game_assets where game_id = ${game.id} and version = 2 and path = 'a/1.wav'`;
+  expect(row?.status).toBe('uploaded');
+  expect(await objectExists(uploadPath), 'staged object is consumed').toBe(false);
+
+  // The legacy multipart POST fills an existing counted row the same way.
+  const legacy = await c.post(`/api/games/${game.slug}/assets`, {
+    maxRedirects: 0,
+    multipart: {
+      path: 'a/2.wav',
+      source: 'creator',
+      file: { name: 'a2.wav', mimeType: 'audio/wav', buffer: wav(300, 4) },
+    },
+  });
+  expect(legacy.headers()['location'] ?? '', 'legacy fill of a counted row must not be capped').toContain('uploaded=');
+  const [lrow] = await sql`select status from public.game_assets where game_id = ${game.id} and version = 2 and path = 'a/2.wav'`;
+  expect(lrow?.status).toBe('uploaded');
+
+  // A write that WOULD add a counted row is still capped — the test can see denials.
+  const denied = await sign(c, game.slug, { path: 'b/new.wav', size: SMALL_WAV.length, contentType: 'audio/wav' });
+  expect(denied.status()).toBe(409);
+  expect((await denied.json()).error).toBe('cap');
+  const [n] = await sql`select count(*)::int as n from public.game_assets where game_id = ${game.id} and status <> 'rejected'`;
+  expect(n.n, 'no counted row was added by the fills').toBe(300);
+  await c.dispose();
+});
+
 test('UP-3 rejected rows do not count toward the 200-file or 4 MB caps', async () => {
   const c = await ctx();
   await signup(c, 'rrej');

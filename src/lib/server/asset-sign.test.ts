@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { GAME_VERSION_MAX_BYTES, MAX_ASSET_FILES, type AssetUsage } from './asset-upload.ts';
+import { GAME_VERSION_MAX_BYTES, MAX_ASSET_FILES, assetWriteAddsCountedRow, type AssetUsage } from './asset-upload.ts';
 import { assessAssetSign, mintAssetUploadId, parseAssetFinalizeBody, parseAssetSignBody, stagedObjectPath } from './asset-sign.ts';
 
 const OWNER = 'owner-1';
@@ -134,6 +134,27 @@ describe('UP-2a assessAssetSign', () => {
       existing: { path: 'sfx/jump.wav', expectedType: 'audio', status: 'rejected', sizeBytes: null, source: 'scan' },
     });
     assert.equal(ok.ok, true);
+  });
+
+  it('denies the file cap only when the sign would add a counted row, at and over 200', () => {
+    // Same case table as assessAssetUpload and private.record_game_asset — existing games
+    // can sit over 200 counted rows (manifest scans bypass the cap), and filling or
+    // replacing an existing counted row must still be admitted.
+    for (const status of [null, 'missing', 'uploaded', 'rejected'] as const) {
+      for (const fileCount of [MAX_ASSET_FILES - 1, MAX_ASSET_FILES, MAX_ASSET_FILES + 100]) {
+        const r = assessAssetSign({
+          ...base,
+          usage: usage({ fileCount }),
+          existing: status === null ? null : { path: 'sfx/jump.wav', expectedType: 'audio', status, sizeBytes: null, source: 'scan' },
+        });
+        const denied = !r.ok && r.error === 'cap';
+        assert.equal(
+          denied,
+          assetWriteAddsCountedRow(status) && fileCount >= MAX_ASSET_FILES,
+          `status=${status} fileCount=${fileCount}`,
+        );
+      }
+    }
   });
 
   it('enforces the 4 MB version cap against the declared size', () => {

@@ -259,6 +259,18 @@ function rejectRow(
   return { kind: 'reject', code, path, expectedType, source, message, ...extra };
 }
 
+/**
+ * The 200-file cap denies only a write that would ADD a counted row. Every status except
+ * 'rejected' already counts, so replacing an uploaded file or filling a scanned 'missing'
+ * row is allowed even when the game is at or over the cap (manifest scans bypass
+ * record_game_asset, so existing data can sit over 200). A new row, or a rejected audit
+ * row revived as uploaded, adds one and is capped. private.record_game_asset applies this
+ * same rule — the DB test in supabase/tests pins the SQL to these cases.
+ */
+export function assetWriteAddsCountedRow(status: ExistingAsset['status'] | null): boolean {
+  return status === null || status === 'rejected';
+}
+
 /** Decide what an upload may do. Does not touch storage or Postgres. */
 export function assessAssetUpload(input: AssessAssetInput): AssetUploadDecision {
   if (!input.userId) return { kind: 'login' };
@@ -278,8 +290,7 @@ export function assessAssetUpload(input: AssessAssetInput): AssetUploadDecision 
   const row = input.existing && input.existing.path === path ? input.existing : null;
   if (!row && !input.adding) return { kind: 'flash', code: 'manifest' };
   // A rejected row is an audit trail, not a file: reviving it adds a counted row.
-  const addsRow = !row || row.status === 'rejected';
-  if (addsRow && input.fileCount >= MAX_ASSET_FILES) return { kind: 'flash', code: 'cap' };
+  if (assetWriteAddsCountedRow(row?.status ?? null) && input.fileCount >= MAX_ASSET_FILES) return { kind: 'flash', code: 'cap' };
 
   const expectedType = row?.expectedType ?? EXPECTED_BY_EXT[ext];
   const source = row?.source ?? 'creator';
