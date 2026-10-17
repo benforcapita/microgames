@@ -259,6 +259,18 @@ function rejectRow(
   return { kind: 'reject', code, path, expectedType, source, message, ...extra };
 }
 
+/**
+ * The 200-file cap denies only a write that would ADD a counted row. Every status except
+ * 'rejected' already counts, so replacing an uploaded file or filling a scanned 'missing'
+ * row is allowed even when the game is at or over the cap (manifest scans bypass
+ * record_game_asset, so existing data can sit over 200). A new row, or a rejected audit
+ * row revived as uploaded, adds one and is capped. private.record_game_asset applies this
+ * same rule — the DB test in supabase/tests pins the SQL to these cases.
+ */
+export function assetWriteAddsCountedRow(status: ExistingAsset['status'] | null): boolean {
+  return status === null || status === 'rejected';
+}
+
 /** Decide what an upload may do. Does not touch storage or Postgres. */
 export function assessAssetUpload(input: AssessAssetInput): AssetUploadDecision {
   if (!input.userId) return { kind: 'login' };
@@ -277,7 +289,8 @@ export function assessAssetUpload(input: AssessAssetInput): AssetUploadDecision 
   if (!isUploadExtension(ext)) return { kind: 'flash', code: 'path' };
   const row = input.existing && input.existing.path === path ? input.existing : null;
   if (!row && !input.adding) return { kind: 'flash', code: 'manifest' };
-  if (!row && input.fileCount >= MAX_ASSET_FILES) return { kind: 'flash', code: 'cap' };
+  // A rejected row is an audit trail, not a file: reviving it adds a counted row.
+  if (assetWriteAddsCountedRow(row?.status ?? null) && input.fileCount >= MAX_ASSET_FILES) return { kind: 'flash', code: 'cap' };
 
   const expectedType = row?.expectedType ?? EXPECTED_BY_EXT[ext];
   const source = row?.source ?? 'creator';
@@ -461,7 +474,7 @@ export async function assetUsage(sql: AssetDb, gameId: string, version: number):
       (select size_bytes from public.games where id = ${gameId}) as code_bytes,
       (select coalesce(sum(size_bytes), 0)::int from public.game_assets
         where game_id = ${gameId} and version = ${version} and status = 'uploaded') as uploaded_bytes,
-      (select count(*)::int from public.game_assets where game_id = ${gameId}) as file_count
+      (select count(*)::int from public.game_assets where game_id = ${gameId} and status <> 'rejected') as file_count
   `;
   return {
     codeBytes: row?.code_bytes ?? 0,
@@ -470,7 +483,65 @@ export async function assetUsage(sql: AssetDb, gameId: string, version: number):
   };
 }
 
-async function writeAssetRow(
+/** State of the row displaced by a record_game_asset write, for a restore on failure. */
+export interface RecordedAssetState {
+  expectedType: StoredAssetType;
+  status: 'missing' | 'uploaded' | 'rejected';
+  sizeBytes: number | null;
+  sha256: string | null;
+  rejectReason: string | null;
+  source: 'scan' | 'creator';
+}
+
+/** private.record_game_asset's verdict on one row write. */
+export type RecordAssetResult =
+  | { kind: 'ok'; previous: RecordedAssetState | null }
+  | { kind: 'cap' }
+  | { kind: 'too-big'; totalBytes: number }
+  | { kind: 'not-found' };
+
+interface RecordAssetRow {
+  result: string;
+  total_bytes: number | bigint | string | null;
+  prev_status: string | null;
+  prev_size_bytes: number | null;
+  prev_sha256: string | null;
+  prev_reject_reason: string | null;
+  prev_source: string | null;
+  prev_expected_type: string | null;
+}
+
+function parseRecordedState(row: RecordAssetRow): RecordedAssetState | null {
+  if (row.prev_status === null) return null;
+  const source = row.prev_source;
+  const expectedType = row.prev_expected_type;
+  if (
+    !isStatus(row.prev_status) ||
+    typeof source !== 'string' ||
+    !isSource(source) ||
+    typeof expectedType !== 'string' ||
+    !isExpectedType(expectedType)
+  ) {
+    throw new Error(`record_game_asset returned an unreadable previous row: ${JSON.stringify(row)}`);
+  }
+  return {
+    expectedType,
+    status: row.prev_status,
+    sizeBytes: row.prev_size_bytes,
+    sha256: row.prev_sha256,
+    rejectReason: row.prev_reject_reason,
+    source,
+  };
+}
+
+/**
+ * The authoritative row write: the DB function locks the game's row, recomputes the caps
+ * from game_assets (rejected rows count toward neither), and writes only when both hold.
+ * Anything the route pre-checked is re-checked here, so concurrent writers serialize and
+ * cannot overshoot. The caps come from this module's constants — the same values the
+ * pre-checks use.
+ */
+async function recordGameAsset(
   sql: AssetDb,
   row: {
     gameId: string;
@@ -483,20 +554,118 @@ async function writeAssetRow(
     source: 'scan' | 'creator';
     rejectReason: string | null;
   },
-): Promise<void> {
-  await sql`
-    insert into public.game_assets
-      (game_id, version, path, expected_type, status, size_bytes, content_sha256, source, reject_reason, updated_at)
-    values
-      (${row.gameId}, ${row.version}, ${row.path}, ${row.expectedType}, ${row.status}, ${row.sizeBytes},
-       ${row.sha256}, ${row.source}, ${row.rejectReason}, now())
-    on conflict (game_id, version, path) do update set
-      status = excluded.status,
-      size_bytes = excluded.size_bytes,
-      content_sha256 = excluded.content_sha256,
-      reject_reason = excluded.reject_reason,
-      updated_at = now()
+): Promise<RecordAssetResult> {
+  const [res] = await sql<RecordAssetRow[]>`
+    select result, total_bytes, prev_status, prev_size_bytes, prev_sha256, prev_reject_reason, prev_source, prev_expected_type
+    from private.record_game_asset(
+      ${row.gameId}, ${row.version}, ${row.path}, ${row.expectedType}, ${row.status},
+      ${row.sizeBytes}, ${row.sha256}, ${row.source}, ${row.rejectReason},
+      ${MAX_ASSET_FILES}, ${GAME_VERSION_MAX_BYTES})
   `;
+  if (!res) throw new Error('record_game_asset returned no row');
+  if (res.result === 'ok') return { kind: 'ok', previous: parseRecordedState(res) };
+  if (res.result === 'cap') return { kind: 'cap' };
+  if (res.result === 'too-big') return { kind: 'too-big', totalBytes: Number(res.total_bytes) };
+  if (res.result === 'not-found') return { kind: 'not-found' };
+  throw new Error(`record_game_asset returned ${res.result}`);
+}
+
+/**
+ * Undo a reservation made by recordGameAsset when the storage write failed. Only applies
+ * while the row is still the one this call wrote (same sha) — a newer finalize owns it.
+ */
+async function revertAssetRow(
+  sql: AssetDb,
+  gameId: string,
+  version: number,
+  path: string,
+  wroteSha256: string,
+  previous: RecordedAssetState | null,
+): Promise<void> {
+  if (previous === null) {
+    await sql`
+      delete from public.game_assets
+      where game_id = ${gameId} and version = ${version} and path = ${path}
+        and status = 'uploaded' and content_sha256 = ${wroteSha256}
+    `;
+    return;
+  }
+  await sql`
+    update public.game_assets set
+      status = ${previous.status},
+      size_bytes = ${previous.sizeBytes},
+      content_sha256 = ${previous.sha256},
+      reject_reason = ${previous.rejectReason},
+      source = ${previous.source},
+      expected_type = ${previous.expectedType},
+      updated_at = now()
+    where game_id = ${gameId} and version = ${version} and path = ${path}
+      and status = 'uploaded' and content_sha256 = ${wroteSha256}
+  `;
+}
+
+export type AssetSaveResult =
+  | { ok: true }
+  | { ok: false; code: 'storage' }
+  | { ok: false; code: 'cap' }
+  | { ok: false; code: 'too-big'; totalBytes: number };
+
+/**
+ * Reserve the row, then copy the bytes to the served object path. The DB function is
+ * authoritative on the caps, so a cap loser never writes the object — there is nothing to
+ * un-copy, and a replaced asset never serves new bytes under its old row. When the copy
+ * still fails, the row is restored to what it displaced.
+ */
+async function storeAsset(
+  sql: AssetDb,
+  storage: AssetStorage,
+  gameId: string,
+  version: number,
+  decision: Extract<AssetUploadDecision, { kind: 'store' }>,
+  bytes: Uint8Array,
+): Promise<AssetSaveResult> {
+  const objectPath = assetObjectPath(gameId, version, decision.path);
+  if (!objectPath) return { ok: false, code: 'storage' };
+  const recorded = await recordGameAsset(sql, {
+    gameId,
+    version,
+    path: decision.path,
+    expectedType: decision.expectedType,
+    status: 'uploaded',
+    sizeBytes: decision.sizeBytes,
+    sha256: decision.sha256,
+    source: decision.source,
+    rejectReason: null,
+  });
+  if (recorded.kind === 'cap') return { ok: false, code: 'cap' };
+  if (recorded.kind === 'too-big') return { ok: false, code: 'too-big', totalBytes: recorded.totalBytes };
+  if (recorded.kind !== 'ok') return { ok: false, code: 'storage' };
+  const put = await storage.upload(objectPath, bytes, decision.contentType);
+  if (put.error) {
+    await revertAssetRow(sql, gameId, version, decision.path, decision.sha256, recorded.previous);
+    return { ok: false, code: 'storage' };
+  }
+  return { ok: true };
+}
+
+async function rejectAssetRow(
+  sql: AssetDb,
+  gameId: string,
+  version: number,
+  decision: Extract<AssetUploadDecision, { kind: 'reject' }>,
+): Promise<AssetSaveResult> {
+  const recorded = await recordGameAsset(sql, {
+    gameId,
+    version,
+    path: decision.path,
+    expectedType: decision.expectedType,
+    status: 'rejected',
+    sizeBytes: null,
+    sha256: null,
+    source: decision.source,
+    rejectReason: decision.message,
+  });
+  return recorded.kind === 'ok' ? { ok: true } : { ok: false, code: 'storage' };
 }
 
 /**
@@ -514,25 +683,8 @@ export async function saveAssetDecision(
   decision: Extract<AssetUploadDecision, { kind: 'store' | 'reject' }>,
   bytes: Uint8Array,
   previous: Pick<GameAssetRow, 'status' | 'sizeBytes'> | null,
-): Promise<{ ok: true } | { ok: false; code: 'storage' }> {
-  if (decision.kind === 'store') {
-    const objectPath = assetObjectPath(gameId, version, decision.path);
-    if (!objectPath) return { ok: false, code: 'storage' };
-    const put = await storage.upload(objectPath, bytes, decision.contentType);
-    if (put.error) return { ok: false, code: 'storage' };
-    await writeAssetRow(sql, {
-      gameId,
-      version,
-      path: decision.path,
-      expectedType: decision.expectedType,
-      status: 'uploaded',
-      sizeBytes: decision.sizeBytes,
-      sha256: decision.sha256,
-      source: decision.source,
-      rejectReason: null,
-    });
-    return { ok: true };
-  }
+): Promise<AssetSaveResult> {
+  if (decision.kind === 'store') return storeAsset(sql, storage, gameId, version, decision, bytes);
   if (previous?.status === 'uploaded') return { ok: true };
   const objectPath = assetObjectPath(gameId, version, decision.path);
   if (!objectPath) return { ok: false, code: 'storage' };
@@ -540,26 +692,16 @@ export async function saveAssetDecision(
     const removed = await storage.remove(objectPath);
     if (removed.error) return { ok: false, code: 'storage' };
   }
-  await writeAssetRow(sql, {
-    gameId,
-    version,
-    path: decision.path,
-    expectedType: decision.expectedType,
-    status: 'rejected',
-    sizeBytes: null,
-    sha256: null,
-    source: decision.source,
-    rejectReason: decision.message,
-  });
-  return { ok: true };
+  return rejectAssetRow(sql, gameId, version, decision);
 }
 
 /**
- * UP-2a: record the outcome of a signed-upload finalize. On 'store' the scanned bytes are
- * copied to the served object path (upsert — a legit replacement overwrites the previous
- * file) and the row marked 'uploaded'; on 'reject' the row is marked 'rejected'. The caller
- * deletes the staged object — the finalize route removes it on every exit path. A failed
- * final copy leaves nothing servable and returns the storage error.
+ * UP-2a: record the outcome of a signed-upload finalize. On 'store' the row is reserved
+ * under the cap lock first, then the scanned bytes are copied to the served object path
+ * (upsert — a legit replacement overwrites the previous file); on 'reject' the row is
+ * marked 'rejected'. The caller deletes the staged object — the finalize route removes it
+ * on every exit path. A failed final copy restores the displaced row, so nothing is left
+ * servable that the row does not describe.
  */
 export async function saveFinalizedAsset(
   sql: AssetDb,
@@ -568,35 +710,7 @@ export async function saveFinalizedAsset(
   version: number,
   decision: Extract<AssetUploadDecision, { kind: 'store' | 'reject' }>,
   bytes: Uint8Array,
-): Promise<{ ok: true } | { ok: false; code: 'storage' }> {
-  if (decision.kind === 'store') {
-    const objectPath = assetObjectPath(gameId, version, decision.path);
-    if (!objectPath) return { ok: false, code: 'storage' };
-    const put = await storage.upload(objectPath, bytes, decision.contentType);
-    if (put.error) return { ok: false, code: 'storage' };
-    await writeAssetRow(sql, {
-      gameId,
-      version,
-      path: decision.path,
-      expectedType: decision.expectedType,
-      status: 'uploaded',
-      sizeBytes: decision.sizeBytes,
-      sha256: decision.sha256,
-      source: decision.source,
-      rejectReason: null,
-    });
-    return { ok: true };
-  }
-  await writeAssetRow(sql, {
-    gameId,
-    version,
-    path: decision.path,
-    expectedType: decision.expectedType,
-    status: 'rejected',
-    sizeBytes: null,
-    sha256: null,
-    source: decision.source,
-    rejectReason: decision.message,
-  });
-  return { ok: true };
+): Promise<AssetSaveResult> {
+  if (decision.kind === 'store') return storeAsset(sql, storage, gameId, version, decision, bytes);
+  return rejectAssetRow(sql, gameId, version, decision);
 }
