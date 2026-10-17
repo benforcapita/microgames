@@ -352,6 +352,48 @@ test('UP-2a sign rejects control characters in the path with 400, before any sto
   await c.dispose();
 });
 
+test('UP-2a finalize answers a fixed 500 and deletes the staged object on a DB failure', async () => {
+  const c = await ctx();
+  await signup(c, 'dbf');
+  const game = await uploadGame(c, `UP2a dbfail ${uniq()}`);
+
+  // Inject a real Postgres failure at the row write: any game_assets write for a 'dbfail/'
+  // path raises. The route must still answer a fixed {error:'storage'} body — the DB message
+  // is server-side only — and the staged object must be deleted on every exit path.
+  await sql`create or replace function public.mg_test_fail_asset() returns trigger language plpgsql as $f$
+    begin
+      if new.path like 'dbfail/%' then raise exception 'injected test failure'; end if;
+      return new;
+    end
+  $f$`;
+  await sql`drop trigger if exists mg_test_fail_asset on public.game_assets`;
+  await sql`create trigger mg_test_fail_asset before insert or update on public.game_assets
+    for each row execute function public.mg_test_fail_asset()`;
+  try {
+    const s = await sign(c, game.slug, { path: 'dbfail/x.png', size: PNG.length, contentType: 'image/png' });
+    expect(s.status()).toBe(200);
+    const { url, uploadId, uploadPath } = await s.json();
+    expect((await putSigned(url, PNG, 'image/png')).status).toBe(200);
+    expect(await objectExists(uploadPath)).toBe(true);
+
+    const f = await finalize(c, game.slug, { path: 'dbfail/x.png', uploadId });
+    expect(f.status()).toBe(500);
+    const body = await f.json().catch(() => null);
+    expect(body, 'fixed error body — the real DB message is server-side only').toEqual({
+      error: 'storage',
+      message: 'The file could not be stored. Try again.',
+    });
+    expect(await objectExists(uploadPath), 'staged object must be deleted on a DB failure').toBe(false);
+    const [row] = await sql`select status from public.game_assets where game_id = ${game.id} and path = 'dbfail/x.png'`;
+    expect(row, 'no asset row may be written').toBeUndefined();
+    expect((await fetch(assetUrl(game.id, 'dbfail/x.png'))).status, 'never served').toBe(404);
+  } finally {
+    await sql`drop trigger if exists mg_test_fail_asset on public.game_assets`;
+    await sql`drop function if exists public.mg_test_fail_asset()`;
+    await c.dispose();
+  }
+});
+
 test('UP-2a finalize re-checks the whole-version 4 MB cap', async () => {
   const c = await ctx();
   await signup(c, 'total');
