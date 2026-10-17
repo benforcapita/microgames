@@ -3,6 +3,7 @@
 // file-count cap + 4 MB version cap + rate limit). The browser PUTs bytes straight to Supabase;
 // POST /api/games/<slug>/assets/finalize scans the stored bytes, re-checks the caps and writes the
 // 'uploaded' row. Orphans (never finalized) are not assets and are not served by the CDN.
+import { randomBytes } from 'node:crypto';
 import { test, expect, request as pwRequest } from '@playwright/test';
 import postgres from 'postgres';
 import { createClient } from '@supabase/supabase-js';
@@ -32,14 +33,17 @@ const finalize = (c, slug, body) => c.post(`/api/games/${slug}/assets/finalize`,
 const putSigned = (url, bytes, contentType) => fetch(url, { method: 'PUT', headers: { 'content-type': contentType, 'x-upsert': 'true' }, body: bytes });
 const assetUrl = (id, path) => `${CDN}/g/${id}/1/${path}`;
 
-const RUN = Date.now().toString(36);
+// Every title/email/handle gets its own random suffix: --repeat-each runs in the same worker
+// share module state, and Date.now() slugs collide across parallel workers on games_slug_key.
+const uniq = () => randomBytes(5).toString('hex');
 
 async function signup(c, tag) {
-  const email = `up2a-${tag}-${RUN}@example.test`;
+  const id = `${tag}${uniq()}`;
+  const email = `up2a-${id}@example.test`;
   const password = 'up2a-pass-123';
   let r = await c.post('/api/auth/login', { multipart: { mode: 'signup', email, password, next: '/me' }, maxRedirects: 0 });
   expect(r.status(), 'signup').toBe(303);
-  r = await c.post('/api/profile', { multipart: { handle: `up2a${tag}${RUN}`.slice(0, 32), next: '/me' }, maxRedirects: 0 });
+  r = await c.post('/api/profile', { multipart: { handle: `up2a${id}`.slice(0, 32), next: '/me' }, maxRedirects: 0 });
   expect(r.status(), 'handle').toBe(303);
   return { email, password };
 }
@@ -73,7 +77,7 @@ test.afterAll(async () => {
 test('UP-2a sign: anonymous 401, non-owner 404, owner 200', async () => {
   const owner = await ctx();
   await signup(owner, 'own');
-  const game = await uploadGame(owner, `UP2a owner ${Date.now()}`);
+  const game = await uploadGame(owner, `UP2a owner ${uniq()}`);
   const other = await ctx();
   await signup(other, 'oth');
   const anon = await ctx();
@@ -95,7 +99,7 @@ test('UP-2a sign: anonymous 401, non-owner 404, owner 200', async () => {
 test('UP-2a signed URL writes exactly one path', async () => {
   const c = await ctx();
   await signup(c, 'one');
-  const game = await uploadGame(c, `UP2a single ${Date.now()}`);
+  const game = await uploadGame(c, `UP2a single ${uniq()}`);
   const r = await sign(c, game.slug, { path: 'sfx/a.wav', size: SMALL_WAV.length, contentType: 'audio/wav' });
   const { url, token, uploadPath } = await r.json();
   expect(uploadPath).toMatch(new RegExp(`^${game.id}/_staging/`));
@@ -118,7 +122,7 @@ test('UP-2a signed URL writes exactly one path', async () => {
 test('UP-2a finalize rejects a bad file and deletes the stored object', async () => {
   const c = await ctx();
   await signup(c, 'bad');
-  const game = await uploadGame(c, `UP2a bad ${Date.now()}`);
+  const game = await uploadGame(c, `UP2a bad ${uniq()}`);
   await sql`update public.games set stage = 'proving' where id = ${game.id}`;
 
   const s = await sign(c, game.slug, { path: 'sprites/evil.png', size: SVG.length, contentType: 'image/png' });
@@ -147,7 +151,7 @@ test('UP-2a finalize rejects a bad file and deletes the stored object', async ()
 test('UP-2a caps: file-count and 4 MB enforced at both sign and finalize', async () => {
   const c = await ctx();
   await signup(c, 'cap');
-  const game = await uploadGame(c, `UP2a caps ${Date.now()}`);
+  const game = await uploadGame(c, `UP2a caps ${uniq()}`);
 
   // Seat the game at 199 manifest rows so the next row is the 200th.
   await sql`
@@ -178,7 +182,7 @@ test('UP-2a caps: file-count and 4 MB enforced at both sign and finalize', async
   expect((await denied.json()).error).toBe('cap');
 
   // 4 MB cap on a second game (game A is at the file cap, so its failures would be 'cap' anyway).
-  const gameB = await uploadGame(c, `UP2a sizecap ${Date.now()}`);
+  const gameB = await uploadGame(c, `UP2a sizecap ${uniq()}`);
   const [g] = await sql`select size_bytes from public.games where id = ${gameB.id}`;
   const room = 4 * 1024 * 1024 - g.size_bytes;
   const declaredTooBig = await sign(c, gameB.slug, { path: 'big.wav', size: room + 1, contentType: 'audio/wav' });
@@ -202,7 +206,7 @@ test('UP-2a caps: file-count and 4 MB enforced at both sign and finalize', async
 test('UP-2a orphan upload: PUT to a signed URL is not served until finalize', async () => {
   const c = await ctx();
   await signup(c, 'orph');
-  const game = await uploadGame(c, `UP2a orphan ${Date.now()}`);
+  const game = await uploadGame(c, `UP2a orphan ${uniq()}`);
   await sql`update public.games set stage = 'proving' where id = ${game.id}`;
 
   const s = await sign(c, game.slug, { path: 'sprites/orphan.png', size: PNG.length, contentType: 'image/png' });
@@ -223,7 +227,7 @@ test('UP-2a orphan upload: PUT to a signed URL is not served until finalize', as
 test('UP-2a anon and authenticated roles cannot write the bucket; only signed URLs/service role can', async () => {
   const c = await ctx();
   const { email, password } = await signup(c, 'rls');
-  const game = await uploadGame(c, `UP2a rls ${Date.now()}`);
+  const game = await uploadGame(c, `UP2a rls ${uniq()}`);
   const victim = `${game.id}/1/rls.png`;
   const attacker = `${game.id}/1/attacker.png`;
   const PWNED = Buffer.from('PWNED-BYTES');
@@ -260,7 +264,7 @@ test('UP-2a anon and authenticated roles cannot write the bucket; only signed UR
 test('UP-2a happy path: sign -> PUT -> finalize -> row -> CDN 200', async () => {
   const c = await ctx();
   await signup(c, 'happy');
-  const game = await uploadGame(c, `UP2a happy ${Date.now()}`);
+  const game = await uploadGame(c, `UP2a happy ${uniq()}`);
   await sql`update public.games set stage = 'proving' where id = ${game.id}`;
 
   const s = await sign(c, game.slug, { path: 'sfx/jump.wav', size: SMALL_WAV.length, contentType: 'audio/wav' });
@@ -291,7 +295,7 @@ test('UP-2a happy path: sign -> PUT -> finalize -> row -> CDN 200', async () => 
 test('UP-2a signed URL cannot replace a finalized asset without finalize', async () => {
   const c = await ctx();
   await signup(c, 'swap');
-  const game = await uploadGame(c, `UP2a swap ${Date.now()}`);
+  const game = await uploadGame(c, `UP2a swap ${uniq()}`);
   await sql`update public.games set stage = 'proving' where id = ${game.id}`;
 
   // v1 through the whole flow: signed, uploaded, scanned, finalized.
