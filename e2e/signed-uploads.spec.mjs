@@ -352,6 +352,33 @@ test('UP-2a sign rejects control characters in the path with 400, before any sto
   await c.dispose();
 });
 
+test('UP-2a finalize: anonymous 401, non-owner 404, staged object survives for the owner', async () => {
+  const owner = await ctx();
+  await signup(owner, 'fown');
+  const game = await uploadGame(owner, `UP2a fown ${uniq()}`);
+  const other = await ctx();
+  await signup(other, 'foth');
+  const anon = await ctx();
+
+  const s = await sign(owner, game.slug, { path: 'sfx/keep.wav', size: SMALL_WAV.length, contentType: 'audio/wav' });
+  expect(s.status()).toBe(200);
+  const { url, uploadId, uploadPath } = await s.json();
+  expect((await putSigned(url, SMALL_WAV, 'audio/wav')).status).toBe(200);
+  expect(await objectExists(uploadPath)).toBe(true);
+
+  // A valid uploadId is not a capability: the session decides who may finalize.
+  const denied = await finalize(anon, game.slug, { path: 'sfx/keep.wav', uploadId });
+  expect(denied.status(), 'signed-out finalize').toBe(401);
+  const nonOwner = await finalize(other, game.slug, { path: 'sfx/keep.wav', uploadId });
+  expect(nonOwner.status(), 'non-owner finalize').toBe(404);
+  expect(await objectExists(uploadPath), "others' finalize attempts must leave the staged bytes alone").toBe(true);
+
+  const own = await finalize(owner, game.slug, { path: 'sfx/keep.wav', uploadId });
+  expect(own.status(), 'the owner can still finalize the same uploadId').toBe(200);
+  expect(await objectExists(uploadPath), 'staged object is consumed by the real finalize').toBe(false);
+  await Promise.all([owner, other, anon].map((c) => c.dispose()));
+});
+
 test('UP-2a finalize answers a fixed 500 and deletes the staged object on a DB failure', async () => {
   const c = await ctx();
   await signup(c, 'dbf');
