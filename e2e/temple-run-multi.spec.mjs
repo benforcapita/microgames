@@ -17,6 +17,7 @@ import { mkdirSync } from 'node:fs';
 import { copyFile, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { test, expect } from '@playwright/test';
+import { createClient } from '@supabase/supabase-js';
 import { shotPath, SHOT_DIR } from './shots.mjs';
 import { localSupabaseEnv } from '../scripts/lib/local-supabase.mjs';
 import { validateGame } from '../supabase/functions/validate-game/validate.ts';
@@ -92,7 +93,7 @@ test('Temple Dash multi-file: upload, add files on the Files page, every asset l
       apiCalls.push({ method: req.method(), path: url.pathname, contentType: req.headers()['content-type'] ?? '', body: req.postDataBuffer() });
     }
     if (req.method() === 'PUT' && url.origin === STORAGE_ORIGIN && url.pathname.startsWith('/storage/v1/object/upload/sign/')) {
-      storagePuts.push({ url: req.url(), body: req.postDataBuffer() });
+      storagePuts.push({ url: req.url() });
     }
   });
   page.on('console', (msg) => msg.type() === 'error' && consoleErrors.push(`${new URL(msg.location().url || 'about:blank').pathname}: ${msg.text()}`));
@@ -166,11 +167,18 @@ test('Temple Dash multi-file: upload, add files on the Files page, every asset l
       expect(call.body?.length ?? 0, `${call.method} ${call.path} body too big to be metadata`).toBeLessThan(512);
       expect(call.body?.includes(riff) ?? false, `${call.method} ${call.path} carried the WAV header`).toBe(false);
     }
-    // And the bytes did leave the browser: one signed-upload PUT per file, on the Storage origin.
+    // And the bytes did leave the browser: one signed-URL PUT per file, on the Storage origin,
+    // each one landing at a <game>/_staging/<nonce> object. The finalized object the server then
+    // copied out of staging reads back byte-identical to the fixture — the staged object's only
+    // writer was this browser's PUT, so the wire bytes are proven.
     expect(storagePuts, `expected ${ASSET_FILES.length} signed-URL PUTs to ${STORAGE_ORIGIN}`).toHaveLength(ASSET_FILES.length);
+    for (const put of storagePuts) expect(put.url).toContain(`/${gameId}/_staging/`);
+    const service = createClient(localSupabaseEnv().PUBLIC_SUPABASE_URL, localSupabaseEnv().SUPABASE_SECRET_KEY, { auth: { persistSession: false } });
     for (const rel of ASSET_FILES) {
       const bytes = await readFile(path.join(FIXTURE, 'assets', rel));
-      expect(storagePuts.some((p) => p.body?.equals(bytes)), `${rel} bytes never reached Storage`).toBe(true);
+      const stored = await service.storage.from('games').download(`${gameId}/1/${rel}`);
+      expect(stored.error?.message ?? 'ok', `${rel} finalized object missing`).toBe('ok');
+      expect(Buffer.from(await stored.data.arrayBuffer()).equals(bytes), `${rel} stored bytes differ`).toBe(true);
     }
   });
 
