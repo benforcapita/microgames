@@ -275,3 +275,38 @@ test('UP-2a happy path: sign -> PUT -> finalize -> row -> CDN 200', async () => 
   expect(Buffer.from(await res.arrayBuffer()).equals(SMALL_WAV)).toBe(true);
   await c.dispose();
 });
+
+test('UP-2a signed URL cannot replace a finalized asset without finalize', async () => {
+  const c = await ctx();
+  await signup(c, 'swap');
+  const game = await uploadGame(c, `UP2a swap ${Date.now()}`);
+  await sql`update public.games set stage = 'proving' where id = ${game.id}`;
+
+  // v1 through the whole flow: signed, uploaded, scanned, finalized.
+  const v1 = wav(320);
+  const s1 = await sign(c, game.slug, { path: 'sfx/beep.wav', size: v1.length, contentType: 'audio/wav' });
+  const one = await s1.json();
+  expect((await putSigned(one.url, v1, 'audio/wav')).status).toBe(200);
+  expect((await finalize(c, game.slug, { path: 'sfx/beep.wav', uploadId: one.uploadId })).status()).toBe(200);
+  const first = await fetch(assetUrl(game.id, 'sfx/beep.wav'));
+  expect(Buffer.from(await first.arrayBuffer()).equals(v1)).toBe(true);
+
+  // Sign the same path again and PUT hostile bytes — but never finalize.
+  const v2 = wav(512);
+  const s2 = await sign(c, game.slug, { path: 'sfx/beep.wav', size: v2.length, contentType: 'audio/wav' });
+  expect(s2.status(), 're-signing a finalized path is allowed (replacement flow)').toBe(200);
+  const two = await s2.json();
+  expect((await putSigned(two.url, v2, 'audio/wav')).status).toBe(200);
+
+  // The served object must still be the scanned v1 bytes — the row says 'uploaded', so whatever
+  // sits at that storage key is what the CDN hands out. Read it directly: the CDN's object cache
+  // can mask an overwrite for its TTL.
+  const served = await gamesBucket().download(`${game.id}/1/sfx/beep.wav`);
+  expect(served.error).toBeNull();
+  expect(Buffer.from(await served.data.arrayBuffer()).equals(v1), 'served object still holds the finalized bytes').toBe(true);
+
+  const still = await fetch(assetUrl(game.id, 'sfx/beep.wav'));
+  expect(still.status).toBe(200);
+  expect(Buffer.from(await still.arrayBuffer()).equals(v1), 'CDN must keep serving the finalized bytes').toBe(true);
+  await c.dispose();
+});
