@@ -175,3 +175,71 @@ test('restart keeps the exit button inside the stage', async ({ page, browserNam
     expect(await page.locator('#stage').evaluate((el) => getComputedStyle(el).position)).toBe('relative');
   }
 });
+
+async function swipeInGame(page) {
+  const box = await page.locator('iframe.mg-frame').boundingBox();
+  const y = box.y + box.height * 0.62;
+  const x1 = box.x + box.width * 0.2;
+  const x2 = box.x + box.width * 0.8;
+  // WebKit exposes taps only. A tap still starts in the iframe, which is the lead-in under test.
+  if (page.context().browser().browserType().name() !== 'chromium') {
+    await page.touchscreen.tap((x1 + x2) / 2, y);
+    return;
+  }
+  // One continuous touch, the way Chrome flushes a swipe that started in a cross-origin
+  // iframe when that frame's touch ack is behind. A later tap can then miss its click.
+  const cdp = await page.context().newCDPSession(page);
+  const move = (type, x) => cdp.send('Input.dispatchTouchEvent', {
+    type,
+    touchPoints: type === 'touchEnd' ? [] : [{ x: Math.round(x), y: Math.round(y), radiusX: 2, radiusY: 2, force: 1, id: 1 }],
+  });
+  await move('touchStart', x1);
+  for (let i = 1; i <= 6; i++) await move('touchMove', x1 + ((x2 - x1) * i) / 6);
+  await move('touchEnd', x2);
+}
+
+test('a swipe in the game then a tap on the × leaves fullscreen', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.use.hasTouch !== true, 'phone touch only');
+  const project = testInfo.project.name || 'touch';
+  await markPlayable();
+  await page.goto('/play/neon-lanes');
+  await page.getByRole('button', { name: /Play / }).tap();
+  const frame = page.frameLocator('iframe.mg-frame');
+  await frame.locator('canvas').waitFor({ timeout: 30_000 });
+  const toolbar = page.locator('#fullscreen');
+  const exit = page.locator('#stage [data-fullscreen-exit]');
+  await toolbar.tap();
+  await expect(toolbar).toHaveAttribute('aria-label', 'Exit fullscreen');
+  await expect(exit).toBeVisible();
+
+  await swipeInGame(page);
+  await page.screenshot({ path: shotPath(`fs-2a-${project}-before-exit.png`) });
+
+  const box = await exit.boundingBox();
+  await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2);
+  await page.screenshot({ path: shotPath(`fs-2a-${project}-after-exit.png`) });
+
+  await expect(toolbar).toHaveAttribute('aria-label', 'Fullscreen');
+  await expect(toolbar).toHaveText('⛶ Fullscreen');
+  await expect(exit).toHaveCount(0);
+  const closed = await page.evaluate(() => ({
+    native: document.fullscreenElement,
+    immersive: document.getElementById('stage')?.dataset.immersive ?? '',
+  }));
+  expect(closed.native).toBeNull();
+  expect(closed.immersive).toBe('');
+
+  const game = page.frames().find((entry) => /\/g\/.*index\.html/.test(entry.url()));
+  await game.evaluate(() => {
+    window.__mgPointers = 0;
+    window.addEventListener('pointerdown', () => { window.__mgPointers += 1; }, true);
+  });
+  const stage = await page.locator('#stage').boundingBox();
+  const hit = await page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.tagName ?? '', {
+    x: stage.x + stage.width / 2,
+    y: stage.y + stage.height / 2,
+  });
+  expect(hit).toBe('IFRAME');
+  await page.touchscreen.tap(stage.x + stage.width / 2, stage.y + stage.height * 0.62);
+  await expect.poll(() => game.evaluate(() => window.__mgPointers)).toBeGreaterThan(0);
+});
