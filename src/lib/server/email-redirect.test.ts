@@ -68,6 +68,7 @@ describe('auth email redirect allowlist', () => {
       'https://MESHGROUNDS.vercel.app',
       'https://meshground.com',
       'https://www.meshground.com',
+      'https://x.meshground.app',
       'http://www.meshground.app',
       'https://www.meshground.app.evil.com',
       'https://evilmeshground.app',
