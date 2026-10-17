@@ -22,7 +22,7 @@ const start = (o: { origin?: string; next?: unknown; enabled?: boolean | 'throw'
   const f = o.auth ?? fakeAuth();
   const p = startGoogleSignIn({
     auth: f.auth,
-    requestUrl: new URL(`${o.origin ?? 'https://meshground.com'}/api/auth/google`),
+    requestUrl: new URL(`${o.origin ?? 'https://www.meshground.app'}/api/auth/google`),
     originHeader: o.header,
     next: o.next,
     nodeEnv: o.nodeEnv ?? 'production',
@@ -36,7 +36,7 @@ describe('GA-1 Continue with Google: start', () => {
   it('asks Supabase for Google with redirectTo = <origin>/auth/callback?next=<next>, then redirects to its URL', async () => {
     const { f, p } = start({ next: '/play/stack-tower?x=1' });
     assert.equal(await p, GOOGLE);
-    assert.deepEqual(f.calls, [{ provider: 'google', options: { redirectTo: 'https://meshground.com/auth/callback?next=%2Fplay%2Fstack-tower%3Fx%3D1' } }]);
+    assert.deepEqual(f.calls, [{ provider: 'google', options: { redirectTo: 'https://www.meshground.app/auth/callback?next=%2Fplay%2Fstack-tower%3Fx%3D1' } }]);
   });
   it('uses the local origin in dev', async () => {
     const { f, p } = start({ origin: 'http://127.0.0.1:4321', next: '/me', nodeEnv: 'development' });
@@ -47,7 +47,7 @@ describe('GA-1 Continue with Google: start', () => {
     for (const next of ['https://evil.example/x', '//evil.example', '/\\evil.example', 'javascript:alert(1)', '/\nx', undefined, 42]) {
       const { f, p } = start({ next });
       await p;
-      assert.equal((f.calls[0] as any).options.redirectTo, 'https://meshground.com/auth/callback?next=%2F', String(next));
+      assert.equal((f.calls[0] as any).options.redirectTo, 'https://www.meshground.app/auth/callback?next=%2F', String(next));
     }
   });
   it('refuses a non-allowlisted origin without calling Supabase', async () => {

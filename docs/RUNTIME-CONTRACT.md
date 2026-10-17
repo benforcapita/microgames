@@ -21,7 +21,7 @@ Paste one of these into your AI coding tool together with your game. They are al
 ### Prompt A — make my game Meshground-ready
 
 ```
-You are helping me prepare a browser game for Meshground (meshground.com). Rewrite the game I paste below so it follows the Meshground runtime contract v1 exactly. Keep the gameplay, art and feel the same; only change what's needed.
+You are helping me prepare a browser game for Meshground (meshground.app). Rewrite the game I paste below so it follows the Meshground runtime contract v1 exactly. Keep the gameplay, art and feel the same; only change what's needed.
 
 THE CONTRACT
 1. Output ONE self-contained HTML file (UTF-8), starting with <!doctype html>. Whole game, code plus assets, under 4 MB (target ≤ 1 MB); assets over 100 KB get a warning.
@@ -53,7 +53,7 @@ MY GAME:
 ### Prompt B — QA my game against the Meshground contract
 
 ```
-You are a strict QA reviewer for Meshground (meshground.com). Review the single-file HTML game I paste below against the Meshground runtime contract v1. Do not rewrite the game. Read the code carefully and output a checklist.
+You are a strict QA reviewer for Meshground (meshground.app). Review the single-file HTML game I paste below against the Meshground runtime contract v1. Do not rewrite the game. Read the code carefully and output a checklist.
 
 For EACH item output exactly one line: [PASS], [FAIL] or [WARN], the item name, and a one-sentence reason with the line or snippet that proves it.
 

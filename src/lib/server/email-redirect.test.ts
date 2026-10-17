@@ -27,8 +27,8 @@ describe('auth email redirect allowlist', () => {
     );
   });
 
-  it('allows the meshground.com domain (apex and www) and keeps the Vercel domain working', () => {
-    for (const origin of ['https://meshground.com', 'https://www.meshground.com', PROD]) {
+  it('allows the meshground.app domain (www and apex) and keeps the Vercel domain working', () => {
+    for (const origin of ['https://www.meshground.app', 'https://meshground.app', PROD]) {
       assert.equal(redirect(origin, '/me'), `${origin}/auth/callback?next=%2Fme`, origin);
     }
   });
@@ -66,9 +66,12 @@ describe('auth email redirect allowlist', () => {
       'https://meshgrounds-cdn-git-foo-benteam2.vercel.app',
       'https://meshgrounds-x-benteam3.vercel.app',
       'https://MESHGROUNDS.vercel.app',
-      'http://meshground.com',
-      'https://meshground.com.evil.com',
-      'https://evilmeshground.com',
+      'https://meshground.com',
+      'https://www.meshground.com',
+      'https://x.meshground.app',
+      'http://www.meshground.app',
+      'https://www.meshground.app.evil.com',
+      'https://evilmeshground.app',
       'https://meshgrounds.com',
       'https://user@meshgrounds.vercel.app',
       'javascript:alert(1)',
