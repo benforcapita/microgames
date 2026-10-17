@@ -12,6 +12,7 @@
 // Validation transport is the same as e2e/temple-run.spec.mjs: the validate-game Edge Function's
 // own module runs in-process against the real Storage bundle and the real record_game_validation
 // RPC (the local stack has no edge-runtime), so the verdict and stage change are production code.
+import { randomBytes } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { copyFile, readFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -71,7 +72,9 @@ test('Temple Dash multi-file: upload, add files on the Files page, every asset l
   test.setTimeout(240_000);
   const html = await readFile(path.join(FIXTURE, 'index.html'));
   const thumb = await readFile(path.join(FIXTURE, 'thumb.png'));
-  const stamp = Date.now().toString(36);
+  // QA #74: Date.now() alone collided under parallel workers/repeats; a random suffix keeps the
+  // signup email, handle and title unique per run.
+  const stamp = `${Date.now().toString(36)}${randomBytes(3).toString('hex')}`;
   const title = `Temple Dash Files ${stamp}`;
   const handle = `trm${stamp}`.slice(0, 32);
 
