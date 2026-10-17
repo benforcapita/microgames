@@ -384,18 +384,20 @@ test('UP-2a finalize answers a fixed 500 and deletes the staged object on a DB f
   await signup(c, 'dbf');
   const game = await uploadGame(c, `UP2a dbfail ${uniq()}`);
 
-  // Inject a real Postgres failure at the row write: any game_assets write for a 'dbfail/'
-  // path raises. The route must still answer a fixed {error:'storage'} body — the DB message
-  // is server-side only — and the staged object must be deleted on every exit path.
-  await sql`create or replace function public.mg_test_fail_asset() returns trigger language plpgsql as $f$
+  // Inject a real Postgres failure at the row write: a game_assets write for this game's
+  // 'dbfail/' path raises. The route must still answer a fixed {error:'storage'} body — the DB
+  // message is server-side only — and the staged object must be deleted on every exit path.
+  // The function/trigger names and the condition are unique to this invocation: --repeat-each
+  // and --workers run copies of this test concurrently on the same database.
+  const fn = `mg_test_fail_${uniq()}`;
+  await sql.unsafe(`create or replace function public.${fn}() returns trigger language plpgsql as $f$
     begin
-      if new.path like 'dbfail/%' then raise exception 'injected test failure'; end if;
+      if new.game_id = '${game.id}' and new.path like 'dbfail/%' then raise exception 'injected test failure'; end if;
       return new;
     end
-  $f$`;
-  await sql`drop trigger if exists mg_test_fail_asset on public.game_assets`;
-  await sql`create trigger mg_test_fail_asset before insert or update on public.game_assets
-    for each row execute function public.mg_test_fail_asset()`;
+  $f$`);
+  await sql.unsafe(`create trigger ${fn} before insert or update on public.game_assets
+    for each row execute function public.${fn}()`);
   try {
     const s = await sign(c, game.slug, { path: 'dbfail/x.png', size: PNG.length, contentType: 'image/png' });
     expect(s.status()).toBe(200);
@@ -415,8 +417,8 @@ test('UP-2a finalize answers a fixed 500 and deletes the staged object on a DB f
     expect(row, 'no asset row may be written').toBeUndefined();
     expect((await fetch(assetUrl(game.id, 'dbfail/x.png'))).status, 'never served').toBe(404);
   } finally {
-    await sql`drop trigger if exists mg_test_fail_asset on public.game_assets`;
-    await sql`drop function if exists public.mg_test_fail_asset()`;
+    await sql.unsafe(`drop trigger if exists ${fn} on public.game_assets`);
+    await sql.unsafe(`drop function if exists public.${fn}()`);
     await c.dispose();
   }
 });
