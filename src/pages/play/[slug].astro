@@ -85,7 +85,7 @@ const uploaded = Astro.url.searchParams.has('uploaded');
         </div>
         <div class="row">
           <button class="btn ghost sm" type="button" id="restart">↻ Restart</button>
-          <button class="btn ghost sm" type="button" id="fullscreen">⛶ Fullscreen</button>
+          <button class="btn ghost sm" type="button" id="fullscreen" aria-label="Fullscreen">⛶ Fullscreen</button>
           {remixable && <a class="btn ghost sm" href={`${CDN_ORIGIN}/g/${game.id}/index.html?source${ptQuery}`} target="_blank" rel="noopener">{'</>'} Source</a>}
           {remixable && live && <a class="btn sm" href={`/upload?fork=${game.slug}`}>⑂ Fork</a>}
           {isOwner && <a class="btn ghost sm" href="/me">Manage</a>}
@@ -171,7 +171,8 @@ const uploaded = Astro.url.searchParams.has('uploaded');
     /* Keep the running game's layout and paint isolated from the rest of the page. */
     contain: layout paint;
   }
-  .stage:fullscreen { border-radius: 0; max-height: none; border: 0; }
+  .stage:fullscreen,
+  .stage:-webkit-full-screen { border-radius: 0; max-height: none; border: 0; }
   .launch {
     position: absolute;
     inset: 0;
@@ -243,6 +244,7 @@ const uploaded = Astro.url.searchParams.has('uploaded');
 
 <script>
   import { mountPlayer, preloadSave, type PlayerHandle } from '../../client/player';
+  import { attachStageFullscreen } from '../../client/stage-fullscreen';
 
   // Desktop-only visits render the notice instead of #stage, so this script no-ops there.
   const stage = document.getElementById('stage');
@@ -270,10 +272,20 @@ const uploaded = Astro.url.searchParams.has('uploaded');
     };
     stage.querySelector('.launch')!.addEventListener('click', start);
     document.getElementById('restart')!.addEventListener('click', start);
-    document.getElementById('fullscreen')!.addEventListener('click', () => {
-      if (!player) start();
-      stage.requestFullscreen?.();
-      player?.frame.focus();
-    });
+    // Fullscreen is the same for every game: the shared stage, never a per-game hook.
+    const fullscreenBtn = document.getElementById('fullscreen');
+    if (fullscreenBtn instanceof HTMLButtonElement) {
+      const fullscreen = attachStageFullscreen(stage, fullscreenBtn);
+      fullscreenBtn.addEventListener('click', () => {
+        if (!player) start();
+        void fullscreen.toggle().then((mode) => {
+          // CSS mode needs the toolbar focused so Escape reaches this document.
+          // Leaving either mode returns focus here. Native enter keeps the game focused;
+          // the × inside the stage is on screen for that mode.
+          if (mode === 'native') player?.frame.focus();
+          else fullscreenBtn.focus();
+        });
+      });
+    }
   }
 </script>
