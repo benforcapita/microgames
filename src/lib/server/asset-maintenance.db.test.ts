@@ -549,8 +549,9 @@ describe('runAssetMaintenance', () => {
       assert.equal(rows?.n, overCap, 'a refused run deletes no rows');
       assert.equal(await c.exists(stale), true, 'a refused run removes no staging objects either');
 
-      // The cap is a guardrail, not a wall: raising it runs the same pass.
-      const report = await runAssetMaintenance(sql, c.storage, { maxOrphanDeletes: overCap });
+      // The cap is a guardrail, not a wall: raising it runs the same pass. A generous
+      // limit so concurrent test fixtures elsewhere in the suite cannot push it over.
+      const report = await runAssetMaintenance(sql, c.storage, { maxOrphanDeletes: 500 });
       assert.ok(report.orphansDeleted >= overCap, `report: ${JSON.stringify(report)}`);
       assert.equal((await sql`select count(*)::int as n from public.game_assets where game_id = ${gameId}`)[0]?.n, 0);
     } finally {
