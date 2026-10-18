@@ -55,7 +55,11 @@ const awaitingReview = view.game.stage === 'pending' && view.validation?.status 
       <h1>{view.game.title}</h1>
       <span class="row">
         <span class:list={['badge', view.game.stage]}>{stageLabel}</span>
-        <span class:list={['badge', 'phase', view.phase]} aria-live="polite">{view.headline}</span>
+        {
+          view.headline !== stageLabel && (
+            <span class:list={['badge', 'phase', view.phase]} aria-live="polite">{view.headline}</span>
+          )
+        }
       </span>
     </div>
     <p class="muted lead">{view.detail}</p>

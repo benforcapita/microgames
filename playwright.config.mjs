@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { defineConfig } from '@playwright/test';
 import { localSupabaseEnv } from './scripts/lib/local-supabase.mjs';
 
@@ -7,8 +8,12 @@ const WEB = `http://127.0.0.1:${WEB_PORT}`;
 const CDN = `http://127.0.0.1:${CDN_PORT}`;
 // Runs against the LOCAL Supabase stack (`npm run db:start`). Keys come from `supabase status` at runtime
 // and are only passed as env vars to the servers below; nothing is written to disk.
+// Owner previews of pending games need a CDN preview secret shared by the portal and the CDN.
+// A throwaway one per run (set on process.env so workers inherit the same value); never written to disk.
+process.env.CDN_PREVIEW_SECRET ||= randomBytes(32).toString('hex');
 const env = {
   ...localSupabaseEnv(),
+  CDN_PREVIEW_SECRET: process.env.CDN_PREVIEW_SECRET,
   SITE_URL: WEB,
   HOST: '127.0.0.1',
   PORT: String(WEB_PORT),

@@ -70,7 +70,7 @@ const uploaded = Astro.url.searchParams.has('uploaded');
     {
       desktopOnly ? (
         <section class="desktop-only panel" data-testid="desktop-only" role="note" aria-label={notice.heading}>
-          <GameThumb game={game} class="desktop-only-art" eager />
+          <GameThumb game={game} class="desktop-only-art" eager previewToken={previewToken} />
           <div>
             <p class="eyebrow">{notice.heading}</p>
             <p class="desktop-only-title">{notice.title}</p>
@@ -81,7 +81,7 @@ const uploaded = Astro.url.searchParams.has('uploaded');
     <div class="stage-wrap">
       <div id="stage" class="stage" data-game-id={game.id} data-game-title={game.title} data-game-stage={game.stage} data-cdn={CDN_ORIGIN} data-cloud={user ? '1' : ''} data-preview={previewToken ?? ''}>
         <button class="launch" type="button" aria-label={`Play ${game.title}`}>
-          <GameThumb game={game} class="preview-art" eager />
+          <GameThumb game={game} class="preview-art" eager previewToken={previewToken} />
           <span class="preview-shade" aria-hidden="true"></span>
           <span class="preview-body">
             <span class="play-icon" aria-hidden="true">▶</span>
