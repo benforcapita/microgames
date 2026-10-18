@@ -87,9 +87,10 @@ export function mintAssetUploadId(
   now: number = Date.now(),
 ): { uploadId: string; nonce: string; expiresAt: number } {
   const nonce = crypto.randomBytes(12).toString('base64url');
-  const expiresAt = now + ASSET_UPLOAD_ID_TTL_MS;
-  const exp = Math.floor(expiresAt / 1000);
-  return { uploadId: `${nonce}.${exp}.${uploadIdSignature(secret, gameId, version, path, nonce, exp)}`, nonce, expiresAt };
+  // expiresAt IS the signed deadline: exp is floored to seconds inside the signature, so
+  // reporting now+TTL verbatim could show a deadline up to ~1 s later than the real one.
+  const exp = Math.floor((now + ASSET_UPLOAD_ID_TTL_MS) / 1000);
+  return { uploadId: `${nonce}.${exp}.${uploadIdSignature(secret, gameId, version, path, nonce, exp)}`, nonce, expiresAt: exp * 1000 };
 }
 
 export type AssetUploadIdVerdict =
