@@ -53,6 +53,7 @@ describe('MG_MANUAL_REVIEW', () => {
       const source = readFileSync(file, 'utf8');
       assert.doesNotMatch(source, /MG_MANUAL_REVIEW/, file);
       assert.doesNotMatch(source, /insert into private\.settings/i, file);
+      assert.doesNotMatch(source, /update\s+private\.settings/i, file);
       assert.doesNotMatch(source, /manual-review-sync/, file);
     }
     assert.doesNotMatch(readFileSync('supabase/functions/validate-game/rest-store.ts', 'utf8'), /p_manual_review/);

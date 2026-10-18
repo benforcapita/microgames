@@ -664,36 +664,57 @@ describe('runAssetMaintenance', () => {
   it('refuses to delete anything when orphan candidates exceed the per-run cap', async (t) => {
     const c = await connect(t);
     if (!c) return;
-    const { sql } = c;
-    const gameId = await makeGame(sql);
-    const stale = `${gameId}/_staging/${randomBytes(8).toString('hex')}`;
+    // The candidate list is every stale orphan on the connection. A scratch database
+    // keeps that list to this test, so a parallel sweep cannot change the count the
+    // refusal names or push the raised cap back over.
+    const scratch = await scratchMaintenanceDb(c.env);
+    const gameId = 'g1';
+    const stale = `${gameId}/_staging/old`;
     const overCap = MAINTENANCE_MAX_ORPHAN_DELETES + 5;
+    const stub: MaintenanceStorage = {
+      sees: async () => true,
+      upload: async (name) => {
+        await scratch.sql`insert into storage.objects (bucket_id, name) values ('games', ${name})`;
+        return { error: null };
+      },
+      remove: async (paths) => {
+        await scratch.sql`delete from storage.objects where bucket_id = 'games' and name = any(${paths})`;
+        return { error: null };
+      },
+    };
     try {
-      await c.upload(stale);
-      await sql`update storage.objects set created_at = now() - interval '3 hours' where bucket_id = 'games' and name = ${stale}`;
+      await scratch.sql`insert into public.games (id) values (${gameId})`;
+      await scratch.sql`
+        insert into storage.objects (bucket_id, name, created_at)
+        values ('games', ${stale}, now() - interval '3 hours')`;
       for (let i = 0; i < overCap; i++) {
-        await addAssetRow(sql, gameId, `o-${i}.png`, { sha: SHA('a'), sizeBytes: 10, ageHours: 3 });
+        await scratch.sql`
+          insert into public.game_assets (game_id, version, path, status, size_bytes, content_sha256, updated_at)
+          values (${gameId}, 1, ${`o-${i}.png`}, 'uploaded', 10, ${SHA('a')}, now() - interval '3 hours')`;
       }
 
       await assert.rejects(
-        runAssetMaintenance(sql, c.storage),
+        runAssetMaintenance(scratch.sql, stub),
         (error: unknown) =>
-          error instanceof MaintenanceRefusal && /orphan/.test(error.message) && String(overCap) && error.message.includes(String(overCap)),
+          error instanceof MaintenanceRefusal && /orphan/.test(error.message) && error.message.includes(String(overCap)),
         'over the orphan cap the run must refuse',
       );
-      const [rows] = await sql<{ n: number }[]>`select count(*)::int as n from public.game_assets where game_id = ${gameId}`;
+      const [rows] = await scratch.sql<{ n: number }[]>`select count(*)::int as n from public.game_assets`;
       assert.equal(rows?.n, overCap, 'a refused run deletes no rows');
-      assert.equal(await c.exists(stale), true, 'a refused run removes no staging objects either');
+      const [staging] = await scratch.sql<{ n: number }[]>`
+        select count(*)::int as n from storage.objects where bucket_id = 'games' and name = ${stale}`;
+      assert.equal(staging?.n, 1, 'a refused run removes no staging objects either');
 
-      // The cap is a guardrail, not a wall: raising it runs the same pass. A generous
-      // limit so concurrent test fixtures elsewhere in the suite cannot push it over.
-      const report = await runAssetMaintenance(sql, c.storage, { maxOrphanDeletes: 500 });
-      assert.ok(report.orphansDeleted >= overCap, `report: ${JSON.stringify(report)}`);
-      assert.equal((await sql`select count(*)::int as n from public.game_assets where game_id = ${gameId}`)[0]?.n, 0);
+      const report = await runAssetMaintenance(scratch.sql, stub, { maxOrphanDeletes: overCap });
+      assert.equal(report.orphansDeleted, overCap, `report: ${JSON.stringify(report)}`);
+      assert.equal((await scratch.sql<{ n: number }[]>`select count(*)::int as n from public.game_assets`)[0]?.n, 0);
+      assert.equal(
+        (await scratch.sql<{ n: number }[]>`select count(*)::int as n from storage.objects where name = ${stale}`)[0]?.n,
+        0,
+      );
     } finally {
-      await c.storage.remove([stale]).catch(() => {});
-      await sql`delete from public.games where id = ${gameId}`.catch(() => {});
-      await sql.end({ timeout: 1 }).catch(() => {});
+      await scratch.drop();
+      await c.sql.end({ timeout: 1 }).catch(() => {});
     }
   });
 

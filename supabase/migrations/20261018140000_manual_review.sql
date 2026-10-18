@@ -101,6 +101,14 @@ begin
      and q.status = 'queued'
      and q.bundle_sha256 is null;
 
+  -- A pass is no longer a stuck validation. The sweeper counts attempts toward
+  -- auto-reject; leaving them set would reject a held or later-demoted game.
+  if p_status = 'passed' then
+    update private.validation_dispatch
+       set attempts = 0
+     where game_id = p_game_id;
+  end if;
+
   nxt := case when cur = 'pending' and p_status = 'passed' and hold then cur
               when cur = 'pending' and p_status = 'passed' then 'proving'
               when cur = 'pending' and p_status = 'failed' then 'rejected'
@@ -144,6 +152,12 @@ begin
    where gv.game_id = p_game_id and gv.bundle_sha256 = p_sha256
    order by gv.version desc limit 1;
   if st is null then return; end if;
+
+  if st = 'passed' then
+    update private.validation_dispatch
+       set attempts = 0
+     where game_id = p_game_id;
+  end if;
 
   nxt := case when cur = 'pending' and st = 'passed' and hold then cur
               when cur = 'pending' and st = 'passed' then 'proving'
@@ -228,6 +242,8 @@ update public.games
 -- Studio connects as postgres and can read it. anon, authenticated, and public cannot.
 -- Pending only: a passed game waiting for its first review, or a reviewed game sent back
 -- to pending (an asset change). A still-public game is not queued. Bundles are not pinned.
+-- private.sweep_stuck_pending_games skips every row this view returns, so a held or
+-- demoted game is not re-dispatched or auto-rejected. Change the predicate here only.
 create or replace view public.games_awaiting_review
 with (security_invoker = true) as
 select
@@ -248,3 +264,66 @@ where g.stage = 'pending'
   );
 
 revoke all on table public.games_awaiting_review from public, anon, authenticated;
+
+-- Same body as 20261015120800, plus the review-queue exclusion. Re-callable.
+-- Re-queues games genuinely awaiting validation, and rejects those that already
+-- used validate_game_max_attempts (local default 8). A row in games_awaiting_review
+-- is waiting on a person (a passed validation, or a demotion that left reviewed_at
+-- set) and is not a stuck validation. Returns how many were re-queued.
+create or replace function private.sweep_stuck_pending_games()
+returns integer
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_after interval;
+  v_max integer;
+  rec record;
+  v_count integer := 0;
+begin
+  select value::interval into v_after
+  from private.settings
+  where key = 'validate_game_stuck_after';
+  if v_after is null then
+    v_after := interval '2 minutes';
+  end if;
+
+  select value::integer into v_max
+  from private.settings
+  where key = 'validate_game_max_attempts';
+  if v_max is null then
+    v_max := 8;
+  end if;
+
+  for rec in
+    select g.id, coalesce(d.attempts, 0) as attempts
+    from public.games g
+    left join private.validation_dispatch d on d.game_id = g.id
+    where g.stage = 'pending'
+      and not exists (
+        select 1 from public.games_awaiting_review q
+        where q.id = g.id
+      )
+      and (
+        coalesce(d.attempts, 0) >= v_max
+        or d.last_dispatched_at is null
+        or d.last_dispatched_at < now() - v_after
+      )
+    order by g.created_at
+    limit 50
+  loop
+    if rec.attempts >= v_max then
+      perform private.reject_unavailable_validation(rec.id);
+    else
+      perform private.dispatch_validate_game(rec.id, 'sweep');
+      v_count := v_count + 1;
+    end if;
+  end loop;
+
+  return v_count;
+end;
+$$;
+
+revoke all on function private.sweep_stuck_pending_games() from public, anon, authenticated;
+grant execute on function private.sweep_stuck_pending_games() to postgres, service_role;

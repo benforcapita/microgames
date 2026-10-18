@@ -467,6 +467,139 @@ describe('manual review (db)', () => {
     }
   });
 
+  it('a missing switch row means review is on, and reading it does not write the row', async (t) => {
+    if (skip(t)) return;
+    const [before] = await sql<{ value: string; mark: string }[]>`
+      select value, xmin::text as mark from private.settings where key = 'mg_manual_review'`;
+    assert.equal(await readManualReview(), true);
+    const [after] = await sql<{ value: string; mark: string }[]>`
+      select value, xmin::text as mark from private.settings where key = 'mg_manual_review'`;
+    assert.equal(after?.value, before?.value);
+    assert.equal(after?.mark, before?.mark, 'readManualReview must not update private.settings');
+
+    const id = `mrmiss${userId.replace(/-/g, '').slice(0, 8)}`;
+    const rollback = new Error('rollback-missing-switch');
+    try {
+      await sql.begin(async (tx) => {
+        await tx`delete from private.settings where key = 'mg_manual_review'`;
+        const [enabled] = await tx<{ enabled: boolean }[]>`select public.manual_review_enabled() as enabled`;
+        assert.equal(enabled?.enabled, true);
+        assert.equal(await readManualReview(tx), true);
+        await tx`
+          insert into public.games (id, slug, title, creator, stage)
+          values (${id}, ${id}, 'Missing switch', 'legacy', 'pending')`;
+        const [held] = await tx<{ stage: string }[]>`
+          select stage from public.record_game_validation(${id}, ${sha('e4')}, 'passed', ${tx.json(passReport)})`;
+        assert.equal(held?.stage, 'pending');
+        throw rollback;
+      });
+    } catch (err) {
+      if (err !== rollback) throw err;
+    }
+  });
+
+  it('the sweeper leaves a held game and a demoted live game pending, and still rejects a stuck one at 8', async (t) => {
+    if (skip(t)) return;
+    const suffix = userId.replace(/-/g, '').slice(0, 8);
+    const heldId = `swh${suffix}`;
+    const demotedId = `swd${suffix}`;
+    const stuckId = `sws${suffix}`;
+    const sweeps = 10;
+    const rollback = new Error('rollback-sweeper');
+    try {
+      await sql.begin(async (tx) => {
+        // Insert the live game before any pass: a held pass sets skip_review_stamp
+        // for the rest of this transaction, and that must not hide the live stamp.
+        await tx`
+          insert into public.games (id, slug, title, creator, stage, created_at)
+          values (${demotedId}, ${demotedId}, 'Demoted', 'legacy', 'live', '1999-01-02')`;
+        const [wasLive] = await tx<{ reviewed_at: Date | null }[]>`
+          select reviewed_at from public.games where id = ${demotedId}`;
+        assert.ok(wasLive?.reviewed_at, 'a live insert is a review');
+        await tx`update public.games set stage = 'pending' where id = ${demotedId}`;
+        await tx`
+          insert into private.validation_dispatch (game_id, attempts, last_dispatched_at, last_reason)
+          values (${demotedId}, 8, now() - interval '10 minutes', 'test')`;
+        const [demotedVals] = await tx<{ n: number }[]>`
+          select count(*)::int as n from public.game_validations where game_id = ${demotedId}`;
+        assert.equal(demotedVals?.n, 0, 'a demotion adds no validation row');
+
+        await tx`
+          insert into public.games (id, slug, title, creator, stage, created_at)
+          values (${heldId}, ${heldId}, 'Held', 'legacy', 'pending', '1999-01-01')`;
+        await tx`
+          insert into private.validation_dispatch (game_id, attempts, last_dispatched_at, last_reason)
+          values (${heldId}, 8, now() - interval '10 minutes', 'test')`;
+        const [passed] = await tx<{ stage: string }[]>`
+          select stage from public.record_game_validation(${heldId}, ${sha('c1')}, 'passed', ${tx.json(passReport)})`;
+        assert.equal(passed?.stage, 'pending');
+        const [reset] = await tx<{ attempts: number }[]>`
+          select attempts from private.validation_dispatch where game_id = ${heldId}`;
+        assert.equal(reset?.attempts, 0, 'a pass resets the dispatch attempts counter');
+        await tx`update private.validation_dispatch set attempts = 5 where game_id = ${heldId}`;
+        const [applied] = await tx<{ stage: string }[]>`
+          select stage from public.apply_stored_validation(${heldId}, ${sha('c1')})`;
+        assert.equal(applied?.stage, 'pending');
+        const [resetAgain] = await tx<{ attempts: number }[]>`
+          select attempts from private.validation_dispatch where game_id = ${heldId}`;
+        assert.equal(resetAgain?.attempts, 0, 'applying a stored pass resets the counter too');
+        await tx`
+          update private.validation_dispatch
+             set attempts = 8, last_dispatched_at = now() - interval '10 minutes'
+           where game_id = ${heldId}`;
+
+        await tx`
+          insert into public.games (id, slug, title, creator, stage, created_at)
+          values (${stuckId}, ${stuckId}, 'Stuck', 'legacy', 'pending', '1970-01-01')`;
+        await tx`
+          insert into private.validation_dispatch (game_id, attempts, last_dispatched_at, last_reason)
+          values (${stuckId}, 7, now() - interval '10 minutes', 'test')`;
+
+        const queued = async (id: string) =>
+          (await tx<{ id: string }[]>`select id from public.games_awaiting_review where id = ${id}`).length;
+        assert.equal(await queued(heldId), 1);
+        assert.equal(await queued(demotedId), 1);
+        assert.equal(await queued(stuckId), 0);
+
+        await tx`select private.sweep_stuck_pending_games()`;
+        const [retried] = await tx<{ stage: string; attempts: number }[]>`
+          select g.stage, d.attempts
+          from public.games g
+          join private.validation_dispatch d on d.game_id = g.id
+          where g.id = ${stuckId}`;
+        assert.equal(retried?.stage, 'pending', 'seven attempts is a retry, not a rejection');
+        assert.equal(retried?.attempts, 7);
+
+        await tx`
+          update private.validation_dispatch
+             set attempts = 8, last_dispatched_at = now() - interval '10 minutes'
+           where game_id = ${stuckId}`;
+
+        for (let i = 0; i < sweeps; i++) await tx`select private.sweep_stuck_pending_games()`;
+
+        const stages = async (id: string) =>
+          (await tx<{ stage: string }[]>`select stage from public.games where id = ${id}`)[0]?.stage;
+        assert.equal(await stages(heldId), 'pending');
+        assert.equal(await stages(demotedId), 'pending');
+        assert.equal(await queued(heldId), 1);
+        assert.equal(await queued(demotedId), 1);
+        const [heldAttempts] = await tx<{ attempts: number }[]>`
+          select attempts from private.validation_dispatch where game_id = ${heldId}`;
+        assert.equal(heldAttempts?.attempts, 8, 'the sweeper does not touch a game awaiting review');
+
+        assert.equal(await stages(stuckId), 'rejected');
+        assert.equal(await queued(stuckId), 0);
+        const [errorRow] = await tx<{ n: number }[]>`
+          select count(*)::int as n from public.game_validations
+          where game_id = ${stuckId} and status = 'error'`;
+        assert.equal(errorRow?.n, 1);
+        throw rollback;
+      });
+    } catch (err) {
+      if (err !== rollback) throw err;
+    }
+  });
+
   it('manual review off still publishes a pass to proving and stamps reviewed_at', async (t) => {
     if (skip(t)) return;
     const id = `mroff${userId.replace(/-/g, '').slice(0, 8)}`;
