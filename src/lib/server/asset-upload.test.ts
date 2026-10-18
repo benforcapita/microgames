@@ -16,6 +16,7 @@ import {
   assetObjectPath,
   assetPathRejection,
   assetUploadQuery,
+  assetWriteAddsCountedRow,
   createAssetUploadLimiter,
   gameTooBigMessage,
   saveAssetDecision,
@@ -132,6 +133,36 @@ describe('asset upload paths', () => {
     if (capped.kind === 'flash') assert.equal(capped.code, 'cap');
     const replaced = assessAssetUpload(input({ fileCount: MAX_ASSET_FILES }));
     assert.equal(replaced.kind, 'store');
+    // A rejected row does not count toward the cap, so reviving it is a new counted row.
+    const revive = assessAssetUpload(input({
+      adding: true,
+      fileCount: MAX_ASSET_FILES,
+      existing: { ...listed, status: 'rejected' },
+    }));
+    assert.equal(revive.kind, 'flash');
+    if (revive.kind === 'flash') assert.equal(revive.code, 'cap');
+  });
+
+  it('caps only a write that adds a counted row, at and over 200 files', () => {
+    // The same case table assessAssetSign and private.record_game_asset are pinned to:
+    // only a missing row (null = none) or a rejected row adds a counted row; everything
+    // else — replacing an uploaded file, filling a scanned 'missing' row — is allowed
+    // even when the game is already over the cap.
+    for (const status of [null, 'missing', 'uploaded', 'rejected'] as const) {
+      for (const fileCount of [MAX_ASSET_FILES - 1, MAX_ASSET_FILES, MAX_ASSET_FILES + 100]) {
+        const decision = assessAssetUpload(input({
+          adding: true,
+          fileCount,
+          existing: status === null ? null : { ...listed, status },
+        }));
+        const denied = decision.kind === 'flash' && decision.code === 'cap';
+        assert.equal(
+          denied,
+          assetWriteAddsCountedRow(status) && fileCount >= MAX_ASSET_FILES,
+          `status=${status} fileCount=${fileCount} → ${decision.kind}`,
+        );
+      }
+    }
   });
 
   it('builds a bucket key only for a safe game, version, and normalized path', () => {

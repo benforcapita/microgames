@@ -83,7 +83,13 @@ export const POST: APIRoute = async ({ request, params, locals, redirect }) => {
         bytes,
         existing,
       );
-      if (!saved.ok) return back({ error: saved.code });
+      if (!saved.ok) {
+        // 'cap'/'too-big' are the DB function's verdict when a concurrent upload won the
+        // slot between this route's pre-check and the row write.
+        const query: Record<string, string> = { error: saved.code };
+        if (saved.code === 'too-big') query.total = String(saved.totalBytes);
+        return back(query);
+      }
     } catch (error) {
       console.error(`Asset upload failed for game ${game.id}`, error);
       return back({ error: 'storage' });
