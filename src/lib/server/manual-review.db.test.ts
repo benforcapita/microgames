@@ -316,7 +316,7 @@ async function cdnGet(gameId: string, path: string, bytes: Uint8Array): Promise<
     }
     if (u.pathname.includes('/storage/')) {
       const html = '<!doctype html><canvas id="c"></canvas>';
-      return new Response(u.pathname.endsWith('/index.html') ? html : bytes);
+      return new Response(u.pathname.endsWith('/index.html') ? html : new TextDecoder().decode(bytes));
     }
     return new Response('no', { status: 404 });
   };
