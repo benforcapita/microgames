@@ -16,6 +16,7 @@ import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import postgres from 'postgres';
 import { localSupabaseEnv } from '../../../scripts/lib/local-supabase.mjs';
+import { scratchMaintenanceDb } from '../../../scripts/lib/scratch-maintenance-db.mjs';
 import { ASSET_STALE_AGE_MS, GAME_VERSION_MAX_BYTES, MAX_ASSET_FILES } from './asset-upload.ts';
 import {
   MAINTENANCE_MAX_ORPHAN_DELETES,
@@ -590,6 +591,93 @@ describe('runAssetMaintenance', () => {
       await c.storage.remove(names).catch(() => {});
       await sql`delete from public.games where id = ${gameId}`.catch(() => {});
       await sql.end({ timeout: 1 }).catch(() => {});
+    }
+  });
+
+  it('a dry run reports the refusal a real run would throw, and still writes nothing', async (t) => {
+    // The caps and the canary are shared with real runs, but a dry run returns them in the
+    // report instead of throwing — over a cap the would-abort reason names it, and under a
+    // bad key it names the canary. Either way nothing is removed.
+    const c = await connect(t);
+    if (!c) return;
+    const { sql, env } = c;
+    const gameId = await makeGame(sql);
+    const stale = `${gameId}/_staging/${randomBytes(8).toString('hex')}`;
+    try {
+      await c.upload(stale);
+      await sql`update storage.objects set created_at = now() - interval '3 hours' where bucket_id = 'games' and name = ${stale}`;
+      for (let i = 0; i < MAINTENANCE_MAX_ORPHAN_DELETES + 1; i++) {
+        await addAssetRow(sql, gameId, `o-${i}.png`, { sha: SHA('a'), sizeBytes: 10, ageHours: 3 });
+      }
+      const report = await runAssetMaintenance(sql, c.storage, { dryRun: true });
+      assert.equal(report.dryRun, true);
+      assert.match(report.wouldAbort ?? '', /orphan/i, 'the over-cap refusal is reported, not thrown');
+      assert.equal(report.stagingRemoved + report.orphansDeleted, 0);
+      const [rows] = await sql<{ n: number }[]>`select count(*)::int as n from public.game_assets where game_id = ${gameId}`;
+      assert.equal(rows?.n, MAINTENANCE_MAX_ORPHAN_DELETES + 1, 'a refused dry run deletes nothing');
+      assert.equal(await c.exists(stale), true, 'a refused dry run removes nothing');
+
+      // Under the caps, a bad Storage credential reports the canary refusal the same way.
+      await sql`delete from public.game_assets where game_id = ${gameId}`;
+      const anon = maintenanceStorage(
+        createClient(env.PUBLIC_SUPABASE_URL, env.PUBLIC_SUPABASE_PUBLISHABLE_KEY, {
+          auth: { persistSession: false },
+        }).storage.from('games'),
+      );
+      const denied = await runAssetMaintenance(sql, anon, { dryRun: true });
+      assert.match(denied.wouldAbort ?? '', /canary/i, 'the canary refusal is reported, not thrown');
+      assert.equal(denied.stagingRemoved + denied.orphansDeleted, 0);
+      assert.equal(await c.exists(stale), true);
+    } finally {
+      await c.storage.remove([stale]).catch(() => {});
+      await sql`delete from public.games where id = ${gameId}`.catch(() => {});
+      await sql.end({ timeout: 1 }).catch(() => {});
+    }
+  });
+
+  it('a dry run never writes: the empty-bucket canary reports unverifiable with zero storage calls', async (t) => {
+    const c = await connect(t);
+    if (!c) return;
+    // A scratch database keeps the bucket empty without touching the real stack's objects.
+    const scratch = await scratchMaintenanceDb(c.env);
+    const calls = { sees: 0, upload: 0, remove: 0 };
+    // A Storage stub that behaves like a real Storage+database pair that see each other —
+    // its upload inserts the object row the API write would create — and counts every call.
+    const stub: MaintenanceStorage = {
+      sees: async () => {
+        calls.sees += 1;
+        return true;
+      },
+      upload: async (name) => {
+        calls.upload += 1;
+        await scratch.sql`insert into storage.objects (bucket_id, name) values ('games', ${name})`;
+        return { error: null };
+      },
+      remove: async (paths) => {
+        calls.remove += 1;
+        await scratch.sql`delete from storage.objects where name = any(${paths})`;
+        return { error: null };
+      },
+    };
+    try {
+      const dry = await runAssetMaintenance(scratch.sql, stub, { dryRun: true });
+      assert.equal(dry.canaryUnverified, true, 'empty bucket + write-free dry run: the canary cannot be verified');
+      assert.match(dry.wouldAbort ?? '', /could not be verified/i);
+      assert.equal(calls.upload, 0, 'a dry run may never upload the scratch canary object');
+      assert.equal(calls.remove, 0);
+      assert.equal(calls.sees, 0, 'with nothing listed there is no object for sees() to check');
+      assert.equal((await scratch.sql<{ n: number }[]>`select count(*)::int as n from storage.objects`)[0]?.n, 0);
+
+      // The paired real run proves the stub is alive: the same checks run and the scratch
+      // canary write is allowed — one upload, verified in SQL, then removed.
+      const real = await runAssetMaintenance(scratch.sql, stub);
+      assert.equal(real.wouldAbort, null);
+      assert.equal(real.canaryUnverified, false);
+      assert.equal(calls.upload, 1, 'the real run writes exactly one scratch canary object');
+      assert.equal(calls.remove, 1);
+    } finally {
+      await scratch.drop();
+      await c.sql.end({ timeout: 1 }).catch(() => {});
     }
   });
 

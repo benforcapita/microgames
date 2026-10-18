@@ -13,6 +13,7 @@ import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import postgres from 'postgres';
 import { localSupabaseEnv } from './lib/local-supabase.mjs';
+import { scratchMaintenanceDb } from './lib/scratch-maintenance-db.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const NODE_BIN = dirname(process.execPath);
@@ -227,6 +228,7 @@ describe('scripts/asset-maintenance.mjs', () => {
       const dry = await runMaintenance(['--dry-run'], env, { npm: true, timeoutMs: 90_000 });
       assert.equal(dry.code, 0, `stdout=${dry.stdout} stderr=${dry.stderr}`);
       assert.match(dry.stdout, /dryRun|dry run/i);
+      assert.match(dry.stdout, /"wouldAbort":null/, 'a healthy dry run reports no would-abort reason');
       assert.equal(await f.rowCount(), 2, 'dry run must delete no rows');
       assert.equal(await f.objectListed(f.stale[0] ?? ''), true, 'dry run must remove no staging objects');
 
@@ -238,6 +240,113 @@ describe('scripts/asset-maintenance.mjs', () => {
       assert.equal(await f.objectListed(f.stale[0] ?? ''), false);
     } finally {
       await f.cleanup();
+    }
+  });
+
+  it('dry run runs the canary: a publishable key exits non-zero and writes nothing', async (t) => {
+    // QA #79 S4 for dry runs: the under-privileged key must fail the canary the dry run now
+    // shares with real runs — non-zero exit, the would-abort reason visible, and zero writes:
+    // no row deletes, no object removes, and no scratch canary upload, not even a removed one.
+    const base = stackEnv(t);
+    if (!base) return;
+    const env = { ...base, SUPABASE_SECRET_KEY: base.PUBLIC_SUPABASE_PUBLISHABLE_KEY };
+    const f = await seed(base, { orphans: 1, live: 2, staging: 1 });
+    const audit = postgres(base.DATABASE_URL, { connect_timeout: 3, max: 1 });
+    try {
+      const rowsBefore = await audit<{ p: string; status: string }[]>`
+        select game_id || '/' || version || '/' || path as p, status
+        from public.game_assets where game_id = ${f.gameId} order by p`;
+
+      const r = await runMaintenance(['--dry-run'], env);
+      assert.notEqual(r.code, 0, `a dry run under the publishable key must refuse: ${r.stdout}`);
+      assert.match(r.stdout + r.stderr, /canary/i, 'the refusal must name the storage canary');
+      assert.match(r.stdout, /"wouldAbort"/, 'the dry-run report carries the would-abort reason');
+
+      assert.equal(await f.rowCount(), 3, 'dry run must delete no rows');
+      assert.equal(await f.objectListed(f.stale[0] ?? ''), true, 'dry run must remove no staging objects');
+      const rowsAfter = await audit<{ p: string; status: string }[]>`
+        select game_id || '/' || version || '/' || path as p, status
+        from public.game_assets where game_id = ${f.gameId} order by p`;
+      assert.deepEqual(rowsAfter, rowsBefore, 'every fixture row survives the refused dry run');
+      const [canaryObjects] = await audit<{ n: number }[]>`
+        select count(*)::int as n from storage.objects
+        where bucket_id = 'games' and name like 'maintenance-canary/%'`;
+      assert.equal(canaryObjects?.n, 0, 'no scratch canary object may exist after a dry run');
+    } finally {
+      await audit.end({ timeout: 1 }).catch(() => {});
+      await f.cleanup();
+    }
+  });
+
+  it('dry run over the orphan cap reports the refusal and deletes nothing', async (t) => {
+    const env = stackEnv(t);
+    if (!env) return;
+    const overCap = 25; // default cap is 20
+    const f = await seed(env, { orphans: overCap });
+    try {
+      const r = await runMaintenance(['--dry-run'], env);
+      assert.notEqual(r.code, 0, `an over-cap dry run must exit non-zero: ${r.stdout}`);
+      assert.match(r.stdout, /"wouldAbort":"[^"]*orphan/i, `the cap refusal must be visible: ${r.stdout}`);
+      assert.equal(await f.rowCount(), overCap, 'a refused dry run deletes nothing');
+    } finally {
+      await f.cleanup();
+    }
+  });
+
+  it('dry run over the staging cap reports the refusal and removes nothing', async (t) => {
+    const env = stackEnv(t);
+    if (!env) return;
+    const f = await seed(env, {});
+    const audit = postgres(env.DATABASE_URL, { connect_timeout: 3, max: 1 });
+    const bucket = createClient(env.PUBLIC_SUPABASE_URL, env.SUPABASE_SECRET_KEY, {
+      auth: { persistSession: false },
+    }).storage.from('games');
+    const overCap = 201; // default staging cap is 200
+    const names = Array.from({ length: overCap }, (_, i) => `${f.gameId}/_staging/cap-${i + 1}`);
+    try {
+      // Object rows without files are enough: the candidate listing is a storage.objects
+      // query and the refusal must fire before the first Storage call.
+      await audit`
+        insert into storage.objects (bucket_id, name, created_at)
+        select 'games', ${f.gameId} || '/_staging/cap-' || g, now() - interval '3 hours'
+        from generate_series(1, ${overCap}) g`;
+      const r = await runMaintenance(['--dry-run'], env);
+      assert.notEqual(r.code, 0, `an over-cap dry run must exit non-zero: ${r.stdout}`);
+      assert.match(r.stdout, /"wouldAbort":"[^"]*staging/i, `the cap refusal must be visible: ${r.stdout}`);
+      const [left] = await audit<{ n: number }[]>`
+        select count(*)::int as n from storage.objects
+        where bucket_id = 'games' and name = any(${names})`;
+      assert.equal(left?.n, overCap, 'a refused dry run removes nothing');
+    } finally {
+      await bucket.remove(names).catch(() => {});
+      await audit.end({ timeout: 1 }).catch(() => {});
+      await f.cleanup();
+    }
+  });
+
+  it('dry run on an empty games bucket exits 3: the canary cannot be verified', async (t) => {
+    const env = stackEnv(t);
+    if (!env) return;
+    // An empty bucket without touching the real one's objects: a scratch database on the
+    // same server holding only the tables the pass reads. The Storage API still owns the
+    // real storage.objects, so a scratch canary upload would land THERE — the prefix audit
+    // catches a buggy dry run that wrote and removed one.
+    const scratch = await scratchMaintenanceDb(env);
+    const audit = postgres(env.DATABASE_URL, { connect_timeout: 3, max: 1 });
+    try {
+      const r = await runMaintenance(['--dry-run'], { ...env, DATABASE_URL: scratch.url });
+      assert.equal(r.code, 3, `an empty-bucket dry run must exit 3: stdout=${r.stdout} stderr=${r.stderr}`);
+      assert.match(r.stdout, /could not be verified/i, `the reason must be visible: ${r.stdout}`);
+      const [left] = await scratch.sql<{ n: number }[]>`
+        select count(*)::int as n from storage.objects`;
+      assert.equal(left?.n, 0, 'the scratch bucket must stay empty — a dry run may not write');
+      const [canaryObjects] = await audit<{ n: number }[]>`
+        select count(*)::int as n from storage.objects
+        where bucket_id = 'games' and name like 'maintenance-canary/%'`;
+      assert.equal(canaryObjects?.n, 0, 'no scratch canary object may land in the real bucket');
+    } finally {
+      await audit.end({ timeout: 1 }).catch(() => {});
+      await scratch.drop();
     }
   });
 
