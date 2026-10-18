@@ -12,7 +12,7 @@ import { dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import postgres from 'postgres';
-import { localSupabaseEnv } from '../../scripts/lib/local-supabase.mjs';
+import { localSupabaseEnv } from '../../../scripts/lib/local-supabase.mjs';
 import { ASSET_STALE_AGE_MS, GAME_VERSION_MAX_BYTES, MAX_ASSET_FILES } from './asset-upload.ts';
 import {
   cleanOrphanedAssetRows,
@@ -22,7 +22,7 @@ import {
   type MaintenanceStorage,
 } from './asset-maintenance.ts';
 
-const supabaseDir = join(dirname(fileURLToPath(import.meta.url)), '../../supabase');
+const supabaseDir = join(dirname(fileURLToPath(import.meta.url)), '../../../supabase');
 const MIGRATION = '20261018120000_clean_orphan_game_asset';
 const CLEAN_FN = 'private.clean_orphan_game_asset(text, integer, text, text, integer, timestamptz, timestamptz)';
 const SHA = (c: string) => c.repeat(64);
@@ -254,7 +254,7 @@ describe('private.clean_orphan_game_asset', () => {
         `the cleanup call must queue on the games-row lock and trip lock_timeout, got: ${String(blocked)}`,
       );
       assert.equal(blocked.code, '55P03');
-      signalRelease();
+      signalRelease?.();
       assert.equal(await aTxn, 'committed');
 
       // A committed a newer reservation on the row. The cleanup's pinned marker no longer
