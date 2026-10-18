@@ -69,12 +69,10 @@ export const POST: APIRoute = async ({ request, params, locals }) => {
     // still delete the staged object rather than leaving it for the sweep.
     const removed = await storage.remove(stagedPath).catch((error: unknown) => ({ error: { message: String(error) } }));
     if (removed.error) console.error(`Expired-upload cleanup failed for game ${game.id} ${stagedPath}`, removed.error);
-    return deny({
-      status: 410,
-      error: 'upload_expired',
-      message: ASSET_UPLOAD_MESSAGES.upload_expired,
-      flash: { error: 'upload_expired' },
-    });
+    // No `flash` here on purpose: a flash reload would blank the creator's half-filled
+    // form — nothing changed server-side that needs a re-render, so the client shows
+    // this error inline and the path field keeps its value for the retry (QA #79).
+    return deny({ status: 410, error: 'upload_expired', message: ASSET_UPLOAD_MESSAGES.upload_expired });
   }
 
   const stored = await bucket().download(stagedPath);
