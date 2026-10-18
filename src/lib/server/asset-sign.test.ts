@@ -128,6 +128,26 @@ describe('UP-4 uploadId and sweep TTLs', () => {
     assert.ok(ASSET_UPLOAD_ID_TTL_MS > 0);
     assert.ok(ASSET_STALE_AGE_MS >= ASSET_UPLOAD_ID_TTL_MS + 30 * 60_000);
   });
+
+  it('pins the exact constants: uploadId TTL is 15 minutes, stale age is 2 hours', () => {
+    // The whole safety story assumes these exact values (QA #79 Q7d/Q7f survived: nothing
+    // pinned them). A still-finalizable upload can stage at TTL-1ms; the sweep must wait
+    // well past it.
+    assert.equal(ASSET_UPLOAD_ID_TTL_MS, 15 * 60_000);
+    assert.equal(ASSET_STALE_AGE_MS, 2 * 60 * 60_000);
+  });
+
+  it('expiresAt is exactly the signed deadline — the client is never shown a later time', () => {
+    // exp is floored to seconds inside the signature; the ms-side expiresAt must equal
+    // that same deadline, not sit up to 999 ms past it (QA #79 item 7). Mint at a
+    // non-second-aligned instant so a wrong floor would differ.
+    const skewed = 1_800_000_000_617;
+    const { uploadId, expiresAt } = mintAssetUploadId(SECRET, 'gameId01', 1, 'x.png', skewed);
+    const signedExp = Number(uploadId.split('.')[1]) * 1000;
+    assert.equal(expiresAt, signedExp, 'expiresAt must be the signed deadline exactly');
+    assert.equal(verifyAssetUploadId(SECRET, 'gameId01', 1, 'x.png', uploadId, signedExp).kind, 'ok');
+    assert.equal(verifyAssetUploadId(SECRET, 'gameId01', 1, 'x.png', uploadId, signedExp + 1).kind, 'expired');
+  });
 });
 
 describe('UP-2a assessAssetSign', () => {
