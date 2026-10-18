@@ -296,7 +296,7 @@ describe('scripts/asset-maintenance.mjs', () => {
       await scratch.sql`insert into storage.objects (bucket_id, name) values ('games', 'g1/1/live.png')`;
       const r = await runMaintenance(['--dry-run'], { ...env, DATABASE_URL: scratch.url });
       assert.equal(r.code, 1, `an over-cap dry run must exit 1: stdout=${r.stdout} stderr=${r.stderr}`);
-      assert.match(r.stdout, /"wouldAbort":"[^"]*orphan/i, `the cap refusal must be visible: ${r.stdout}`);
+      assert.match(r.stdout, /"wouldAbort":"[^"]*orphan asset rows exceed/i, `the cap refusal must be visible: ${r.stdout}`);
       const [rows] = await scratch.sql<{ n: number }[]>`select count(*)::int as n from public.game_assets`;
       assert.equal(rows?.n, overCap, 'a refused dry run deletes nothing');
     } finally {
@@ -318,7 +318,7 @@ describe('scripts/asset-maintenance.mjs', () => {
         from generate_series(1, ${overCap}) g`;
       const r = await runMaintenance(['--dry-run'], { ...env, DATABASE_URL: scratch.url });
       assert.equal(r.code, 1, `an over-cap dry run must exit 1: stdout=${r.stdout} stderr=${r.stderr}`);
-      assert.match(r.stdout, /"wouldAbort":"[^"]*staging/i, `the cap refusal must be visible: ${r.stdout}`);
+      assert.match(r.stdout, /"wouldAbort":"[^"]*stale staging objects exceed/i, `the cap refusal must be visible: ${r.stdout}`);
       const [left] = await scratch.sql<{ n: number }[]>`select count(*)::int as n from storage.objects`;
       assert.equal(left?.n, overCap, 'a refused dry run removes nothing');
     } finally {

@@ -615,7 +615,7 @@ describe('runAssetMaintenance', () => {
 
       const report = await runAssetMaintenance(scratch.sql, c.storage, { dryRun: true });
       assert.equal(report.dryRun, true);
-      assert.match(report.wouldAbort ?? '', /orphan/i, 'the over-cap refusal is reported, not thrown');
+      assert.match(report.wouldAbort ?? '', /orphan asset rows exceed/i, 'the over-cap refusal is reported, not thrown');
       assert.equal(report.stagingRemoved + report.orphansDeleted, 0);
       const [rows] = await scratch.sql<{ n: number }[]>`select count(*)::int as n from public.game_assets`;
       assert.equal(rows?.n, overCap, 'a refused dry run deletes nothing');
