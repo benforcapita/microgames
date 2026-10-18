@@ -82,20 +82,22 @@ interface OrphanCandidate {
   path: string;
   sizeBytes: number | null;
   sha256: string | null;
-  /** Exact updated_at text — the CAS pin needs sub-millisecond precision a Date would lose. */
+  /** updated_at as epoch-µs numeric text — the CAS pin needs sub-millisecond precision,
+   *  and a timestamp-looking string can be coerced through a millisecond Date in transit. */
   updatedAt: string;
 }
 
 /**
  * 'uploaded' rows untouched past `olderThan`. The updated_at cutoff is the active-window
  * guard: a finalize's reservation is always fresher than the stale age (uploadId TTL plus
- * margin), so nothing in flight is ever a candidate.
+ * margin), so nothing in flight is ever a candidate. The marker is selected as epoch
+ * seconds (numeric text) so it round-trips with microsecond precision.
  */
 async function orphanCandidates(sql: AssetDb, olderThan: Date): Promise<OrphanCandidate[]> {
   const rows = await sql<
     { game_id: string; version: number; path: string; size_bytes: number | null; content_sha256: string | null; updated_at: string }[]
   >`
-    select game_id, version, path, size_bytes, content_sha256, updated_at::text
+    select game_id, version, path, size_bytes, content_sha256, extract(epoch from updated_at)::text as updated_at
     from public.game_assets
     where status = 'uploaded' and updated_at < ${olderThan}
     order by game_id, version, path

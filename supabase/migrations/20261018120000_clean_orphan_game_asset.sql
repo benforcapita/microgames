@@ -16,6 +16,11 @@
 -- marker the caller read, and must predate p_older_than. A live finalize that committed in
 -- between owns the row, so nothing is removed; a reservation inside the active window
 -- (updated_at < p_older_than fails) is never a victim either.
+--
+-- p_updated_at is epoch microseconds as a numeric, not a timestamptz: drivers that coerce
+-- timestamp-looking strings through a millisecond Date would silently round-trip a
+-- microsecond-precision marker to .NNN000 and the pin would never match. A numeric compares
+-- exactly.
 
 create or replace function private.clean_orphan_game_asset(
   p_game_id text,
@@ -23,7 +28,7 @@ create or replace function private.clean_orphan_game_asset(
   p_path text,
   p_sha256 text,
   p_size_bytes integer,
-  p_updated_at timestamptz,
+  p_updated_at numeric,
   p_older_than timestamptz
 )
 returns text
@@ -53,12 +58,12 @@ begin
     and a.status = 'uploaded'
     and a.content_sha256 = p_sha256
     and a.size_bytes is not distinct from p_size_bytes
-    and a.updated_at = p_updated_at
+    and extract(epoch from a.updated_at) = p_updated_at
     and a.updated_at < p_older_than;
   get diagnostics v_deleted = row_count;
   return case when v_deleted = 1 then 'deleted' else 'skipped' end;
 end;
 $$;
 
-revoke all on function private.clean_orphan_game_asset(text, integer, text, text, integer, timestamptz, timestamptz) from public, anon, authenticated;
-grant execute on function private.clean_orphan_game_asset(text, integer, text, text, integer, timestamptz, timestamptz) to postgres, service_role;
+revoke all on function private.clean_orphan_game_asset(text, integer, text, text, integer, numeric, timestamptz) from public, anon, authenticated;
+grant execute on function private.clean_orphan_game_asset(text, integer, text, text, integer, numeric, timestamptz) to postgres, service_role;

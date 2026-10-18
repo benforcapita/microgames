@@ -24,7 +24,7 @@ import {
 
 const supabaseDir = join(dirname(fileURLToPath(import.meta.url)), '../../../supabase');
 const MIGRATION = '20261018120000_clean_orphan_game_asset';
-const CLEAN_FN = 'private.clean_orphan_game_asset(text, integer, text, text, integer, timestamptz, timestamptz)';
+const CLEAN_FN = 'private.clean_orphan_game_asset(text, integer, text, text, integer, numeric, timestamptz)';
 const SHA = (c: string) => c.repeat(64);
 const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]);
 
@@ -103,16 +103,27 @@ async function addAssetRow(
   sql: postgres.Sql,
   gameId: string,
   path: string,
-  opts: { status?: string; sizeBytes?: number | null; sha?: string | null; updatedAt?: Date } = {},
+  opts: { status?: string; sizeBytes?: number | null; sha?: string | null; ageHours?: number } = {},
 ) {
+  // Rows are aged with SQL now() - interval, not a JS Date: real reservations carry
+  // microsecond precision, which is exactly what the updated_at marker has to pin.
   await sql`
     insert into public.game_assets
       (game_id, version, path, expected_type, status, size_bytes, content_sha256, source, updated_at)
     values (${gameId}, 1, ${path}, 'image', ${opts.status ?? 'uploaded'},
             ${opts.sizeBytes ?? 10}, ${opts.sha === undefined ? SHA('a') : opts.sha},
-            'creator', ${opts.updatedAt ?? new Date()})
+            'creator', now() - make_interval(hours => ${opts.ageHours ?? 0}))
   `;
 }
+
+/** The updated marker clean_orphan_game_asset pins: epoch seconds as numeric text. */
+const uaEpoch = async (sql: postgres.Sql, gameId: string, path: string) =>
+  (
+    await sql<{ e: string }[]>`
+      select extract(epoch from updated_at)::text as e
+      from public.game_assets where game_id = ${gameId} and version = 1 and path = ${path}
+    `
+  )[0]?.e;
 
 const rowOf = async (sql: postgres.Sql, gameId: string, path: string) =>
   (
@@ -164,32 +175,28 @@ describe('private.clean_orphan_game_asset', () => {
     if (!c) return;
     const { sql } = c;
     const gameId = await makeGame(sql);
-    const old = new Date(Date.now() - 3 * 3600_000);
-    const oldText = old.toISOString();
     const olderThan = new Date(Date.now() - ASSET_STALE_AGE_MS);
     try {
-      await addAssetRow(sql, gameId, 'gone.png', { sha: SHA('a'), sizeBytes: 10, updatedAt: old });
-      assert.equal(await clean(sql, gameId, 'gone.png', { sha: SHA('a'), size: 10, updatedAt: oldText }, olderThan), 'deleted');
+      await addAssetRow(sql, gameId, 'gone.png', { sha: SHA('a'), sizeBytes: 10, ageHours: 3 });
+      const gone = { sha: SHA('a'), size: 10, updatedAt: (await uaEpoch(sql, gameId, 'gone.png')) ?? '' };
+      assert.equal(await clean(sql, gameId, 'gone.png', gone, olderThan), 'deleted');
       assert.equal(await rowOf(sql, gameId, 'gone.png'), undefined, 'the judged-orphan row is gone');
       // Idempotent: the same call again finds nothing to do.
-      assert.equal(await clean(sql, gameId, 'gone.png', { sha: SHA('a'), size: 10, updatedAt: oldText }, olderThan), 'skipped');
+      assert.equal(await clean(sql, gameId, 'gone.png', gone, olderThan), 'skipped');
 
       // A row that no longer matches the pinned sha is someone else's write — never touched.
-      await addAssetRow(sql, gameId, 'keep.png', { sha: SHA('b'), sizeBytes: 10, updatedAt: old });
-      assert.equal(await clean(sql, gameId, 'keep.png', { sha: SHA('a'), size: 10, updatedAt: oldText }, olderThan), 'skipped');
+      await addAssetRow(sql, gameId, 'keep.png', { sha: SHA('b'), sizeBytes: 10, ageHours: 3 });
+      assert.equal(await clean(sql, gameId, 'keep.png', gone, olderThan), 'skipped');
       assert.equal((await rowOf(sql, gameId, 'keep.png'))?.content_sha256, SHA('b'));
 
       // A reservation inside the active finalize window is never touched either.
-      const freshDate = new Date();
-      await addAssetRow(sql, gameId, 'fresh.png', { sha: SHA('c'), sizeBytes: 10, updatedAt: freshDate });
-      assert.equal(
-        await clean(sql, gameId, 'fresh.png', { sha: SHA('c'), size: 10, updatedAt: freshDate.toISOString() }, olderThan),
-        'skipped',
-      );
+      await addAssetRow(sql, gameId, 'fresh.png', { sha: SHA('c'), sizeBytes: 10 });
+      const fresh = { sha: SHA('c'), size: 10, updatedAt: (await uaEpoch(sql, gameId, 'fresh.png')) ?? '' };
+      assert.equal(await clean(sql, gameId, 'fresh.png', fresh, olderThan), 'skipped');
       assert.equal((await rowOf(sql, gameId, 'fresh.png'))?.status, 'uploaded');
 
       // A deleted game's rows cascade away first — the function only reports it.
-      assert.equal(await clean(sql, 'no-such-game', 'x.png', { sha: SHA('a'), size: 10, updatedAt: oldText }, olderThan), 'not-found');
+      assert.equal(await clean(sql, 'no-such-game', 'x.png', gone, olderThan), 'not-found');
     } finally {
       await sql`delete from public.games where id = ${gameId}`.catch(() => {});
       await sql.end({ timeout: 1 }).catch(() => {});
@@ -213,12 +220,11 @@ describe('private.clean_orphan_game_asset', () => {
       return;
     }
     const gameId = await makeGame(a.sql);
-    const oldDate = new Date(Date.now() - 3 * 3600_000);
-    const oldText = oldDate.toISOString();
     const olderThan = new Date(Date.now() - ASSET_STALE_AGE_MS);
     let signalRelease: (() => void) | undefined;
     try {
-      await addAssetRow(a.sql, gameId, 'race.png', { sha: SHA('a'), sizeBytes: 10, updatedAt: oldDate });
+      await addAssetRow(a.sql, gameId, 'race.png', { sha: SHA('a'), sizeBytes: 10, ageHours: 3 });
+      const judged = { sha: SHA('a'), size: 10, updatedAt: (await uaEpoch(a.sql, gameId, 'race.png')) ?? '' };
 
       let signalLocked!: () => void;
       const locked = new Promise<void>((resolve) => (signalLocked = resolve));
@@ -244,7 +250,7 @@ describe('private.clean_orphan_game_asset', () => {
       const blocked = await b.sql
         .begin(async (tx) => {
           await tx`set local lock_timeout = '1s'`;
-          await clean(tx, gameId, 'race.png', { sha: SHA('a'), size: 10, updatedAt: oldText }, olderThan);
+          await clean(tx, gameId, 'race.png', judged, olderThan);
         })
         .then(
           () => null,
@@ -267,7 +273,7 @@ describe('private.clean_orphan_game_asset', () => {
           20, ${SHA('b')}, 'creator', null, ${MAX_ASSET_FILES}, ${GAME_VERSION_MAX_BYTES})
       `;
       assert.equal(reserved?.result, 'ok');
-      assert.equal(await clean(b.sql, gameId, 'race.png', { sha: SHA('a'), size: 10, updatedAt: oldText }, olderThan), 'skipped');
+      assert.equal(await clean(b.sql, gameId, 'race.png', judged, olderThan), 'skipped');
       const row = await rowOf(b.sql, gameId, 'race.png');
       assert.equal(row?.status, 'uploaded');
       assert.equal(row?.content_sha256, SHA('b'), 'the live reservation survives the cleanup');
@@ -333,18 +339,17 @@ describe('cleanOrphanedAssetRows', () => {
     if (!c) return;
     const { sql, storage, upload } = c;
     const gameId = await makeGame(sql);
-    const old = new Date(Date.now() - 3 * 3600_000);
     const olderThan = new Date(Date.now() - ASSET_STALE_AGE_MS);
     try {
       // The crash-between-reserve-and-copy case: 'uploaded' row, no object behind it.
-      await addAssetRow(sql, gameId, 'gone.png', { sha: SHA('a'), sizeBytes: 10, updatedAt: old });
+      await addAssetRow(sql, gameId, 'gone.png', { sha: SHA('a'), sizeBytes: 10, ageHours: 3 });
       // Same age but the object exists — the reservation completed; never touched.
-      await addAssetRow(sql, gameId, 'live.png', { sha: SHA('b'), sizeBytes: 10, updatedAt: old });
+      await addAssetRow(sql, gameId, 'live.png', { sha: SHA('b'), sizeBytes: 10, ageHours: 3 });
       await upload(`${gameId}/1/live.png`);
       // No object, but the reservation is still inside the active finalize window.
-      await addAssetRow(sql, gameId, 'fresh.png', { sha: SHA('c'), sizeBytes: 10, updatedAt: new Date() });
+      await addAssetRow(sql, gameId, 'fresh.png', { sha: SHA('c'), sizeBytes: 10 });
       // A 'missing' scan row is not an upload reservation — never a candidate.
-      await addAssetRow(sql, gameId, 'scan.png', { status: 'missing', sizeBytes: null, sha: null, updatedAt: old });
+      await addAssetRow(sql, gameId, 'scan.png', { status: 'missing', sizeBytes: null, sha: null, ageHours: 3 });
 
       const res = await cleanOrphanedAssetRows(sql, storage, olderThan);
       assert.deepEqual(res.errors, []);
@@ -376,7 +381,7 @@ describe('runAssetMaintenance', () => {
     try {
       await upload(stale);
       await sql`update storage.objects set created_at = now() - interval '3 hours' where bucket_id = 'games' and name = ${stale}`;
-      await addAssetRow(sql, gameId, 'gone.png', { sha: SHA('a'), sizeBytes: 10, updatedAt: new Date(Date.now() - 3 * 3600_000) });
+      await addAssetRow(sql, gameId, 'gone.png', { sha: SHA('a'), sizeBytes: 10, ageHours: 3 });
 
       const report = await runAssetMaintenance(sql, c.storage);
       assert.deepEqual(report.errors, []);
