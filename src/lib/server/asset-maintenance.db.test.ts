@@ -197,10 +197,14 @@ describe('private.clean_orphan_game_asset', () => {
   });
 
   it('queues on the games-row lock and never deletes a live reservation', async (t) => {
-    // Deterministic, like the UP-3 lock test: A holds the game's FOR NO KEY UPDATE lock by
-    // reserving the row inside an open transaction; B's cleanup call must queue on the same
-    // lock (lock_timeout proves it waited), and once A commits the newer reservation, B's
-    // compare-and-set must skip the row instead of deleting a live finalize's write.
+    // Two deterministic halves, no sleeps — like the UP-3 lock test.
+    // (1) A holds only the game's FOR NO KEY UPDATE lock — the lock a finalize takes in
+    //     record_game_asset — inside an open transaction. B's cleanup call must queue on
+    //     it (lock_timeout proves the wait; a row lock cannot be what B hits, because A
+    //     never writes the asset row).
+    // (2) After a live finalize commits a newer reservation on the row, the same cleanup
+    //     call must skip it: the compare-and-set pin no longer matches, so the row is
+    //     never deleted underneath an in-flight upload.
     const a = await connect(t);
     if (!a) return;
     const b = await connect(t);
@@ -216,19 +220,15 @@ describe('private.clean_orphan_game_asset', () => {
     try {
       await addAssetRow(a.sql, gameId, 'race.png', { sha: SHA('a'), sizeBytes: 10, updatedAt: oldDate });
 
-      let signalReserved!: () => void;
-      const reserved = new Promise<void>((resolve) => (signalReserved = resolve));
+      let signalLocked!: () => void;
+      const locked = new Promise<void>((resolve) => (signalLocked = resolve));
       const release = new Promise<void>((resolve) => (signalRelease = resolve));
       const aTxn = a.sql
         .begin(async (tx) => {
           try {
-            await tx`
-              select result from private.record_game_asset(
-                ${gameId}, 1, 'race.png', 'image', 'uploaded',
-                20, ${SHA('b')}, 'creator', null, ${MAX_ASSET_FILES}, ${GAME_VERSION_MAX_BYTES})
-            `;
+            await tx`select id from public.games where id = ${gameId} for no key update`;
           } finally {
-            signalReserved();
+            signalLocked();
           }
           await release;
         })
@@ -236,10 +236,11 @@ describe('private.clean_orphan_game_asset', () => {
           () => 'committed',
           (e: unknown) => `a-error: ${e}`,
         );
-      await reserved;
+      await locked;
 
-      // B's cleanup must queue on the same games-row lock a finalize holds — without the
-      // lock it would judge the pre-commit row stale and could delete it underneath A.
+      // Without the games-row lock inside clean_orphan_game_asset, B's call would run
+      // straight through and delete the (matching, genuinely stale) row instead of
+      // queueing — this is what proves the function serializes against finalize.
       const blocked = await b.sql
         .begin(async (tx) => {
           await tx`set local lock_timeout = '1s'`;
@@ -257,8 +258,15 @@ describe('private.clean_orphan_game_asset', () => {
       signalRelease?.();
       assert.equal(await aTxn, 'committed');
 
-      // A committed a newer reservation on the row. The cleanup's pinned marker no longer
-      // matches, so the row — still 'uploaded', now A's bytes — is skipped, not deleted.
+      // A live finalize commits a newer reservation on the same row — through
+      // record_game_asset, exactly what a real concurrent finalize does. The cleanup's
+      // pinned marker no longer matches, so the row is skipped, not deleted.
+      const [reserved] = await b.sql<{ result: string }[]>`
+        select result from private.record_game_asset(
+          ${gameId}, 1, 'race.png', 'image', 'uploaded',
+          20, ${SHA('b')}, 'creator', null, ${MAX_ASSET_FILES}, ${GAME_VERSION_MAX_BYTES})
+      `;
+      assert.equal(reserved?.result, 'ok');
       assert.equal(await clean(b.sql, gameId, 'race.png', { sha: SHA('a'), size: 10, updatedAt: oldText }, olderThan), 'skipped');
       const row = await rowOf(b.sql, gameId, 'race.png');
       assert.equal(row?.status, 'uploaded');
