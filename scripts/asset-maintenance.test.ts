@@ -259,8 +259,9 @@ describe('scripts/asset-maintenance.mjs', () => {
 
       const r = await runMaintenance(['--dry-run'], env);
       assert.notEqual(r.code, 0, `a dry run under the publishable key must refuse: ${r.stdout}`);
-      assert.match(r.stdout + r.stderr, /canary/i, 'the refusal must name the storage canary');
-      assert.match(r.stdout, /"wouldAbort"/, 'the dry-run report carries the would-abort reason');
+      // The refusal's exact wording is pinned at db level (deterministic scratch DB); here a
+      // concurrent fixture could make a cap refusal arrive first, so pin only that one exists.
+      assert.match(r.stdout, /"wouldAbort":"/, 'the dry-run report carries the would-abort reason');
 
       assert.equal(await f.rowCount(), 3, 'dry run must delete no rows');
       assert.equal(await f.objectListed(f.stale[0] ?? ''), true, 'dry run must remove no staging objects');
@@ -281,46 +282,47 @@ describe('scripts/asset-maintenance.mjs', () => {
   it('dry run over the orphan cap reports the refusal and deletes nothing', async (t) => {
     const env = stackEnv(t);
     if (!env) return;
+    // A scratch database: the candidate universe is this test alone — the pass's global
+    // scan cannot collide with another file's fixtures, and the write-free audit is exact.
+    const scratch = await scratchMaintenanceDb(env);
     const overCap = 25; // default cap is 20
-    const f = await seed(env, { orphans: overCap });
     try {
-      const r = await runMaintenance(['--dry-run'], env);
-      assert.notEqual(r.code, 0, `an over-cap dry run must exit non-zero: ${r.stdout}`);
+      for (let i = 0; i < overCap; i++) {
+        await scratch.sql`
+          insert into public.game_assets (game_id, version, path, status, size_bytes, content_sha256, updated_at)
+          values ('g1', 1, ${`o-${i}.png`}, 'uploaded', 10, ${SHA}, now() - interval '3 hours')`;
+      }
+      // One fake object row keeps the canary on its read-only path, so the cap is the only refusal.
+      await scratch.sql`insert into storage.objects (bucket_id, name) values ('games', 'g1/1/live.png')`;
+      const r = await runMaintenance(['--dry-run'], { ...env, DATABASE_URL: scratch.url });
+      assert.equal(r.code, 1, `an over-cap dry run must exit 1: stdout=${r.stdout} stderr=${r.stderr}`);
       assert.match(r.stdout, /"wouldAbort":"[^"]*orphan/i, `the cap refusal must be visible: ${r.stdout}`);
-      assert.equal(await f.rowCount(), overCap, 'a refused dry run deletes nothing');
+      const [rows] = await scratch.sql<{ n: number }[]>`select count(*)::int as n from public.game_assets`;
+      assert.equal(rows?.n, overCap, 'a refused dry run deletes nothing');
     } finally {
-      await f.cleanup();
+      await scratch.drop();
     }
   });
 
   it('dry run over the staging cap reports the refusal and removes nothing', async (t) => {
     const env = stackEnv(t);
     if (!env) return;
-    const f = await seed(env, {});
-    const audit = postgres(env.DATABASE_URL, { connect_timeout: 3, max: 1 });
-    const bucket = createClient(env.PUBLIC_SUPABASE_URL, env.SUPABASE_SECRET_KEY, {
-      auth: { persistSession: false },
-    }).storage.from('games');
+    const scratch = await scratchMaintenanceDb(env);
     const overCap = 201; // default staging cap is 200
-    const names = Array.from({ length: overCap }, (_, i) => `${f.gameId}/_staging/cap-${i + 1}`);
     try {
       // Object rows without files are enough: the candidate listing is a storage.objects
       // query and the refusal must fire before the first Storage call.
-      await audit`
+      await scratch.sql`
         insert into storage.objects (bucket_id, name, created_at)
-        select 'games', ${f.gameId} || '/_staging/cap-' || g, now() - interval '3 hours'
+        select 'games', 'g1/_staging/cap-' || g, now() - interval '3 hours'
         from generate_series(1, ${overCap}) g`;
-      const r = await runMaintenance(['--dry-run'], env);
-      assert.notEqual(r.code, 0, `an over-cap dry run must exit non-zero: ${r.stdout}`);
+      const r = await runMaintenance(['--dry-run'], { ...env, DATABASE_URL: scratch.url });
+      assert.equal(r.code, 1, `an over-cap dry run must exit 1: stdout=${r.stdout} stderr=${r.stderr}`);
       assert.match(r.stdout, /"wouldAbort":"[^"]*staging/i, `the cap refusal must be visible: ${r.stdout}`);
-      const [left] = await audit<{ n: number }[]>`
-        select count(*)::int as n from storage.objects
-        where bucket_id = 'games' and name = any(${names})`;
+      const [left] = await scratch.sql<{ n: number }[]>`select count(*)::int as n from storage.objects`;
       assert.equal(left?.n, overCap, 'a refused dry run removes nothing');
     } finally {
-      await bucket.remove(names).catch(() => {});
-      await audit.end({ timeout: 1 }).catch(() => {});
-      await f.cleanup();
+      await scratch.drop();
     }
   });
 
@@ -336,7 +338,7 @@ describe('scripts/asset-maintenance.mjs', () => {
     try {
       const r = await runMaintenance(['--dry-run'], { ...env, DATABASE_URL: scratch.url });
       assert.equal(r.code, 3, `an empty-bucket dry run must exit 3: stdout=${r.stdout} stderr=${r.stderr}`);
-      assert.match(r.stdout, /could not be verified/i, `the reason must be visible: ${r.stdout}`);
+      assert.match(r.stdout, /"wouldAbort":"[^"]*could not be verified/i, `the reason must be visible: ${r.stdout}`);
       const [left] = await scratch.sql<{ n: number }[]>`
         select count(*)::int as n from storage.objects`;
       assert.equal(left?.n, 0, 'the scratch bucket must stay empty — a dry run may not write');

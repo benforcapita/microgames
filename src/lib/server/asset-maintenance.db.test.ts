@@ -597,41 +597,42 @@ describe('runAssetMaintenance', () => {
   it('a dry run reports the refusal a real run would throw, and still writes nothing', async (t) => {
     // The caps and the canary are shared with real runs, but a dry run returns them in the
     // report instead of throwing — over a cap the would-abort reason names it, and under a
-    // bad key it names the canary. Either way nothing is removed.
+    // bad key it names the canary. A scratch database keeps the candidate universe to this
+    // test alone: the pass's global scan cannot collide with another file's fixtures.
     const c = await connect(t);
     if (!c) return;
-    const { sql, env } = c;
-    const gameId = await makeGame(sql);
-    const stale = `${gameId}/_staging/${randomBytes(8).toString('hex')}`;
+    const { env } = c;
+    const scratch = await scratchMaintenanceDb(env);
+    const overCap = MAINTENANCE_MAX_ORPHAN_DELETES + 1;
     try {
-      await c.upload(stale);
-      await sql`update storage.objects set created_at = now() - interval '3 hours' where bucket_id = 'games' and name = ${stale}`;
-      for (let i = 0; i < MAINTENANCE_MAX_ORPHAN_DELETES + 1; i++) {
-        await addAssetRow(sql, gameId, `o-${i}.png`, { sha: SHA('a'), sizeBytes: 10, ageHours: 3 });
+      for (let i = 0; i < overCap; i++) {
+        await scratch.sql`
+          insert into public.game_assets (game_id, version, path, status, size_bytes, content_sha256, updated_at)
+          values ('g1', 1, ${`o-${i}.png`}, 'uploaded', 10, ${SHA('a')}, now() - interval '3 hours')`;
       }
-      const report = await runAssetMaintenance(sql, c.storage, { dryRun: true });
+      // One fake object row keeps the canary on its read-only path (never the empty-bucket branch).
+      await scratch.sql`insert into storage.objects (bucket_id, name) values ('games', 'g1/1/live.png')`;
+
+      const report = await runAssetMaintenance(scratch.sql, c.storage, { dryRun: true });
       assert.equal(report.dryRun, true);
       assert.match(report.wouldAbort ?? '', /orphan/i, 'the over-cap refusal is reported, not thrown');
       assert.equal(report.stagingRemoved + report.orphansDeleted, 0);
-      const [rows] = await sql<{ n: number }[]>`select count(*)::int as n from public.game_assets where game_id = ${gameId}`;
-      assert.equal(rows?.n, MAINTENANCE_MAX_ORPHAN_DELETES + 1, 'a refused dry run deletes nothing');
-      assert.equal(await c.exists(stale), true, 'a refused dry run removes nothing');
+      const [rows] = await scratch.sql<{ n: number }[]>`select count(*)::int as n from public.game_assets`;
+      assert.equal(rows?.n, overCap, 'a refused dry run deletes nothing');
 
       // Under the caps, a bad Storage credential reports the canary refusal the same way.
-      await sql`delete from public.game_assets where game_id = ${gameId}`;
+      await scratch.sql`delete from public.game_assets`;
       const anon = maintenanceStorage(
         createClient(env.PUBLIC_SUPABASE_URL, env.PUBLIC_SUPABASE_PUBLISHABLE_KEY, {
           auth: { persistSession: false },
         }).storage.from('games'),
       );
-      const denied = await runAssetMaintenance(sql, anon, { dryRun: true });
+      const denied = await runAssetMaintenance(scratch.sql, anon, { dryRun: true });
       assert.match(denied.wouldAbort ?? '', /canary/i, 'the canary refusal is reported, not thrown');
       assert.equal(denied.stagingRemoved + denied.orphansDeleted, 0);
-      assert.equal(await c.exists(stale), true);
     } finally {
-      await c.storage.remove([stale]).catch(() => {});
-      await sql`delete from public.games where id = ${gameId}`.catch(() => {});
-      await sql.end({ timeout: 1 }).catch(() => {});
+      await scratch.drop();
+      await c.sql.end({ timeout: 1 }).catch(() => {});
     }
   });
 
