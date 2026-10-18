@@ -1,7 +1,7 @@
 ---
 import Layout from '../layouts/Layout.astro';
 import GameThumb from '../components/GameThumb.astro';
-import { listGames } from '../lib/server/games';
+import { listGames, ownerReviewMarks } from '../lib/server/games';
 import { compact, count, stars, ago } from '../lib/format';
 
 const { user, profile } = Astro.locals;
@@ -14,6 +14,14 @@ if (!user || !profile) {
   return r;
 }
 const games = await listGames({ ownerId: user.id, sort: 'new', limit: 200, includeUnpublished: true });
+const marks = await ownerReviewMarks(games.map((g) => g.id));
+const stageText = (stage: string, id: string) => {
+  if (stage === 'pending' && marks.get(id)?.latestStatus === 'passed') return 'Awaiting review';
+  if (stage === 'pending') return 'Validating…';
+  if (stage === 'proving') return 'Proving Grounds';
+  if (stage === 'live') return 'Live';
+  return 'Rejected';
+};
 const plays = games.reduce((n, g) => n + g.plays, 0);
 const deleted = Astro.url.searchParams.has('deleted');
 ---
@@ -42,9 +50,10 @@ const deleted = Astro.url.searchParams.has('deleted');
               <div class="meta">
                 <a href={g.stage === 'pending' || g.stage === 'rejected' ? `/submissions/${g.id}` : `/play/${g.slug}`}><h3>{g.title}</h3></a>
                 <p class="muted mono">
-                  <span class:list={['badge', g.stage]}>{{ live: 'Live', proving: 'Proving Grounds', pending: 'Validating…', rejected: 'Rejected' }[g.stage]}</span>{' '}
+                  <span class:list={['badge', g.stage]}>{stageText(g.stage, g.id)}</span>{' '}
                   {count(g.plays, "play")} · ★ {stars(g.avgRating)} ({g.ratingCount}) · uploaded {ago(g.createdAt)}
                 </p>
+                {g.stage === 'rejected' && g.reviewNote && <p class="review-note">{g.reviewNote}</p>}
                 <a href={`/games/${g.slug}/assets`}>Assets</a>
               </div>
               <form method="post" action={`/api/games/${g.slug}/delete`} class="del" data-confirm={`Delete “${g.title}” permanently? Plays, ratings and player saves will be removed.`}>
@@ -72,6 +81,7 @@ const deleted = Astro.url.searchParams.has('deleted');
   .meta h3 { margin: 0 0 0.3rem; }
   .meta a { text-decoration: none; }
   .meta p { margin: 0; font-size: 0.8rem; }
+  .review-note { display: block; margin-top: 0.35rem; color: var(--bad); }
   .notice { margin-top: 1rem; border-color: #c4ff3d55; }
   .empty { text-align: center; padding: 3rem; margin-top: 2rem; }
   .logout { margin-top: 2rem; }

@@ -4,7 +4,7 @@ import Rate from '../../components/Rate.astro';
 import GameCard from '../../components/GameCard.astro';
 import GameThumb from '../../components/GameThumb.astro';
 import { ratingLabel } from '../../lib/rating';
-import { getGame, getHealth, getUserRating, listGames } from '../../lib/server/games';
+import { getGame, getHealth, getUserRating, listGames, ownerReviewMarks } from '../../lib/server/games';
 import { CDN_ORIGIN, CDN_PREVIEW_SECRET, GRADUATION } from '../../lib/server/config';
 import { isListable, isPublicStage } from '../../lib/server/game-rules';
 import { mintPreviewToken } from '../../../cdn/preview-token.mjs';
@@ -33,6 +33,8 @@ const parent = parentGame && (isListable(parentGame) || (!!user && parentGame.ow
 const desktopOnly = playSurface(device, game.inputSupport) === 'desktop-only';
 const notice = desktopOnlyNotice(game.title);
 const isOwner = !!user && user.id === game.ownerId;
+const ownerMark = isOwner ? (await ownerReviewMarks([game.id])).get(game.id) : undefined;
+const awaitingReview = isOwner && game.stage === 'pending' && ownerMark?.latestStatus === 'passed';
 // SP-6: the CDN serves pending/rejected bundles only with a short-lived token, minted only for the owner here.
 const previewToken = isOwner && !isPublicStage(game.stage) ? mintPreviewToken(CDN_PREVIEW_SECRET, game.id) : null;
 const ptQuery = previewToken ? `&pt=${encodeURIComponent(previewToken)}` : '';
@@ -51,6 +53,18 @@ const uploaded = Astro.url.searchParams.has('uploaded');
         <div class="notice panel">
           <b>You're live in the Proving Grounds.</b> Share the link: real plays and ratings decide when the game graduates.
         </div>
+      )
+    }
+    {
+      awaitingReview && (
+        <div class="notice panel" id="awaiting-review">
+          <b>Awaiting review.</b> Only you can preview this until it is published.
+        </div>
+      )
+    }
+    {
+      isOwner && game.stage === 'rejected' && game.reviewNote && (
+        <div class="notice panel" id="review-note">{game.reviewNote}</div>
       )
     }
     {
@@ -79,7 +93,7 @@ const uploaded = Astro.url.searchParams.has('uploaded');
       </div>
       <div class="toolbar spread">
         <div class="row">
-          <span class:list={['badge', game.stage]}>{live ? 'Live' : 'Proving Grounds'}</span>
+          <span class:list={['badge', game.stage]}>{live ? 'Live' : awaitingReview ? 'Awaiting review' : game.stage === 'rejected' ? 'Rejected' : game.stage === 'pending' ? 'Pending' : 'Proving Grounds'}</span>
           <span id="best" class="mono muted"></span>
           <span class="mono muted small">{user ? '☁ cloud saves on' : <a href={`/login?next=/play/${game.slug}`}>log in for cloud saves</a>}</span>
         </div>

@@ -1,6 +1,6 @@
 // validate-game: POST { "gameId": "<id>", "reason"?: string } with the x-meshgrounds-hook secret or a service-role JWT (auth.ts).
 // Loads games/<id>/index.html from Storage, runs the shared static check (SP-4), writes a
-// game_validations row (SP-3) and auto-publishes: pending -> proving on pass, pending -> rejected on fail.
+// game_validations row (SP-3). Manual review (default) leaves a pass pending; a fail still rejects.
 // Re-running for the same bundle (same sha256) is a no-op that returns the stored verdict.
 // It has no npm dependencies (acorn is vendored), so the worker boots without registry access.
 import { validateGame } from './validate.ts';

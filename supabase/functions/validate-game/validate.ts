@@ -1,6 +1,8 @@
 // Core of the validate-game Edge Function, with I/O behind small interfaces so it can be tested
-// without a running stack. Auto-publish: there's no human step. A passing bundle moves pending ->
-// proving, a failing one moves pending -> rejected (see stageAfterValidation in game-rules.ts).
+// without a running stack. A failing bundle moves pending -> rejected. A passing one stays pending
+// while manual review is on (the default), and moves pending -> proving when it is off
+// (see stageAfterValidation in game-rules.ts).
+import { manualReviewEnabled } from '../../../src/lib/manual-review.ts';
 import { analyzeGame, type StaticReport } from '../../../src/lib/server/static-check.ts';
 import { stageAfterValidation, type Stage, type ValidationStatus } from '../../../src/lib/server/game-rules.ts';
 
@@ -27,12 +29,13 @@ export interface Store {
     status: ValidationStatus;
     report: StaticReport;
     nextStage: (current: Stage) => Stage;
+    manualReview: boolean;
   }): Promise<{ row: ValidationRow; stage: Stage } | null>;
   /**
    * For a bundle that already has a verdict: atomically apply that stored verdict's transition if the game
    * is (still, or again) 'pending'. Returns the resulting stage, or null if the game/verdict is gone.
    */
-  applyStoredVerdict(gameId: string, sha256: string): Promise<Stage | null>;
+  applyStoredVerdict(gameId: string, sha256: string, manualReview: boolean): Promise<Stage | null>;
 }
 
 export interface ValidateResult {
@@ -52,7 +55,18 @@ export function statusFromReport(report: StaticReport): ValidationStatus {
 /** Game ids are base64url (createGame uses randomBytes(6).toString('base64url')), so - and _ are valid. */
 export const GAME_ID_RE = /^[A-Za-z0-9_-]{1,32}$/;
 
-export async function validateGame(store: Store, gameId: string): Promise<ValidateResult> {
+function runtimeManualReview(): boolean {
+  let raw: string | undefined;
+  const deno = (globalThis as { Deno?: { env?: { get(name: string): string | undefined } } }).Deno;
+  if (deno?.env?.get) {
+    try { raw = deno.env.get('MG_MANUAL_REVIEW'); } catch { raw = undefined; }
+  }
+  if (raw == null && typeof process !== 'undefined') raw = process.env.MG_MANUAL_REVIEW;
+  return manualReviewEnabled(raw);
+}
+
+export async function validateGame(store: Store, gameId: string, opts: { manualReview?: boolean } = {}): Promise<ValidateResult> {
+  const manualReview = opts.manualReview ?? runtimeManualReview();
   if (!GAME_ID_RE.test(gameId)) return { httpStatus: 400, body: { error: 'invalid gameId' } };
   const stage = await store.gameStage(gameId);
   if (!stage) return { httpStatus: 404, body: { error: 'game not found' } };
@@ -64,15 +78,15 @@ export async function validateGame(store: Store, gameId: string): Promise<Valida
   if (existing) {
     // Idempotent: same bundle -> same verdict, no new row. A game that is pending again (the same bundle
     // re-set to pending) still gets the stored verdict's move; any other stage is left untouched.
-    return { httpStatus: 200, body: { gameId, sha256, status: existing.status, validationId: existing.id, reused: true, ...(await settleReused(store, gameId, sha256)) } };
+    return { httpStatus: 200, body: { gameId, sha256, status: existing.status, validationId: existing.id, reused: true, ...(await settleReused(store, gameId, sha256, manualReview)) } };
   }
 
   const report = analyzeGame(bytes);
   const status = statusFromReport(report);
-  const recorded = await store.recordValidation({ gameId, sha256, status, report, nextStage: (s) => stageAfterValidation(s, status) });
+  const recorded = await store.recordValidation({ gameId, sha256, status, report, manualReview, nextStage: (s) => stageAfterValidation(s, status, manualReview) });
   if (!recorded) {
     const raced = await store.findValidation(gameId, sha256);
-    return { httpStatus: 200, body: { gameId, sha256, status: raced?.status, validationId: raced?.id, reused: true, ...(await settleReused(store, gameId, sha256)) } };
+    return { httpStatus: 200, body: { gameId, sha256, status: raced?.status, validationId: raced?.id, reused: true, ...(await settleReused(store, gameId, sha256, manualReview)) } };
   }
   return {
     httpStatus: 200,
@@ -85,9 +99,9 @@ export async function validateGame(store: Store, gameId: string): Promise<Valida
 }
 
 /** Reused verdict: re-read the stage (a concurrent run may have moved it) and, if still pending, apply it. */
-async function settleReused(store: Store, gameId: string, sha256: string): Promise<{ stage: Stage | null; previousStage?: Stage; moved?: boolean }> {
+async function settleReused(store: Store, gameId: string, sha256: string, manualReview: boolean): Promise<{ stage: Stage | null; previousStage?: Stage; moved?: boolean }> {
   const stage = await store.gameStage(gameId);
   if (stage !== 'pending') return { stage };
-  const next = (await store.applyStoredVerdict(gameId, sha256)) ?? (await store.gameStage(gameId));
+  const next = (await store.applyStoredVerdict(gameId, sha256, manualReview)) ?? (await store.gameStage(gameId));
   return next && next !== 'pending' ? { stage: next, previousStage: 'pending', moved: true } : { stage: next };
 }

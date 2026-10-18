@@ -7,6 +7,7 @@ import {
   isSubmissionPreview,
   previewSubmissionView,
   readSubmission,
+  submissionStageLabel,
   type SubmissionView,
 } from '../../lib/server/submissions';
 
@@ -36,7 +37,8 @@ const assetSummary = summarizeAssets(assetSummaryInput);
 const view: SubmissionView = result.view;
 const staticChecks = view.validation?.checks.filter((c) => c.source === 'static') ?? [];
 const runChecks = view.validation?.checks.filter((c) => c.source === 'run') ?? [];
-const stageLabel = { pending: 'Pending', proving: 'Proving Grounds', live: 'Live', rejected: 'Rejected' }[view.game.stage];
+const stageLabel = submissionStageLabel(view.game.stage, view.validation?.status ?? null);
+const awaitingReview = view.game.stage === 'pending' && view.validation?.status === 'passed';
 ---
 
 <Layout title={`${view.game.title} · Submission`} description={`Validation status for ${view.game.title}.`}>
@@ -64,6 +66,14 @@ const stageLabel = { pending: 'Pending', proving: 'Proving Grounds', live: 'Live
       <p class="row">
         <a class="btn" href={`/play/${view.game.slug}`}>Open in the Proving Grounds</a>
       </p>
+    )}
+    {awaitingReview && (
+      <p class="row">
+        <a class="btn" href={`/play/${view.game.slug}`}>Preview your game</a>
+      </p>
+    )}
+    {view.game.stage === 'rejected' && view.game.reviewNote && (
+      <p class="panel notice" id="review-note">{view.game.reviewNote}</p>
     )}
     {view.phase === 'failed' && (
       <p class="row">
@@ -135,7 +145,13 @@ const stageLabel = { pending: 'Pending', proving: 'Proving Grounds', live: 'Live
       </section>
     ) : null}
 
-    {!view.terminal && <p id="poll-note" class="muted poll">This page checks again every few seconds until validation finishes.</p>}
+    {!view.terminal && (
+      <p id="poll-note" class="muted poll">
+        {awaitingReview
+          ? 'This page updates when a reviewer publishes the game.'
+          : 'This page checks again every few seconds until validation finishes.'}
+      </p>
+    )}
   </section>
 </Layout>
 

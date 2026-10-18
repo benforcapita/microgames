@@ -18,7 +18,7 @@ const forkable = fork && fork.license !== 'All rights reserved' ? fork : null;
       <h1>{forkable ? `Fork ${forkable.title}` : 'Upload a game'}</h1>
       <p class="muted">
         One self-contained <code>.html</code> file — {GAME_SIZE_LIMIT}. Load Three.js from a CDN
-        such as jsDelivr, unpkg or esm.sh. The game stays private while validation runs, then publishes to the Proving Grounds on its own if it passes.
+        such as jsDelivr, unpkg or esm.sh. The game stays private while validation runs. A pass waits for review, then opens in the Proving Grounds.
       </p>
       {
         forkable && (

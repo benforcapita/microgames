@@ -226,6 +226,53 @@ describe('CDN delivery performance', () => {
   });
 });
 
+describe('MR-1 reviewed bundle version', () => {
+  function reviewHarness(reviewedAt: string) {
+    const fakeFetch = async (url: string) => {
+      const u = new URL(url);
+      if (u.pathname === '/rest/v1/games') {
+        return Response.json([{ stage: 'proving', reviewed_at: reviewedAt }]);
+      }
+      if (u.pathname === '/rest/v1/game_validations') {
+        return Response.json([
+          { version: 2, status: 'passed', finished_at: '2026-10-18T01:00:00.000Z' },
+          { version: 1, status: 'passed', finished_at: '2026-10-17T00:00:00.000Z' },
+        ]);
+      }
+      if (u.pathname.includes('/storage/')) return new Response('<!doctype html><canvas id="c"></canvas>');
+      return new Response('no', { status: 404 });
+    };
+    const handle = createHandler({ supabaseUrl: 'http://sb.local', secret: 'sb_secret_x', webOrigins: PORTAL, previewSecret: SECRET, fetch: fakeFetch as typeof fetch });
+    const get = async (path: string) => {
+      let status = 0;
+      const out: Record<string, string> = {};
+      const res = {
+        writeHead(s: number, h: Record<string, string>) { status = s; for (const [k, v] of Object.entries(h)) out[k.toLowerCase()] = String(v); },
+        end() {},
+      };
+      await handle({ method: 'GET', url: path, headers: {} } as never, res as never);
+      return { status, headers: out };
+    };
+    return { get };
+  }
+
+  it('serves the approved version and 404s a newer pass until reviewed_at moves past it', async () => {
+    const held = reviewHarness('2026-10-18T00:00:00.000Z');
+    const redir = await held.get('/g/revhold1/index.html');
+    assert.equal(redir.status, 302);
+    assert.match(redir.headers.location ?? '', /\/g\/revhold1\/1\/index\.html$/);
+    assert.equal((await held.get('/g/revhold1/2/index.html')).status, 404);
+    assert.equal((await held.get('/g/revhold1/1/index.html')).status, 200);
+    const withToken = await held.get(`/g/revhold1/index.html?pt=${tok('revhold1')}`);
+    assert.match(withToken.headers.location ?? '', /\/g\/revhold1\/1\/index\.html/);
+
+    const published = reviewHarness('2026-10-18T02:00:00.000Z');
+    const next = await published.get('/g/revhold1/index.html');
+    assert.match(next.headers.location ?? '', /\/g\/revhold1\/2\/index\.html$/);
+    assert.equal((await published.get('/g/revhold1/2/index.html')).status, 200);
+  });
+});
+
 describe('preview tokens', () => {
   it('expiry is capped at 10 minutes', () => {
     const nowS = 1_000_000;

@@ -38,19 +38,26 @@ describe('visibleStages (every list query goes through this)', () => {
   });
 });
 
-describe('stageAfterValidation (auto-publish, no moderation)', () => {
-  const cases: [Stage, ValidationStatus, Stage][] = [
-    ['pending', 'passed', 'proving'],
-    ['pending', 'failed', 'rejected'],
-    ['pending', 'queued', 'pending'],
-    ['pending', 'running', 'pending'],
-    ['pending', 'error', 'pending'],
-    ['proving', 'failed', 'proving'],
-    ['live', 'failed', 'live'],
-    ['live', 'passed', 'live'],
-    ['rejected', 'passed', 'rejected'],
+describe('stageAfterValidation', () => {
+  const cases: [Stage, ValidationStatus, Stage, boolean][] = [
+    ['pending', 'passed', 'pending', true],
+    ['pending', 'passed', 'proving', false],
+    ['pending', 'failed', 'rejected', true],
+    ['pending', 'failed', 'rejected', false],
+    ['pending', 'queued', 'pending', true],
+    ['pending', 'running', 'pending', true],
+    ['pending', 'error', 'pending', true],
+    ['proving', 'failed', 'proving', true],
+    ['live', 'failed', 'live', true],
+    ['live', 'passed', 'live', true],
+    ['rejected', 'passed', 'rejected', true],
   ];
-  for (const [from, status, to] of cases) it(`${from} + ${status} -> ${to}`, () => assert.equal(stageAfterValidation(from, status), to));
+  for (const [from, status, to, manualReview] of cases) {
+    it(`${from} + ${status} (manualReview=${manualReview}) -> ${to}`, () => assert.equal(stageAfterValidation(from, status, manualReview), to));
+  }
+  it('manual review defaults on, so a pass stays pending', () => {
+    assert.equal(stageAfterValidation('pending', 'passed'), 'pending');
+  });
 });
 
 describe('canViewGame (/play for pending games)', () => {

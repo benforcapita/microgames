@@ -32,6 +32,8 @@ export interface Game {
   inputSupport: InputSupport;
   createdAt: number;
   graduatedAt: number | null;
+  /** Reviewer note. Set in the table editor, shown to the owner when the game is rejected. */
+  reviewNote: string | null;
   plays: number;
   avgRating: number | null;
   ratingCount: number;
@@ -55,6 +57,7 @@ interface GameRow {
   input_support: string | null;
   created_at: Date;
   graduated_at: Date | null;
+  review_note?: string | null;
   plays: number;
   avg_rating: number | null;
   rating_count: number;
@@ -86,6 +89,7 @@ function toGame(r: GameRow): Game {
     inputSupport: toInputSupport(r.input_support),
     createdAt: r.created_at.getTime(),
     graduatedAt: r.graduated_at?.getTime() ?? null,
+    reviewNote: r.review_note ?? null,
     plays: r.plays,
     avgRating: r.avg_rating,
     ratingCount: r.rating_count,
@@ -159,6 +163,29 @@ export async function getGame(
   if (!row) return null;
   const game = toGame(row);
   return includeUnpublished || canViewGame(game, viewerId) ? game : null;
+}
+
+export interface OwnerReviewMark {
+  reviewNote: string | null;
+  latestStatus: string | null;
+}
+
+/** Latest validation status and reviewer note for the owner's dashboard. */
+export async function ownerReviewMarks(ids: string[]): Promise<Map<string, OwnerReviewMark>> {
+  const out = new Map<string, OwnerReviewMark>();
+  if (!ids.length) return out;
+  const rows = await sql<{ id: string; review_note: string | null; latest_status: string | null }[]>`
+    select g.id, g.review_note, v.status as latest_status
+    from games g
+    left join lateral (
+      select status from game_validations
+      where game_id = g.id
+      order by version desc
+      limit 1
+    ) v on true
+    where g.id in ${sql(ids)}`;
+  for (const row of rows) out.set(row.id, { reviewNote: row.review_note, latestStatus: row.latest_status });
+  return out;
 }
 
 export async function listTags(device?: DeviceKind): Promise<{ tag: string; count: number }[]> {

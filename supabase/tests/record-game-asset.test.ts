@@ -18,9 +18,11 @@ const MAX_BYTES = GAME_VERSION_MAX_BYTES;
 const FN = `private.record_game_asset(text, integer, text, text, text, integer, text, text, text, integer, bigint)`;
 
 describe('record_game_asset migration file', () => {
-  it('sorts after every existing migration', () => {
+  it('sorts after the asset function it replaces', () => {
     const names = readdirSync(join(supabaseDir, 'migrations')).sort();
-    assert.equal(names.at(-1), `${MIGRATION}.sql`);
+    const prior = '20261017120000_record_game_asset.sql';
+    assert.ok(names.includes(`${MIGRATION}.sql`));
+    assert.ok(names.indexOf(`${MIGRATION}.sql`) > names.indexOf(prior));
   });
 });
 
