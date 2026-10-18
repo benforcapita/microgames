@@ -142,11 +142,12 @@ describe('UP-4 uploadId and sweep TTLs', () => {
     // that same deadline, not sit up to 999 ms past it (QA #79 item 7). Mint at a
     // non-second-aligned instant so a wrong floor would differ.
     const skewed = 1_800_000_000_617;
-    const { uploadId, expiresAt } = mintAssetUploadId(SECRET, 'gameId01', 1, 'x.png', skewed);
+    const secret = 'ttl-test-secret';
+    const { uploadId, expiresAt } = mintAssetUploadId(secret, 'gameId01', 1, 'x.png', skewed);
     const signedExp = Number(uploadId.split('.')[1]) * 1000;
     assert.equal(expiresAt, signedExp, 'expiresAt must be the signed deadline exactly');
-    assert.equal(verifyAssetUploadId(SECRET, 'gameId01', 1, 'x.png', uploadId, signedExp).kind, 'ok');
-    assert.equal(verifyAssetUploadId(SECRET, 'gameId01', 1, 'x.png', uploadId, signedExp + 1).kind, 'expired');
+    assert.equal(verifyAssetUploadId(secret, 'gameId01', 1, 'x.png', uploadId, signedExp).kind, 'ok');
+    assert.equal(verifyAssetUploadId(secret, 'gameId01', 1, 'x.png', uploadId, signedExp + 1).kind, 'expired');
   });
 });
 
