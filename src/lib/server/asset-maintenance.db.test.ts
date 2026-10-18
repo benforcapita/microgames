@@ -2,8 +2,11 @@
 // sweepStaleStagingObjects collect `_staging` objects past the stale-age cutoff (Storage API
 // deletes — direct SQL on storage.objects is blocked), and cleanOrphanedAssetRows deletes
 // 'uploaded' rows whose served object is absent through private.clean_orphan_game_asset:
-// a compare-and-set delete under the same games-row lock record_game_asset holds, so it can
-// never remove a live reservation. Runs only against a local stack.
+// a compare-and-set delete under the same games-row lock record_game_asset holds, whose
+// predicate also requires the object to be absent from storage.objects — existence is
+// judged in SQL over the same connection and project as the delete, so a wrong or
+// under-privileged Storage key can never make a live row look orphaned (QA #79 B1).
+// Runs only against a local stack.
 import assert from 'node:assert/strict';
 import { createClient } from '@supabase/supabase-js';
 import { randomBytes } from 'node:crypto';
@@ -15,7 +18,11 @@ import postgres from 'postgres';
 import { localSupabaseEnv } from '../../../scripts/lib/local-supabase.mjs';
 import { ASSET_STALE_AGE_MS, GAME_VERSION_MAX_BYTES, MAX_ASSET_FILES } from './asset-upload.ts';
 import {
+  MAINTENANCE_MAX_ORPHAN_DELETES,
+  MAINTENANCE_MAX_STAGING_REMOVES,
+  MaintenanceRefusal,
   cleanOrphanedAssetRows,
+  maintenanceRemoteRefusal,
   maintenanceStorage,
   runAssetMaintenance,
   staleStagingObjectNames,
@@ -24,20 +31,24 @@ import {
 } from './asset-maintenance.ts';
 
 const supabaseDir = join(dirname(fileURLToPath(import.meta.url)), '../../../supabase');
-const MIGRATION = '20261018120000_clean_orphan_game_asset';
+const FIRST_MIGRATION = '20261018120000_clean_orphan_game_asset';
+const MIGRATION = '20261018130000_clean_orphan_game_asset_object_check';
 const CLEAN_FN = 'private.clean_orphan_game_asset(text, integer, text, text, integer, numeric, timestamptz)';
 const SHA = (c: string) => c.repeat(64);
 const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]);
 
-describe('clean_orphan_game_asset migration file', () => {
-  it('sorts after every existing migration', () => {
+describe('clean_orphan_game_asset migration files', () => {
+  it('the object-check migration sorts after the original and is the last migration', () => {
     const names = readdirSync(join(supabaseDir, 'migrations')).sort();
-    assert.equal(names.at(-1), `${MIGRATION}.sql`);
+    const first = names.indexOf(`${FIRST_MIGRATION}.sql`);
+    assert.ok(first >= 0, 'the original clean_orphan migration stays in the PR history');
+    assert.equal(names.at(-1), `${MIGRATION}.sql`, `last migration: ${names.at(-1)}`);
   });
 });
 
 interface Ctx {
   sql: postgres.Sql;
+  env: ReturnType<typeof localSupabaseEnv>;
   storage: MaintenanceStorage;
   exists: (path: string) => Promise<boolean>;
   upload: (path: string) => Promise<void>;
@@ -78,6 +89,7 @@ async function connect(t: { skip: (message?: string) => void }, max = 2): Promis
   };
   return {
     sql,
+    env,
     exists,
     upload: async (path) => {
       const res = await games.upload(path, PNG, { contentType: 'image/png' });
@@ -102,14 +114,14 @@ async function addAssetRow(
   sql: postgres.Sql,
   gameId: string,
   path: string,
-  opts: { status?: string; sizeBytes?: number | null; sha?: string | null; ageHours?: number } = {},
+  opts: { status?: string; sizeBytes?: number | null; sha?: string | null; ageHours?: number; version?: number } = {},
 ) {
   // Rows are aged with SQL now() - interval, not a JS Date: real reservations carry
   // microsecond precision, which is exactly what the updated_at marker has to pin.
   await sql`
     insert into public.game_assets
       (game_id, version, path, expected_type, status, size_bytes, content_sha256, source, updated_at)
-    values (${gameId}, 1, ${path}, 'image', ${opts.status ?? 'uploaded'},
+    values (${gameId}, ${opts.version ?? 1}, ${path}, 'image', ${opts.status ?? 'uploaded'},
             ${opts.sizeBytes ?? 10}, ${opts.sha === undefined ? SHA('a') : opts.sha},
             'creator', now() - make_interval(hours => ${opts.ageHours ?? 0}))
   `;
@@ -124,19 +136,35 @@ const uaEpoch = async (sql: postgres.Sql, gameId: string, path: string) =>
     `
   )[0]?.e;
 
-const rowOf = async (sql: postgres.Sql, gameId: string, path: string) =>
+const rowOf = async (sql: postgres.Sql, gameId: string, path: string, version = 1) =>
   (
     await sql<{ status: string; content_sha256: string | null }[]>`
       select status, content_sha256 from public.game_assets
-      where game_id = ${gameId} and version = 1 and path = ${path}
+      where game_id = ${gameId} and version = ${version} and path = ${path}
     `
   )[0];
 
-const clean = (sql: postgres.Sql | postgres.TransactionSql, gameId: string, path: string, row: { sha: string; size: number; updatedAt: string }, olderThan: Date) =>
+const clean = (
+  sql: postgres.Sql | postgres.TransactionSql,
+  gameId: string,
+  path: string,
+  row: { sha: string | null; size: number | null; updatedAt: string },
+  olderThan: Date,
+) =>
   sql<{ clean_orphan_game_asset: string }[]>`
     select private.clean_orphan_game_asset(
       ${gameId}, 1, ${path}, ${row.sha}, ${row.size}, ${row.updatedAt}, ${olderThan})
   `.then((rows) => rows[0]?.clean_orphan_game_asset);
+
+/** Seed an aged 'uploaded' row and return the exact pin the cleanup would be called with. */
+async function seededRow(sql: postgres.Sql, gameId: string, path: string, opts: Parameters<typeof addAssetRow>[3] = {}) {
+  await addAssetRow(sql, gameId, path, { ageHours: 3, ...opts });
+  return {
+    sha: opts.sha === undefined ? SHA('a') : opts.sha,
+    size: opts.sizeBytes === undefined ? 10 : opts.sizeBytes,
+    updatedAt: (await uaEpoch(sql, gameId, path)) ?? '',
+  };
+}
 
 describe('private.clean_orphan_game_asset', () => {
   it('is a security-definer function only service_role and postgres may execute', async (t) => {
@@ -145,9 +173,9 @@ describe('private.clean_orphan_game_asset', () => {
     const { sql } = c;
     try {
       const [migration] = await sql<{ version: string }[]>`
-        select version from supabase_migrations.schema_migrations where version = '20261018120000'
+        select version from supabase_migrations.schema_migrations where version = '20261018130000'
       `;
-      assert.equal(migration?.version, '20261018120000');
+      assert.equal(migration?.version, '20261018130000');
 
       const [fn] = await sql<{ prosecdef: boolean; proacl: string[] | null; proconfig: string[] | null }[]>`
         select p.prosecdef, p.proacl, p.proconfig
@@ -165,6 +193,67 @@ describe('private.clean_orphan_game_asset', () => {
       `;
       assert.deepEqual({ ...priv }, { anon: false, authenticated: false, service: true });
     } finally {
+      await sql.end({ timeout: 1 }).catch(() => {});
+    }
+  });
+
+  it('skips a row whose object exists in the games bucket, and deletes it once the object is gone', async (t) => {
+    // The B1 fix: whether the served object exists is part of the delete predicate in SQL
+    // (storage.objects over the same connection), never a Storage API answer. A row whose
+    // object exists is 'skipped' even when every CAS pin matches; once the object really
+    // is gone, the same call deletes.
+    const c = await connect(t);
+    if (!c) return;
+    const { sql } = c;
+    const gameId = await makeGame(sql);
+    const olderThan = new Date(Date.now() - ASSET_STALE_AGE_MS);
+    try {
+      const pin = await seededRow(sql, gameId, 'served.png');
+      await c.upload(`${gameId}/1/served.png`);
+      assert.equal(await clean(sql, gameId, 'served.png', pin, olderThan), 'skipped', 'object present — never orphaned');
+      assert.equal((await rowOf(sql, gameId, 'served.png'))?.status, 'uploaded');
+
+      const removed = await c.storage.remove([`${gameId}/1/served.png`]);
+      assert.equal(removed.error, null);
+      assert.equal(await clean(sql, gameId, 'served.png', pin, olderThan), 'deleted', 'object gone — the row is an orphan');
+      assert.equal(await rowOf(sql, gameId, 'served.png'), undefined);
+    } finally {
+      await c.storage.remove([`${gameId}/1/served.png`]).catch(() => {});
+      await sql`delete from public.games where id = ${gameId}`.catch(() => {});
+      await sql.end({ timeout: 1 }).catch(() => {});
+    }
+  });
+
+  it('rejects a judge whose sha, size, updated marker or status no longer matches', async (t) => {
+    // Each compare-and-set pin is load-bearing on its own: rows are seeded old (so the
+    // updated_at cutoff alone cannot rescue a dropped pin) and each call mismatches
+    // exactly one field while every other pin still matches.
+    const c = await connect(t);
+    if (!c) return;
+    const { sql } = c;
+    const gameId = await makeGame(sql);
+    const olderThan = new Date(Date.now() - ASSET_STALE_AGE_MS);
+    try {
+      for (const bad of [
+        { path: 'pin-sha.png', pin: { sha: SHA('z') } },
+        { path: 'pin-size.png', pin: { size: 11 } },
+        { path: 'pin-ua.png', pin: { updatedAt: '0' } },
+      ]) {
+        const pin = await seededRow(sql, gameId, bad.path);
+        const res = await clean(sql, gameId, bad.path, { ...pin, ...bad.pin }, olderThan);
+        assert.equal(res, 'skipped', `${bad.path}: one mismatched pin must skip`);
+        assert.ok((await rowOf(sql, gameId, bad.path))?.status === 'uploaded', `${bad.path} still present`);
+      }
+      // The status pin: an old rejected row carrying a sha is still not a victim.
+      const rej = await seededRow(sql, gameId, 'pin-status.png', { status: 'rejected', sha: SHA('f'), sizeBytes: 10 });
+      assert.equal(await clean(sql, gameId, 'pin-status.png', rej, olderThan), 'skipped');
+      assert.equal((await rowOf(sql, gameId, 'pin-status.png'))?.status, 'rejected');
+      // Control: the exact pin deletes, so the test can see success.
+      const ctl = await seededRow(sql, gameId, 'pin-ctl.png');
+      assert.equal(await clean(sql, gameId, 'pin-ctl.png', ctl, olderThan), 'deleted');
+      assert.equal(await rowOf(sql, gameId, 'pin-ctl.png'), undefined);
+    } finally {
+      await sql`delete from public.games where id = ${gameId}`.catch(() => {});
       await sql.end({ timeout: 1 }).catch(() => {});
     }
   });
@@ -348,13 +437,14 @@ describe('cleanOrphanedAssetRows', () => {
   it('deletes only uploaded rows whose object is really gone and past the window', async (t) => {
     const c = await connect(t);
     if (!c) return;
-    const { sql, storage, upload } = c;
+    const { sql, upload } = c;
     const gameId = await makeGame(sql);
     const olderThan = new Date(Date.now() - ASSET_STALE_AGE_MS);
     try {
       // The crash-between-reserve-and-copy case: 'uploaded' row, no object behind it.
       await addAssetRow(sql, gameId, 'gone.png', { sha: SHA('a'), sizeBytes: 10, ageHours: 3 });
-      // Same age but the object exists — the reservation completed; never touched.
+      // Same age but the object exists — the reservation completed; never even a
+      // candidate: the SQL listing filters on storage.objects, same connection.
       await addAssetRow(sql, gameId, 'live.png', { sha: SHA('b'), sizeBytes: 10, ageHours: 3 });
       await upload(`${gameId}/1/live.png`);
       // No object, but the reservation is still inside the active finalize window.
@@ -362,7 +452,7 @@ describe('cleanOrphanedAssetRows', () => {
       // A 'missing' scan row is not an upload reservation — never a candidate.
       await addAssetRow(sql, gameId, 'scan.png', { status: 'missing', sizeBytes: null, sha: null, ageHours: 3 });
 
-      const res = await cleanOrphanedAssetRows(sql, storage, olderThan);
+      const res = await cleanOrphanedAssetRows(sql, olderThan);
       assert.deepEqual(res.errors, []);
       assert.ok(res.deleted >= 1);
 
@@ -371,58 +461,11 @@ describe('cleanOrphanedAssetRows', () => {
       assert.equal((await rowOf(sql, gameId, 'fresh.png'))?.status, 'uploaded', 'an active-window reservation is never touched');
       assert.equal((await rowOf(sql, gameId, 'scan.png'))?.status, 'missing', 'a scan row is never a candidate');
 
-      const again = await cleanOrphanedAssetRows(sql, storage, olderThan);
+      const again = await cleanOrphanedAssetRows(sql, olderThan);
       assert.equal(again.deleted, 0, 'idempotent: nothing left to delete');
       assert.deepEqual(again.errors, []);
     } finally {
       await c.storage.remove([`${gameId}/1/live.png`]).catch(() => {});
-      await sql`delete from public.games where id = ${gameId}`.catch(() => {});
-      await sql.end({ timeout: 1 }).catch(() => {});
-    }
-  });
-
-  it('fails closed: a Storage error keeps the row and reports the error', async (t) => {
-    // The adapter must answer "missing" only on a definite not-found. A bad key returns a
-    // bare 400 from exists() — the same shape as a missing object — and a 5xx throws; in
-    // both cases the row must be KEPT and the failure land in report.errors.
-    const c = await connect(t);
-    if (!c) return;
-    const { sql } = c;
-    const gameId = await makeGame(sql);
-    const olderThan = new Date(Date.now() - ASSET_STALE_AGE_MS);
-    const url = process.env.PUBLIC_SUPABASE_URL ?? '';
-    const key = process.env.SUPABASE_SECRET_KEY ?? '';
-    try {
-      // Control: the real adapter on healthy storage deletes the genuinely missing object.
-      await addAssetRow(sql, gameId, 'gone.png', { sha: SHA('a'), sizeBytes: 10, ageHours: 3 });
-      const ok = await cleanOrphanedAssetRows(sql, c.storage, olderThan);
-      assert.ok(ok.deleted >= 1, 'control: a missing object is still collectible');
-      assert.equal(await rowOf(sql, gameId, 'gone.png'), undefined);
-
-      // Bad credentials: exists() answers data:false here — treated as "missing" by the
-      // naive adapter, this row would be deleted. Fail-closed keeps it.
-      await addAssetRow(sql, gameId, 'auth.png', { sha: SHA('b'), sizeBytes: 10, ageHours: 3 });
-      const badKey = maintenanceStorage(
-        createClient(url, 'sb_secret_definitely_wrong', { auth: { persistSession: false } }).storage.from('games'),
-      );
-      const auth = await cleanOrphanedAssetRows(sql, badKey, olderThan);
-      assert.ok(auth.errors.length > 0, 'an auth failure must be reported');
-      assert.equal((await rowOf(sql, gameId, 'auth.png'))?.status, 'uploaded', 'row kept on storage auth failure');
-
-      // Injected 5xx through the real adapter's fetch — same fail-closed path.
-      await addAssetRow(sql, gameId, 'fivehundo.png', { sha: SHA('c'), sizeBytes: 10, ageHours: 3 });
-      const failing = maintenanceStorage(
-        createClient(url, key, {
-          auth: { persistSession: false },
-          global: {
-            fetch: async () => new Response(JSON.stringify({ statusCode: '500', error: 'upstream', message: 'boom' }), { status: 500 }),
-          },
-        }).storage.from('games'),
-      );
-      const five = await cleanOrphanedAssetRows(sql, failing, olderThan);
-      assert.ok(five.errors.length > 0, 'a 5xx must be reported');
-      assert.equal((await rowOf(sql, gameId, 'fivehundo.png'))?.status, 'uploaded', 'row kept on storage 5xx');
-    } finally {
       await sql`delete from public.games where id = ${gameId}`.catch(() => {});
       await sql.end({ timeout: 1 }).catch(() => {});
     }
@@ -452,5 +495,192 @@ describe('runAssetMaintenance', () => {
       await sql`delete from public.games where id = ${gameId}`.catch(() => {});
       await sql.end({ timeout: 1 }).catch(() => {});
     }
+  });
+
+  it('dry run reports the candidates and deletes nothing', async (t) => {
+    const c = await connect(t);
+    if (!c) return;
+    const { sql, upload } = c;
+    const gameId = await makeGame(sql);
+    const stale = `${gameId}/_staging/${randomBytes(8).toString('hex')}`;
+    try {
+      await upload(stale);
+      await sql`update storage.objects set created_at = now() - interval '3 hours' where bucket_id = 'games' and name = ${stale}`;
+      await addAssetRow(sql, gameId, 'gone.png', { sha: SHA('a'), sizeBytes: 10, ageHours: 3 });
+      await addAssetRow(sql, gameId, 'live.png', { sha: SHA('b'), sizeBytes: 10, ageHours: 3 });
+      await upload(`${gameId}/1/live.png`);
+
+      const report = await runAssetMaintenance(sql, c.storage, { dryRun: true });
+      assert.equal(report.dryRun, true);
+      assert.ok(report.stagingCandidates >= 1 && report.orphanCandidates >= 1, `report: ${JSON.stringify(report)}`);
+      assert.equal(report.stagingRemoved + report.orphansDeleted, 0, 'a dry run removes nothing');
+
+      assert.equal(await c.exists(stale), true, 'dry run keeps the staging object');
+      assert.equal((await rowOf(sql, gameId, 'gone.png'))?.status, 'uploaded', 'dry run keeps the orphan row');
+      assert.equal((await rowOf(sql, gameId, 'live.png'))?.status, 'uploaded');
+    } finally {
+      await c.storage.remove([stale, `${gameId}/1/live.png`]).catch(() => {});
+      await sql`delete from public.games where id = ${gameId}`.catch(() => {});
+      await sql.end({ timeout: 1 }).catch(() => {});
+    }
+  });
+
+  it('refuses to delete anything when orphan candidates exceed the per-run cap', async (t) => {
+    const c = await connect(t);
+    if (!c) return;
+    const { sql } = c;
+    const gameId = await makeGame(sql);
+    const stale = `${gameId}/_staging/${randomBytes(8).toString('hex')}`;
+    const overCap = MAINTENANCE_MAX_ORPHAN_DELETES + 5;
+    try {
+      await c.upload(stale);
+      await sql`update storage.objects set created_at = now() - interval '3 hours' where bucket_id = 'games' and name = ${stale}`;
+      for (let i = 0; i < overCap; i++) {
+        await addAssetRow(sql, gameId, `o-${i}.png`, { sha: SHA('a'), sizeBytes: 10, ageHours: 3 });
+      }
+
+      await assert.rejects(
+        runAssetMaintenance(sql, c.storage),
+        (error: unknown) =>
+          error instanceof MaintenanceRefusal && /orphan/.test(error.message) && String(overCap) && error.message.includes(String(overCap)),
+        'over the orphan cap the run must refuse',
+      );
+      const [rows] = await sql<{ n: number }[]>`select count(*)::int as n from public.game_assets where game_id = ${gameId}`;
+      assert.equal(rows?.n, overCap, 'a refused run deletes no rows');
+      assert.equal(await c.exists(stale), true, 'a refused run removes no staging objects either');
+
+      // The cap is a guardrail, not a wall: raising it runs the same pass.
+      const report = await runAssetMaintenance(sql, c.storage, { maxOrphanDeletes: overCap });
+      assert.ok(report.orphansDeleted >= overCap, `report: ${JSON.stringify(report)}`);
+      assert.equal((await sql`select count(*)::int as n from public.game_assets where game_id = ${gameId}`)[0]?.n, 0);
+    } finally {
+      await c.storage.remove([stale]).catch(() => {});
+      await sql`delete from public.games where id = ${gameId}`.catch(() => {});
+      await sql.end({ timeout: 1 }).catch(() => {});
+    }
+  });
+
+  it('refuses to delete anything when staging candidates exceed the per-run cap', async (t) => {
+    const c = await connect(t);
+    if (!c) return;
+    const { sql } = c;
+    const gameId = await makeGame(sql);
+    const overCap = MAINTENANCE_MAX_STAGING_REMOVES + 1;
+    const names = Array.from({ length: overCap }, (_, i) => `${gameId}/_staging/${i}`);
+    try {
+      // Object rows without files are enough: listing is a storage.objects query, and the
+      // refusal must fire before the first Storage API remove.
+      await sql`
+        insert into storage.objects (bucket_id, name, created_at)
+        select 'games', ${gameId} || '/_staging/' || g, now() - interval '3 hours'
+        from generate_series(1, ${overCap}) g
+      `;
+
+      await assert.rejects(
+        runAssetMaintenance(sql, c.storage),
+        (error: unknown) => error instanceof MaintenanceRefusal && /staging/.test(error.message),
+        'over the staging cap the run must refuse',
+      );
+      const [left] = await sql<{ n: number }[]>`
+        select count(*)::int as n from storage.objects where bucket_id = 'games' and name = any(${names})
+      `;
+      assert.equal(left?.n, overCap, 'a refused run removes no staging objects');
+    } finally {
+      await c.storage.remove(names).catch(() => {});
+      await sql`delete from public.games where id = ${gameId}`.catch(() => {});
+      await sql.end({ timeout: 1 }).catch(() => {});
+    }
+  });
+
+  it('aborts when the Storage credential cannot see an object the database lists', async (t) => {
+    // QA #79 B1/S4: SUPABASE_SECRET_KEY set to the publishable key — Storage RLS answers
+    // 'Object not found' for objects that exist. The canary must see that and refuse
+    // before a single row or object is touched.
+    const c = await connect(t);
+    if (!c) return;
+    const { sql, env, upload } = c;
+    const gameId = await makeGame(sql);
+    const stale = `${gameId}/_staging/${randomBytes(8).toString('hex')}`;
+    try {
+      await addAssetRow(sql, gameId, 'live.png', { sha: SHA('b'), sizeBytes: 10, ageHours: 3 });
+      await upload(`${gameId}/1/live.png`);
+      await upload(stale);
+      await sql`update storage.objects set created_at = now() - interval '3 hours' where bucket_id = 'games' and name = ${stale}`;
+
+      const anonStorage = maintenanceStorage(
+        createClient(env.PUBLIC_SUPABASE_URL, env.PUBLIC_SUPABASE_PUBLISHABLE_KEY, {
+          auth: { persistSession: false },
+        }).storage.from('games'),
+      );
+      await assert.rejects(
+        runAssetMaintenance(sql, anonStorage),
+        (error: unknown) => error instanceof MaintenanceRefusal && /canary/i.test(error.message),
+      );
+      assert.equal((await rowOf(sql, gameId, 'live.png'))?.status, 'uploaded', 'a live row is never deleted on a bad key');
+      assert.equal(await c.exists(stale), true, 'the staging object is not removed on a bad key');
+    } finally {
+      await c.storage.remove([stale, `${gameId}/1/live.png`]).catch(() => {});
+      await sql`delete from public.games where id = ${gameId}`.catch(() => {});
+      await sql.end({ timeout: 1 }).catch(() => {});
+    }
+  });
+
+  it('aborts when the Storage endpoint cannot see the project at all', async (t) => {
+    // A DB/Storage project mismatch (or a dead Storage) must fail the run closed —
+    // a Storage failure must never cause a deletion.
+    const c = await connect(t);
+    if (!c) return;
+    const { sql, env } = c;
+    const gameId = await makeGame(sql);
+    try {
+      await addAssetRow(sql, gameId, 'gone.png', { sha: SHA('a'), sizeBytes: 10, ageHours: 3 });
+
+      // A loopback port nothing listens on: every Storage call fails.
+      const dead = maintenanceStorage(
+        createClient('http://127.0.0.1:1', env.SUPABASE_SECRET_KEY, { auth: { persistSession: false } }).storage.from('games'),
+      );
+      await assert.rejects(runAssetMaintenance(sql, dead), MaintenanceRefusal);
+      // And a Storage whose info always fails on the real client — same fail-closed path.
+      const failing = maintenanceStorage(
+        createClient(env.PUBLIC_SUPABASE_URL, env.SUPABASE_SECRET_KEY, {
+          auth: { persistSession: false },
+          global: {
+            fetch: async () => new Response(JSON.stringify({ statusCode: '500', error: 'upstream', message: 'boom' }), { status: 500 }),
+          },
+        }).storage.from('games'),
+      );
+      await assert.rejects(runAssetMaintenance(sql, failing), MaintenanceRefusal);
+
+      assert.equal((await rowOf(sql, gameId, 'gone.png'))?.status, 'uploaded', 'the row is kept when Storage cannot be trusted');
+    } finally {
+      await sql`delete from public.games where id = ${gameId}`.catch(() => {});
+      await sql.end({ timeout: 1 }).catch(() => {});
+    }
+  });
+});
+
+describe('maintenanceRemoteRefusal', () => {
+  it('accepts loopback targets and refuses remote or unparseable ones', () => {
+    for (const supabaseUrl of ['http://127.0.0.1:56700', 'http://localhost:56700', 'http://[::1]:56700']) {
+      const refusal = maintenanceRemoteRefusal({
+        supabaseUrl,
+        databaseUrl: 'postgresql://postgres:postgres@127.0.0.1:56701/postgres',
+      });
+      assert.equal(refusal, null, supabaseUrl);
+    }
+    const remoteDb = maintenanceRemoteRefusal({
+      supabaseUrl: 'http://127.0.0.1:56700',
+      databaseUrl: 'postgresql://postgres:postgres@203.0.113.9:5432/postgres',
+    });
+    assert.match(remoteDb ?? '', /DATABASE_URL.*loopback/i);
+    const remoteSb = maintenanceRemoteRefusal({
+      supabaseUrl: 'https://project.supabase.co',
+      databaseUrl: 'postgresql://postgres:postgres@127.0.0.1:56701/postgres',
+    });
+    assert.match(remoteSb ?? '', /PUBLIC_SUPABASE_URL.*loopback/i);
+    assert.match(
+      maintenanceRemoteRefusal({ supabaseUrl: 'not a url', databaseUrl: 'postgresql://u@127.0.0.1/d' }) ?? '',
+      /PUBLIC_SUPABASE_URL/,
+    );
   });
 });

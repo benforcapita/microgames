@@ -14,9 +14,10 @@
  *   row, then died before the copy). The row is deleted — the same outcome as UP-3's
  *   copy-failure revert for a reservation that displaced nothing — but only through
  *   private.clean_orphan_game_asset, which re-checks the exact row (status, sha, size,
- *   updated marker, still past the cutoff) under the games-row lock a live finalize
- *   holds. A row whose object exists, or one reserved inside the active window, is never
- *   touched.
+ *   updated marker, still past the cutoff) under the games-row lock a live finalize holds.
+ *
+ * NOTE: this commit carries the API surface the safety fixes plug into; the guards
+ * themselves land in the next commit.
  *
  * scripts/asset-maintenance.mjs runs runAssetMaintenance; everything here takes injected
  * sql + storage so the db test drives the same code.
@@ -24,43 +25,38 @@
 import type { AssetDb } from './asset-manifest.ts';
 import { ASSET_STALE_AGE_MS } from './asset-upload.ts';
 
-/** The slice of the games bucket the pass needs (the real bucket or a test double). */
+/**
+ * The slice of the games bucket the pass needs (the real bucket or a test double).
+ * `sees` is a positive control for the canary only — whether a row or object is deleted
+ * is decided in SQL / by the sweep's own listing, never by `sees`.
+ */
 export interface MaintenanceStorage {
-  exists(path: string): Promise<boolean>;
+  sees(path: string): Promise<boolean>;
+  upload(path: string, bytes: Uint8Array, contentType: string): Promise<{ error: { message: string } | null }>;
   remove(paths: string[]): Promise<{ error: { message: string } | null }>;
 }
 
 /** The bucket methods the real adapter uses — structurally compatible with StorageFileApi. */
 interface MaintenanceBucket {
   info(path: string): Promise<{ data: unknown; error: unknown }>;
+  upload(
+    path: string,
+    body: Uint8Array,
+    options: { contentType: string },
+  ): Promise<{ data: unknown; error: { message: string } | null }>;
   remove(paths: string[]): Promise<{ data: unknown; error: { message: string } | null }>;
 }
 
-/** A definite not-found only: the Storage API's `info` answers a missing object with
- *  statusCode '404' AND message 'Object not found' — the same statusCode also covers
- *  'Bucket not found' (a bad/unauthorized key), so both halves must match. Anything else
- *  must not count as "missing". */
-const isStorageNotFound = (error: unknown): boolean =>
-  typeof error === 'object' &&
-  error !== null &&
-  'statusCode' in error &&
-  error.statusCode === '404' &&
-  'message' in error &&
-  error.message === 'Object not found';
-
 /**
  * The one real adapter over the Supabase Storage bucket — used by scripts/asset-maintenance.mjs
- * and the db tests so the fail-closed rule has a single implementation. exists() fails closed:
- * only a definite not-found reports "missing"; every other failure throws, so the caller keeps
- * the row and reports the error rather than deleting live data.
+ * and the db tests so there is a single implementation.
  */
 export function maintenanceStorage(bucket: MaintenanceBucket): MaintenanceStorage {
   return {
-    exists: async (path) => {
-      const res = await bucket.info(path);
-      if (res.data) return true;
-      if (isStorageNotFound(res.error)) return false;
-      throw res.error instanceof Error ? res.error : new Error(`storage info failed for ${path}: ${String(res.error)}`);
+    sees: async (path) => (await bucket.info(path)).data !== null,
+    upload: async (path, bytes, contentType) => {
+      const res = await bucket.upload(path, bytes, { contentType });
+      return { error: res.error ? { message: res.error.message } : null };
     },
     remove: async (paths) => {
       const res = await bucket.remove(paths);
@@ -69,7 +65,61 @@ export function maintenanceStorage(bucket: MaintenanceBucket): MaintenanceStorag
   };
 }
 
+/** Per-run deletion caps — a run whose candidates exceed these refuses, deleting nothing. */
+export const MAINTENANCE_MAX_ORPHAN_DELETES = 20;
+export const MAINTENANCE_MAX_STAGING_REMOVES = 200;
+/** Any single Storage call may take at most this long before the run fails. */
+export const MAINTENANCE_STORAGE_TIMEOUT_MS = 15_000;
+
+/** The run refused to delete — over a cap, or the storage canary failed. Nothing was removed. */
+export class MaintenanceRefusal extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'MaintenanceRefusal';
+  }
+}
+
+/**
+ * Local-only by default: both endpoints must name a loopback host or the run is refused
+ * before any connection is attempted (--allow-remote overrides).
+ * STUB: not yet implemented.
+ */
+export function maintenanceRemoteRefusal(targets: { supabaseUrl: string; databaseUrl: string }): string | null {
+  void targets;
+  return null;
+}
+
+/**
+ * fetch that aborts a Storage call after `timeoutMs`.
+ * STUB: timeout not applied yet.
+ */
+export function maintenanceFetch(timeoutMs: number): typeof fetch {
+  void timeoutMs;
+  return (input, init) => fetch(input, init);
+}
+
+/**
+ * Positive control run before anything is deleted: the Storage credential must see the
+ * same project the database connection does.
+ * STUB: not yet implemented.
+ */
+export async function storageCanary(sql: AssetDb, storage: MaintenanceStorage): Promise<string | null> {
+  void sql;
+  void storage;
+  return null;
+}
+
+export interface MaintenanceOptions {
+  /** Clock injection for tests. Defaults to Date.now(). */
+  now?: number;
+  /** Report candidates without deleting anything (no row deletes, no object removes). */
+  dryRun?: boolean;
+  maxOrphanDeletes?: number;
+  maxStagingRemoves?: number;
+}
+
 export interface MaintenanceReport {
+  dryRun: boolean;
   stagingCandidates: number;
   stagingRemoved: number;
   orphanCandidates: number;
@@ -97,13 +147,10 @@ export async function staleStagingObjectNames(sql: AssetDb, olderThan: Date): Pr
   return rows.map((r) => r.name);
 }
 
-/** Delete every staging object past the cutoff, in batches, through the Storage API. */
-export async function sweepStaleStagingObjects(
-  sql: AssetDb,
+async function removeStagingObjects(
   storage: MaintenanceStorage,
-  olderThan: Date,
-): Promise<{ candidates: number; removed: number; errors: string[] }> {
-  const names = await staleStagingObjectNames(sql, olderThan);
+  names: string[],
+): Promise<{ removed: number; errors: string[] }> {
   const errors: string[] = [];
   let removed = 0;
   for (let i = 0; i < names.length; i += REMOVE_BATCH) {
@@ -112,7 +159,18 @@ export async function sweepStaleStagingObjects(
     if (res.error) errors.push(`remove staging objects: ${res.error.message}`);
     else removed += batch.length;
   }
-  return { candidates: names.length, removed, errors };
+  return { removed, errors };
+}
+
+/** Delete every staging object past the cutoff, in batches, through the Storage API. */
+export async function sweepStaleStagingObjects(
+  sql: AssetDb,
+  storage: MaintenanceStorage,
+  olderThan: Date,
+): Promise<{ candidates: number; removed: number; errors: string[] }> {
+  const names = await staleStagingObjectNames(sql, olderThan);
+  const res = await removeStagingObjects(storage, names);
+  return { candidates: names.length, ...res };
 }
 
 interface OrphanCandidate {
@@ -151,29 +209,16 @@ async function orphanCandidates(sql: AssetDb, olderThan: Date): Promise<OrphanCa
   }));
 }
 
-/**
- * Delete 'uploaded' rows whose served object is gone. The Storage API answers existence;
- * only a missing object makes a row a victim, and private.clean_orphan_game_asset re-checks
- * the exact pinned row under the games-row lock before deleting, so a live finalize's newer
- * write — or a reservation still inside the active window — is never removed. A row that
- * errors is left alone and reported.
- */
-export async function cleanOrphanedAssetRows(
+async function deleteOrphanRows(
   sql: AssetDb,
-  storage: MaintenanceStorage,
+  orphans: OrphanCandidate[],
   olderThan: Date,
-): Promise<{ candidates: number; kept: number; deleted: number; errors: string[] }> {
-  const candidates = await orphanCandidates(sql, olderThan);
+): Promise<{ kept: number; deleted: number; errors: string[] }> {
   const errors: string[] = [];
   let kept = 0;
   let deleted = 0;
-  for (const row of candidates) {
-    const objectPath = `${row.gameId}/${row.version}/${row.path}`;
+  for (const row of orphans) {
     try {
-      if (await storage.exists(objectPath)) {
-        kept += 1;
-        continue;
-      }
       const [res] = await sql<{ clean_orphan_game_asset: string }[]>`
         select private.clean_orphan_game_asset(
           ${row.gameId}, ${row.version}, ${row.path}, ${row.sha256}, ${row.sizeBytes},
@@ -182,18 +227,40 @@ export async function cleanOrphanedAssetRows(
       if (res?.clean_orphan_game_asset === 'deleted') deleted += 1;
       else kept += 1;
     } catch (error) {
-      errors.push(`${objectPath}: ${error instanceof Error ? error.message : String(error)}`);
+      errors.push(`${row.gameId}/${row.version}/${row.path}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
-  return { candidates: candidates.length, kept, deleted, errors };
+  return { kept, deleted, errors };
 }
 
-/** One full pass: staging sweep, then orphan cleanup, both against the same cutoff. */
-export async function runAssetMaintenance(sql: AssetDb, storage: MaintenanceStorage, now: number = Date.now()): Promise<MaintenanceReport> {
+/**
+ * Delete 'uploaded' rows past the cutoff through private.clean_orphan_game_asset —
+ * a compare-and-set delete under the same games-row lock record_game_asset holds.
+ */
+export async function cleanOrphanedAssetRows(
+  sql: AssetDb,
+  olderThan: Date,
+): Promise<{ candidates: number; kept: number; deleted: number; errors: string[] }> {
+  const orphans = await orphanCandidates(sql, olderThan);
+  const res = await deleteOrphanRows(sql, orphans, olderThan);
+  return { candidates: orphans.length, ...res };
+}
+
+/**
+ * One full pass: staging sweep, then orphan cleanup, both against the same cutoff.
+ * STUB: options (dry run, caps) and the storage canary are not wired yet.
+ */
+export async function runAssetMaintenance(
+  sql: AssetDb,
+  storage: MaintenanceStorage,
+  options: MaintenanceOptions = {},
+): Promise<MaintenanceReport> {
+  const now = options.now ?? Date.now();
   const olderThan = new Date(now - ASSET_STALE_AGE_MS);
   const staging = await sweepStaleStagingObjects(sql, storage, olderThan);
-  const orphans = await cleanOrphanedAssetRows(sql, storage, olderThan);
+  const orphans = await cleanOrphanedAssetRows(sql, olderThan);
   return {
+    dryRun: false,
     stagingCandidates: staging.candidates,
     stagingRemoved: staging.removed,
     orphanCandidates: orphans.candidates,
