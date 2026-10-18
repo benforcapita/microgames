@@ -12,6 +12,7 @@
  * A missing relation or a rejected insert is a real error.
  */
 import { passPublishLine } from '../manual-review';
+import { readManualReview } from './manual-review';
 import { isThumbnailUploadError } from './bundle-store';
 import { normalizeTags, type Stage } from './game-rules';
 import { validateGameUpload, type ForkParent } from './upload';
@@ -248,7 +249,7 @@ export async function readSubmission(opts: {
   if (!game || game.ownerId !== opts.userId) return { status: 404, error: 'Not found' };
 
   const validation = await opts.store.latestValidation(game.id);
-  return { status: 200, view: buildSubmissionView(game, validation) };
+  return { status: 200, view: buildSubmissionView(game, validation, await readManualReview()) };
 }
 
 export async function handleSubmissionStatus(opts: {
@@ -263,7 +264,11 @@ export async function handleSubmissionStatus(opts: {
   return Response.json(result.view, { headers: { 'Cache-Control': 'no-store' } });
 }
 
-export function buildSubmissionView(game: SubmissionGame, validation: ValidationRow | null): SubmissionView {
+export function buildSubmissionView(
+  game: SubmissionGame,
+  validation: ValidationRow | null,
+  manualReview = true,
+): SubmissionView {
   const published = game.stage === 'proving' || game.stage === 'live';
   const status = validation?.status ?? null;
   const phase: SubmissionView['phase'] = status ?? 'waiting';
@@ -275,7 +280,7 @@ export function buildSubmissionView(game: SubmissionGame, validation: Validation
   const checks = validation ? [...checksFrom(staticReport, 'static'), ...checksFrom(validation.runReport, 'run')] : [];
   const run = reportObject(validation?.runReport);
 
-  const publishLine = passPublishLine();
+  const publishLine = passPublishLine(manualReview);
   let headline = 'Waiting';
   let detail = `Your game is saved as pending. ${publishLine}`;
   if (game.stage === 'rejected') {

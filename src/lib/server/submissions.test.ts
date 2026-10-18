@@ -377,16 +377,9 @@ describe('submission status endpoint', () => {
     assert.equal(pending.game.reviewNote, null);
     assert.equal('publish' in pending, false);
 
-    const prev = process.env.MG_MANUAL_REVIEW;
-    process.env.MG_MANUAL_REVIEW = '0';
-    try {
-      const queued = buildSubmissionView(game(), validation({ status: 'queued' }));
-      assert.match(queued.detail, /automatically/);
-      assert.doesNotMatch(queued.detail, /reviewer/);
-    } finally {
-      if (prev === undefined) delete process.env.MG_MANUAL_REVIEW;
-      else process.env.MG_MANUAL_REVIEW = prev;
-    }
+    const queued = buildSubmissionView(game(), validation({ status: 'queued' }), false);
+    assert.match(queued.detail, /automatically/);
+    assert.doesNotMatch(queued.detail, /reviewer/);
 
     const live = buildSubmissionView(game({ stage: 'proving' }), validation({ status: 'passed' }));
     assert.equal(live.terminal, true);

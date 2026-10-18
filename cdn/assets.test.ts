@@ -44,7 +44,7 @@ function harness() {
       const pub = STAGES[id] === 'live' || STAGES[id] === 'proving';
       return new Response(JSON.stringify([{
         status,
-        updated_at: '2026-10-18T00:00:00.000Z',
+        content_at: '2026-10-18T00:00:00.000Z',
         games: { stage: STAGES[id], reviewed_at: pub ? '2026-10-18T01:00:00.000Z' : null },
       }]), { status: 200 });
     }
@@ -121,6 +121,19 @@ describe('AS-3 versioned asset serving', () => {
     assert.equal(r.status, 200);
     assert.equal(r.headers['cache-control'], 'private, no-store');
     assert.equal(r.headers['x-content-type-options'], 'nosniff');
+  });
+  it('a valid owner token is private no-store even when the game is already public', async () => {
+    const { get } = harness();
+    const token = mintPreviewToken(SECRET, 'live0001');
+    const asset = await get(`/g/live0001/1/sprites/hero.png?pt=${token}`);
+    assert.equal(asset.status, 200);
+    assert.equal(asset.headers['cache-control'], 'private, no-store');
+    const doc = await get(`/g/live0001/index.html?pt=${token}`);
+    assert.equal(doc.status, 302);
+    assert.equal(doc.headers['cache-control'], 'private, no-store');
+    const anon = await get('/g/live0001/1/sprites/hero.png?pt=not-a-token');
+    assert.equal(anon.status, 200);
+    assert.equal(anon.headers['cache-control'], SHORT_CACHE);
   });
   it('sends nosniff and a short revalidating cache on versioned assets', async () => {
     const { get } = harness();

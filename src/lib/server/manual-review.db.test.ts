@@ -3,6 +3,9 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { after, before, describe, it } from 'node:test';
 import postgres from 'postgres';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createHandler } from '../../../cdn/handler.mjs';
 import {
   assessAssetUpload,
@@ -46,14 +49,15 @@ let listTags: typeof import('./games.ts').listTags;
 let platformStats: typeof import('./games.ts').platformStats;
 let readSubmission: typeof import('./submissions.ts').readSubmission;
 let sqlSubmissionStore: typeof import('./submissions-db.ts').sqlSubmissionStore;
-let writeManualReviewSetting: typeof import('./manual-review-sync.ts').writeManualReviewSetting;
+let readManualReview: typeof import('./manual-review.ts').readManualReview;
+let evaluateGraduation: typeof import('./games.ts').evaluateGraduation;
 
 if (probeOk) {
   sql = (await import('./db.ts')).sql;
-  ({ getGame, listTags, platformStats } = await import('./games.ts'));
+  ({ getGame, listTags, platformStats, evaluateGraduation } = await import('./games.ts'));
   readSubmission = (await import('./submissions.ts')).readSubmission;
   sqlSubmissionStore = (await import('./submissions-db.ts')).sqlSubmissionStore;
-  writeManualReviewSetting = (await import('./manual-review-sync.ts')).writeManualReviewSetting;
+  readManualReview = (await import('./manual-review.ts')).readManualReview;
 }
 
 const userId = randomUUID();
@@ -274,7 +278,7 @@ describe('manual review (db)', () => {
     assert.equal((await cdnGet(assetId, '/g/' + assetId + '/1/index.html', bytes)).status, 200);
   });
 
-  it('an already-proving game keeps its stage and is not backfilled into the queue', async (t) => {
+  it('an already-proving game keeps its stage and is not put in the review queue', async (t) => {
     if (skip(t)) return;
     await sql`
       insert into public.games (id, slug, title, creator, stage)
@@ -282,7 +286,7 @@ describe('manual review (db)', () => {
     const [row] = await sql<{ stage: string; reviewed_at: Date | null }[]>`
       select stage, reviewed_at from public.games where id = ${legacyId}`;
     assert.equal(row?.stage, 'proving');
-    assert.equal(row?.reviewed_at, null);
+    assert.ok(row?.reviewed_at, 'inserting a public stage stamps reviewed_at');
     const queued = await sql`select id from public.games_awaiting_review where id = ${legacyId}`;
     assert.equal(queued.length, 0);
   });
@@ -389,7 +393,7 @@ describe('manual review (db)', () => {
     }
   });
 
-  it('MG_MANUAL_REVIEW is the switch the database function reads', async (t) => {
+  it('validate-game reads manual_review_enabled(), not an env flag', async (t) => {
     if (skip(t)) return;
     const prev = process.env.MG_MANUAL_REVIEW;
     const offId = `mro0${userId.replace(/-/g, '').slice(0, 8)}`;
@@ -397,8 +401,8 @@ describe('manual review (db)', () => {
     const rollback = new Error('rollback-settings');
     try {
       await sql.begin(async (tx) => {
-        process.env.MG_MANUAL_REVIEW = '0';
-        await writeManualReviewSetting(tx);
+        process.env.MG_MANUAL_REVIEW = '1';
+        await tx`update private.settings set value = '0' where key = 'mg_manual_review'`;
         const [off] = await tx<{ enabled: boolean }[]>`select public.manual_review_enabled() as enabled`;
         assert.equal(off?.enabled, false);
         await tx`
@@ -407,9 +411,12 @@ describe('manual review (db)', () => {
         const [published] = await tx<{ stage: string }[]>`
           select stage from public.record_game_validation(${offId}, ${sha('01')}, 'passed', ${tx.json(passReport)})`;
         assert.equal(published?.stage, 'proving');
+        const [offGame] = await tx<{ reviewed_at: Date | null }[]>`
+          select reviewed_at from public.games where id = ${offId}`;
+        assert.ok(offGame?.reviewed_at, 'auto-publish stamps reviewed_at');
 
-        process.env.MG_MANUAL_REVIEW = '1';
-        await writeManualReviewSetting(tx);
+        process.env.MG_MANUAL_REVIEW = '0';
+        await tx`update private.settings set value = '1' where key = 'mg_manual_review'`;
         const [on] = await tx<{ enabled: boolean }[]>`select public.manual_review_enabled() as enabled`;
         assert.equal(on?.enabled, true);
         await tx`
@@ -418,6 +425,9 @@ describe('manual review (db)', () => {
         const [held] = await tx<{ stage: string }[]>`
           select stage from public.record_game_validation(${onId}, ${sha('10')}, 'passed', ${tx.json(passReport)})`;
         assert.equal(held?.stage, 'pending');
+        const [onGame] = await tx<{ reviewed_at: Date | null }[]>`
+          select reviewed_at from public.games where id = ${onId}`;
+        assert.equal(onGame?.reviewed_at, null);
         throw rollback;
       });
     } catch (err) {
@@ -428,7 +438,36 @@ describe('manual review (db)', () => {
     }
   });
 
-  it('manual review off still publishes a pass to proving', async (t) => {
+  it('the portal reads the database setting and does not write it', async (t) => {
+    if (skip(t)) return;
+    for (const role of ['anon', 'authenticated', 'public']) {
+      for (const priv of ['INSERT', 'UPDATE']) {
+        const [row] = await sql<{ ok: boolean }[]>`
+          select has_table_privilege(${role}, 'private.settings', ${priv}) as ok`;
+        assert.equal(row?.ok, false, `${role} ${priv}`);
+      }
+    }
+    const rollback = new Error('rollback-settings');
+    try {
+      await sql.begin(async (tx) => {
+        await tx`update private.settings set value = '0' where key = 'mg_manual_review'`;
+        assert.equal(await readManualReview(tx), false);
+        const [off] = await tx<{ value: string }[]>`
+          select value from private.settings where key = 'mg_manual_review'`;
+        assert.equal(off?.value, '0');
+        await tx`update private.settings set value = '1' where key = 'mg_manual_review'`;
+        assert.equal(await readManualReview(tx), true);
+        const [on] = await tx<{ value: string }[]>`
+          select value from private.settings where key = 'mg_manual_review'`;
+        assert.equal(on?.value, '1');
+        throw rollback;
+      });
+    } catch (err) {
+      if (err !== rollback) throw err;
+    }
+  });
+
+  it('manual review off still publishes a pass to proving and stamps reviewed_at', async (t) => {
     if (skip(t)) return;
     const id = `mroff${userId.replace(/-/g, '').slice(0, 8)}`;
     try {
@@ -439,32 +478,322 @@ describe('manual review (db)', () => {
         select stage from public.record_game_validation(${id}, ${sha('33')}, 'passed', ${sql.json(passReport)}, false)`;
       assert.equal(row?.stage, 'proving');
       const [game] = await sql<{ reviewed_at: Date | null }[]>`select reviewed_at from public.games where id = ${id}`;
-      assert.equal(game?.reviewed_at, null);
+      assert.ok(game?.reviewed_at);
+    } finally {
+      await sql`delete from public.games where id = ${id}`;
+    }
+  });
+
+  it('hosted-shaped public assets return 200 before and after the backfill', async (t) => {
+    if (skip(t)) return;
+    const suffix = userId.replace(/-/g, '').slice(0, 6);
+    const liveId = `bfL${suffix}`;
+    const provingId = `bfP${suffix}`;
+    const paths = ['sprites/one.js', 'sprites/two.js', 'data/level.json'];
+    const types = ['text', 'text', 'json'];
+    const migration = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../../../supabase/migrations/20261018140000_manual_review.sql'), 'utf8');
+    assert.match(migration, /update public\.game_assets\s+set content_at = updated_at\s+where status = 'uploaded'\s+and content_at is null/);
+    assert.match(migration, /update public\.games\s+set reviewed_at = clock_timestamp\(\)\s+where stage in \('proving', 'live'\)\s+and reviewed_at is null/);
+    try {
+      for (const [id, stage] of [[liveId, 'live'], [provingId, 'proving']] as const) {
+        await sql`
+          insert into public.games (id, slug, title, creator, stage)
+          values (${id}, ${id}, 'Hosted', 'legacy', ${stage})`;
+        await sql`update public.games set reviewed_at = null where id = ${id}`;
+        for (let i = 0; i < paths.length; i++) {
+          await sql`
+            insert into public.game_assets
+              (game_id, version, path, expected_type, status, size_bytes, content_sha256, source, updated_at)
+            values
+              (${id}, 1, ${paths[i]}, ${types[i]}, 'uploaded', 12, ${sha('c' + i)}, 'creator', now())`;
+        }
+        await sql`update public.game_assets set content_at = null where game_id = ${id}`;
+      }
+      const before = await sql<{ id: string; path: string; status: string; stage: string; reviewed_at: Date | null; content_at: Date | null }[]>`
+        select g.id, a.path, a.status, g.stage, g.reviewed_at, a.content_at
+        from public.games g
+        join public.game_assets a on a.game_id = g.id
+        where g.id in (${liveId}, ${provingId})
+        order by g.id, a.path`;
+      assert.equal(before.length, 6);
+      for (const row of before) {
+        assert.equal(row.reviewed_at, null);
+        assert.equal(row.content_at, null);
+        assert.equal(hostedTodayStatus(row), 200, `${row.id} ${row.path}`);
+      }
+
+      await backfillPublicReview(sql);
+      for (const row of before) {
+        const shown = await cdnGet(row.id, `/g/${row.id}/1/${row.path}`, new TextEncoder().encode('hosted'));
+        assert.equal(shown.status, 200, `${row.id} ${row.path}`);
+        assert.match(shown.body, /hosted/);
+      }
+      const stamped = await sql<{ id: string; reviewed_at: Date }[]>`
+        select id, reviewed_at from public.games where id in (${liveId}, ${provingId}) order by id`;
+      assert.equal(stamped.length, 2);
+      for (const row of stamped) assert.ok(row.reviewed_at);
+
+      await backfillPublicReview(sql);
+      const again = await sql<{ id: string; reviewed_at: Date }[]>`
+        select id, reviewed_at from public.games where id in (${liveId}, ${provingId}) order by id`;
+      assert.deepEqual(again.map((row) => row.reviewed_at.getTime()), stamped.map((row) => row.reviewed_at.getTime()));
+      for (const row of before) {
+        assert.equal((await cdnGet(row.id, `/g/${row.id}/1/${row.path}`, new TextEncoder().encode('hosted'))).status, 200);
+      }
+    } finally {
+      await sql`delete from public.games where id in (${liveId}, ${provingId})`;
+    }
+  });
+
+  it('a demoted legacy live game with no validation row waits for review', async (t) => {
+    if (skip(t)) return;
+    const id = `bfg5${userId.replace(/-/g, '').slice(0, 6)}`;
+    const bytes = new TextEncoder().encode('const legacy = 1;\n');
+    try {
+      await sql`
+        insert into public.games (id, slug, title, creator, owner_id, stage)
+        values (${id}, ${id}, 'Legacy live', ${handle}, ${userId}, 'live')`;
+      await sql`update public.games set reviewed_at = null where id = ${id}`;
+      await sql`
+        insert into public.game_assets
+          (game_id, version, path, expected_type, status, size_bytes, content_sha256, source)
+        values (${id}, 1, 'sprites/old.js', 'text', 'uploaded', ${bytes.byteLength}, ${sha('d1')}, 'creator')`;
+      await sql`update public.game_assets set content_at = null where game_id = ${id}`;
+      const [shape] = await sql<{ n: number }[]>`
+        select count(*)::int as n from public.game_validations where game_id = ${id}`;
+      assert.equal(shape?.n, 0);
+      await backfillPublicReview(sql);
+      assert.equal((await cdnGet(id, `/g/${id}/1/sprites/old.js`, bytes)).status, 200);
+      const decision = assessAssetUpload({
+        userId,
+        ownerId: userId,
+        rawPath: 'sprites/new.js',
+        adding: true,
+        bytes,
+        existing: null,
+        codeBytes: 100,
+        uploadedBytes: bytes.byteLength,
+        fileCount: 1,
+        rateAllowed: true,
+      });
+      assert.equal(decision.kind, 'store');
+      if (decision.kind !== 'store') return;
+      const storage: AssetStorage = {
+        async upload() { return { error: null }; },
+        async remove() { return { error: null }; },
+      };
+      assert.deepEqual(await saveFinalizedAsset(sql, storage, id, 1, decision, bytes), { ok: true });
+      const [held] = await sql<{ stage: string; reviewed_at: Date | null }[]>`
+        select stage, reviewed_at from public.games where id = ${id}`;
+      assert.equal(held?.stage, 'pending');
+      assert.ok(held?.reviewed_at);
+      const [queued] = await sql<{ id: string }[]>`select id from public.games_awaiting_review where id = ${id}`;
+      assert.equal(queued?.id, id);
+      assert.equal((await cdnGet(id, `/g/${id}/1/sprites/new.js`, bytes)).status, 404);
+    } finally {
+      await sql`delete from public.games where id = ${id}`;
+    }
+  });
+
+  it('with review off, a new game serves its assets and can graduate', async (t) => {
+    if (skip(t)) return;
+    const id = `bfoff${userId.replace(/-/g, '').slice(0, 6)}`;
+    const bytes = new TextEncoder().encode('const auto = 1;\n');
+    const rollback = new Error('rollback-settings');
+    try {
+      await sql.begin(async (tx) => {
+        await tx`update private.settings set value = '0' where key = 'mg_manual_review'`;
+        await tx`
+          insert into public.games (id, slug, title, creator, owner_id, stage)
+          values (${id}, ${id}, 'Auto', ${handle}, ${userId}, 'pending')`;
+        const [published] = await tx<{ stage: string }[]>`
+          select stage from public.record_game_validation(${id}, ${sha('e1')}, 'passed', ${tx.json(passReport)})`;
+        assert.equal(published?.stage, 'proving');
+        const [stamped] = await tx<{ reviewed_at: Date | null }[]>`
+          select reviewed_at from public.games where id = ${id}`;
+        assert.ok(stamped?.reviewed_at);
+        const decision = assessAssetUpload({
+          userId,
+          ownerId: userId,
+          rawPath: 'sprites/auto.js',
+          adding: true,
+          bytes,
+          existing: null,
+          codeBytes: 100,
+          uploadedBytes: 0,
+          fileCount: 0,
+          rateAllowed: true,
+        });
+        assert.equal(decision.kind, 'store');
+        if (decision.kind !== 'store') return;
+        const storage: AssetStorage = {
+          async upload() { return { error: null }; },
+          async remove() { return { error: null }; },
+        };
+        assert.deepEqual(await saveFinalizedAsset(tx, storage, id, 1, decision, bytes), { ok: true });
+        const [still] = await tx<{ stage: string }[]>`select stage from public.games where id = ${id}`;
+        assert.equal(still?.stage, 'proving');
+        const shown = await cdnGet(id, `/g/${id}/1/sprites/auto.js`, bytes, tx);
+        assert.equal(shown.status, 200);
+        assert.match(shown.body, /const auto/);
+        const plays = Number(process.env.MG_MIN_PLAYS || 100);
+        await tx`
+          insert into public.sessions (id, game_id, first_frame_ms, started, completed, crashed, duration_ms)
+          select gen_random_uuid(), ${id}, 100, true, true, false, 120000
+          from generate_series(1, ${plays})`;
+        assert.equal(await evaluateGraduation(id, tx), true);
+        const [live] = await tx<{ stage: string }[]>`select stage from public.games where id = ${id}`;
+        assert.equal(live?.stage, 'live');
+        assert.equal((await cdnGet(id, `/g/${id}/1/sprites/auto.js`, bytes, tx)).status, 200);
+        throw rollback;
+      });
+    } catch (err) {
+      if (err !== rollback) throw err;
+    }
+  });
+
+  it('approval during a new-file copy never publishes the unreviewed bytes', async (t) => {
+    if (skip(t)) return;
+    const id = `bnew${userId.replace(/-/g, '').slice(0, 6)}`;
+    const bytes = new TextEncoder().encode('const fresh = 1;\n');
+    try {
+      await sql`
+        insert into public.games (id, slug, title, creator, owner_id, stage)
+        values (${id}, ${id}, 'Race new', ${handle}, ${userId}, 'pending')`;
+      const decision = assessAssetUpload({
+        userId, ownerId: userId, rawPath: 'sprites/fresh.js', adding: true, bytes,
+        existing: null, codeBytes: 100, uploadedBytes: 0, fileCount: 0, rateAllowed: true,
+      });
+      assert.equal(decision.kind, 'store');
+      if (decision.kind !== 'store') return;
+      const storage: AssetStorage = {
+        async upload() {
+          await sql`update public.games set stage = 'live' where id = ${id}`;
+          return { error: null };
+        },
+        async remove() { return { error: null }; },
+      };
+      assert.deepEqual(await saveFinalizedAsset(sql, storage, id, 1, decision, bytes), { ok: true });
+      const [row] = await sql<{ stage: string; newer: boolean }[]>`
+        select g.stage, (a.content_at > g.reviewed_at) as newer
+        from public.games g
+        join public.game_assets a on a.game_id = g.id and a.path = 'sprites/fresh.js'
+        where g.id = ${id}`;
+      assert.equal(row?.stage, 'live');
+      assert.equal(row?.newer, true);
+      assert.equal((await cdnGet(id, `/g/${id}/1/sprites/fresh.js`, bytes)).status, 404);
+    } finally {
+      await sql`delete from public.games where id = ${id}`;
+    }
+  });
+
+  it('approval during a replace never publishes the unreviewed bytes', async (t) => {
+    if (skip(t)) return;
+    const id = `brep${userId.replace(/-/g, '').slice(0, 6)}`;
+    const v1 = new TextEncoder().encode('const v1 = 1;\n');
+    const v2 = new TextEncoder().encode('const v2 = 2;\n');
+    try {
+      await sql`
+        insert into public.games (id, slug, title, creator, owner_id, stage)
+        values (${id}, ${id}, 'Race replace', ${handle}, ${userId}, 'pending')`;
+      const first = assessAssetUpload({
+        userId, ownerId: userId, rawPath: 'sprites/swap.js', adding: true, bytes: v1,
+        existing: null, codeBytes: 100, uploadedBytes: 0, fileCount: 0, rateAllowed: true,
+      });
+      assert.equal(first.kind, 'store');
+      if (first.kind !== 'store') return;
+      const quiet: AssetStorage = {
+        async upload() { return { error: null }; },
+        async remove() { return { error: null }; },
+      };
+      assert.deepEqual(await saveFinalizedAsset(sql, quiet, id, 1, first, v1), { ok: true });
+      await sql`update public.games set stage = 'live' where id = ${id}`;
+      const warm = await cdnGet(id, `/g/${id}/1/sprites/swap.js`, v1);
+      assert.equal(warm.status, 200);
+      assert.match(warm.body, /const v1/);
+
+      const [existing] = await sql<{ status: string; size_bytes: number; content_sha256: string }[]>`
+        select status, size_bytes, content_sha256 from public.game_assets
+        where game_id = ${id} and path = 'sprites/swap.js'`;
+      assert.ok(existing);
+      const replace = assessAssetUpload({
+        userId, ownerId: userId, rawPath: 'sprites/swap.js', adding: false, bytes: v2,
+        existing: {
+          path: 'sprites/swap.js',
+          expectedType: 'text',
+          status: 'uploaded',
+          sizeBytes: existing.size_bytes,
+          source: 'creator',
+        },
+        codeBytes: 100, uploadedBytes: existing.size_bytes, fileCount: 1, rateAllowed: true,
+      });
+      assert.equal(replace.kind, 'store');
+      if (replace.kind !== 'store') return;
+      const racing: AssetStorage = {
+        async upload() {
+          await sql`update public.games set stage = 'live' where id = ${id}`;
+          return { error: null };
+        },
+        async remove() { return { error: null }; },
+      };
+      assert.deepEqual(await saveFinalizedAsset(sql, racing, id, 1, replace, v2), { ok: true });
+      const hidden = await cdnGet(id, `/g/${id}/1/sprites/swap.js`, v2);
+      assert.equal(hidden.status, 404);
+      assert.doesNotMatch(hidden.body, /const v2/);
+      await sql`update public.games set stage = 'live' where id = ${id}`;
+      const shown = await cdnGet(id, `/g/${id}/1/sprites/swap.js`, v2);
+      assert.equal(shown.status, 200);
+      assert.match(shown.body, /const v2/);
     } finally {
       await sql`delete from public.games where id = ${id}`;
     }
   });
 });
 
-async function cdnGet(gameId: string, path: string, bytes: Uint8Array): Promise<{ status: number; body: string; headers: Record<string, string> }> {
+/** Production today serves an uploaded asset of a public game with no review cutoff. */
+function hostedTodayStatus(row: { status: string; stage: string }): number {
+  if (row.status !== 'uploaded') return 404;
+  if (row.stage !== 'proving' && row.stage !== 'live') return 404;
+  return 200;
+}
+
+async function backfillPublicReview(db: postgres.Sql): Promise<void> {
+  await db`
+    update public.game_assets
+       set content_at = updated_at
+     where status = 'uploaded'
+       and content_at is null`;
+  await db`
+    update public.games
+       set reviewed_at = clock_timestamp()
+     where stage in ('proving', 'live')
+       and reviewed_at is null`;
+}
+
+async function cdnGet(
+  gameId: string,
+  path: string,
+  bytes: Uint8Array,
+  db: postgres.Sql | postgres.TransactionSql = sql,
+): Promise<{ status: number; body: string; headers: Record<string, string> }> {
   const fakeFetch = async (url: string) => {
     const u = new URL(url);
     if (u.pathname === '/rest/v1/games') {
-      const [row] = await sql<{ stage: string }[]>`select stage from public.games where id = ${gameId}`;
+      const [row] = await db<{ stage: string }[]>`select stage from public.games where id = ${gameId}`;
       return Response.json(row ? [{ stage: row.stage }] : []);
     }
     if (u.pathname === '/rest/v1/game_validations') return Response.json([{ version: 1 }]);
     if (u.pathname === '/rest/v1/game_assets') {
       const assetPath = decodeURIComponent((u.searchParams.get('path') ?? '').replace(/^eq\./, ''));
-      const [row] = await sql<{ status: string; updated_at: Date; stage: string; reviewed_at: Date | null }[]>`
-        select a.status, a.updated_at, g.stage, g.reviewed_at
+      const [row] = await db<{ status: string; content_at: string | null; stage: string; reviewed_at: string | null }[]>`
+        select a.status, a.content_at::text as content_at, g.stage, g.reviewed_at::text as reviewed_at
         from public.game_assets a
         join public.games g on g.id = a.game_id
         where a.game_id = ${gameId} and a.version = 1 and a.path = ${assetPath}`;
       return Response.json(row ? [{
         status: row.status,
-        updated_at: row.updated_at.toISOString(),
-        games: { stage: row.stage, reviewed_at: row.reviewed_at ? row.reviewed_at.toISOString() : null },
+        content_at: row.content_at,
+        games: { stage: row.stage, reviewed_at: row.reviewed_at },
       }] : []);
     }
     if (u.pathname.includes('/storage/')) {

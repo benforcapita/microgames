@@ -1,6 +1,5 @@
 import { defineMiddleware } from 'astro:middleware';
 import { ADSENSE_CLIENT, CDN_ORIGIN, SUPABASE_URL } from './lib/server/config';
-import { syncManualReviewFlag } from './lib/server/manual-review-sync';
 import { createRequestClient } from './lib/server/supabase';
 import { getProfile } from './lib/server/profiles';
 import { applyDeviceHeaders, detectDevice } from './lib/server/device';
@@ -23,7 +22,6 @@ const ANONYMOUS = new Set(['/api/telemetry']);
 const ONBOARDING_OK = /^\/(onboarding|auth\/|api\/auth\/|api\/profile)/;
 
 export const onRequest = defineMiddleware(async (ctx, next) => {
-  await syncManualReviewFlag();
   const authHeaders = new Headers();
   const { pathname } = ctx.url;
   ctx.locals.supabase = createRequestClient(ctx.request, ctx.cookies, authHeaders);

@@ -2,7 +2,6 @@
 // without a running stack. A failing bundle moves pending -> rejected. A passing one stays pending
 // while manual review is on (the default), and moves pending -> proving when it is off
 // (see stageAfterValidation in game-rules.ts).
-import { manualReviewEnabled } from '../../../src/lib/manual-review.ts';
 import { analyzeGame, type StaticReport } from '../../../src/lib/server/static-check.ts';
 import { stageAfterValidation, type Stage, type ValidationStatus } from '../../../src/lib/server/game-rules.ts';
 
@@ -55,19 +54,10 @@ export function statusFromReport(report: StaticReport): ValidationStatus {
 /** Game ids are base64url (createGame uses randomBytes(6).toString('base64url')), so - and _ are valid. */
 export const GAME_ID_RE = /^[A-Za-z0-9_-]{1,32}$/;
 
-/** In-memory tests only. The REST store does not send this; SQL reads private.settings. */
-function runtimeManualReview(): boolean {
-  let raw: string | undefined;
-  const deno = (globalThis as { Deno?: { env?: { get(name: string): string | undefined } } }).Deno;
-  if (deno?.env?.get) {
-    try { raw = deno.env.get('MG_MANUAL_REVIEW'); } catch { raw = undefined; }
-  }
-  if (raw == null && typeof process !== 'undefined') raw = process.env.MG_MANUAL_REVIEW;
-  return manualReviewEnabled(raw);
-}
-
 export async function validateGame(store: Store, gameId: string, opts: { manualReview?: boolean } = {}): Promise<ValidateResult> {
-  const manualReview = opts.manualReview ?? runtimeManualReview();
+  // In-memory tests default on. The REST store ignores this boolean: record_game_validation
+  // reads manual_review_enabled() unless the caller passes an explicit p_manual_review.
+  const manualReview = opts.manualReview ?? true;
   if (!GAME_ID_RE.test(gameId)) return { httpStatus: 400, body: { error: 'invalid gameId' } };
   const stage = await store.gameStage(gameId);
   if (!stage) return { httpStatus: 404, body: { error: 'game not found' } };

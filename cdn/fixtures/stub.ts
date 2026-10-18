@@ -30,7 +30,7 @@ export function fixtureHandler(opts: { webOrigins?: string; cdnOrigin?: string }
       const pub = STAGES[id] === 'live' || STAGES[id] === 'proving';
       return new Response(JSON.stringify([{
         status: 'uploaded',
-        updated_at: '2026-10-18T00:00:00.000Z',
+        content_at: '2026-10-18T00:00:00.000Z',
         games: { stage: STAGES[id], reviewed_at: pub ? '2026-10-18T01:00:00.000Z' : null },
       }]), { status: 200 });
     }

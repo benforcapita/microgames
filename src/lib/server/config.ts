@@ -1,4 +1,3 @@
-import { manualReviewEnabled } from '../manual-review';
 import { GRADUATION_DEFAULTS } from './game-rules';
 
 const env = process.env;
@@ -27,9 +26,6 @@ export const ADSENSE_CLIENT = env.PUBLIC_ADSENSE_CLIENT || import.meta.env?.PUBL
 export const FEATURED_BROKEN_MIN_PLAYS = 5;
 /** ... with a crash rate strictly above this (0.5 = 50%). */
 export const FEATURED_BROKEN_MAX_CRASH_RATE = 0.5;
-
-/** Default on. See `MG_MANUAL_REVIEW` in `.env.example`. */
-export const MANUAL_REVIEW = manualReviewEnabled();
 
 export const GRADUATION = {
   ...GRADUATION_DEFAULTS,

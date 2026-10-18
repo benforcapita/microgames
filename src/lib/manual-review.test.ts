@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
 import {
   ASSET_REVIEW_HOLD,
@@ -37,6 +38,24 @@ describe('MG_MANUAL_REVIEW', () => {
     assert.match(homeCreatorSentence(false), /right away/);
     assert.match(creatorsLiveStep(true).title, /review/);
     assert.match(creatorsLiveStep(false).body, /straight away/);
+  });
+  it('the portal and validate-game do not write or overwrite the database switch', () => {
+    const files = [
+      'src/middleware.ts',
+      'src/lib/server/config.ts',
+      'src/lib/server/asset-upload.ts',
+      'src/lib/server/manual-review.ts',
+      'src/lib/manual-review.ts',
+      'supabase/functions/validate-game/validate.ts',
+      'supabase/functions/validate-game/rest-store.ts',
+    ];
+    for (const file of files) {
+      const source = readFileSync(file, 'utf8');
+      assert.doesNotMatch(source, /MG_MANUAL_REVIEW/, file);
+      assert.doesNotMatch(source, /insert into private\.settings/i, file);
+      assert.doesNotMatch(source, /manual-review-sync/, file);
+    }
+    assert.doesNotMatch(readFileSync('supabase/functions/validate-game/rest-store.ts', 'utf8'), /p_manual_review/);
   });
   it('asks before an asset upload only when the game would leave public', () => {
     let asked = '';

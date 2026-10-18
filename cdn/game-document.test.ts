@@ -49,7 +49,7 @@ function harness(opts: { cdnOrigin?: string } = {}) {
       const pub = STAGES[id] === 'live' || STAGES[id] === 'proving';
       return Response.json([{
         status: 'uploaded',
-        updated_at: '2026-10-18T00:00:00.000Z',
+        content_at: '2026-10-18T00:00:00.000Z',
         games: { stage: STAGES[id], reviewed_at: pub ? '2026-10-18T01:00:00.000Z' : null },
       }]);
     }

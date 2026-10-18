@@ -6,8 +6,12 @@ alter table public.games
   add column if not exists review_note text,
   add column if not exists reviewed_at timestamptz;
 
--- The portal writes this from MG_MANUAL_REVIEW ('1' or '0'). Re-applying the file must
--- not reset an operator's choice. Missing, or anything other than '0', means review is on.
+-- The only switch. Seeded on. The portal and validate-game call manual_review_enabled()
+-- and never write this row, so nothing is last-writer-wins and they need no INSERT or
+-- UPDATE grant. Change it in the SQL editor:
+--   update private.settings set value = '0' where key = 'mg_manual_review';
+-- Re-applying the file must not reset that choice. Missing, or anything other than '0',
+-- means review is on.
 insert into private.settings (key, value) values ('mg_manual_review', '1')
 on conflict (key) do nothing;
 
@@ -101,8 +105,11 @@ begin
               when cur = 'pending' and p_status = 'passed' then 'proving'
               when cur = 'pending' and p_status = 'failed' then 'rejected'
               else cur end;
-  -- Automatic stage moves are not a human review, so they must not stamp reviewed_at.
-  perform set_config('meshground.skip_review_stamp', '1', true);
+  -- A failed automatic transition is not a review. Auto-publish (review off) moves
+  -- pending to proving and must stamp reviewed_at, or the new game's assets 404.
+  if nxt is distinct from 'proving' then
+    perform set_config('meshground.skip_review_stamp', '1', true);
+  end if;
   if nxt <> cur then update public.games set stage = nxt where public.games.id = p_game_id; end if;
 
   if p_report->'inputSupport'->>'class' in ('mobile', 'desktop', 'both', 'unknown') then
@@ -142,7 +149,11 @@ begin
               when cur = 'pending' and st = 'passed' then 'proving'
               when cur = 'pending' and st = 'failed' then 'rejected'
               else cur end;
-  perform set_config('meshground.skip_review_stamp', '1', true);
+  -- A failed automatic transition is not a review. Auto-publish (review off) moves
+  -- pending to proving and must stamp reviewed_at, or the new game's assets 404.
+  if nxt is distinct from 'proving' then
+    perform set_config('meshground.skip_review_stamp', '1', true);
+  end if;
   if nxt <> cur then update public.games set stage = nxt where public.games.id = p_game_id; end if;
   return query select nxt;
 end;
@@ -154,11 +165,11 @@ grant execute on function public.apply_stored_validation(text, text, boolean) to
 -- A human stage write is the review. Table-editor updates of stage to a public stage
 -- (proving or live), including setting the same stage again, stamp reviewed_at.
 -- So does a human rejection. record_game_validation sets meshground.skip_review_stamp
--- so an automatic pass or fail does not.
+-- on an automatic failure so that does not stamp. An auto-publish to proving does.
 -- Graduation sets stage to live on purpose, and this stamp moves with it: assets
--- already public (updated_at <= reviewed_at) stay servable. An upload demotes a
+-- already public (content_at <= reviewed_at) stay servable. An upload demotes a
 -- proving game to pending first, so graduation cannot publish a file that has not
--- been reviewed.
+-- been reviewed. Inserting a public stage is a publish too (seed, legacy copies).
 create or replace function public.touch_game_review()
 returns trigger
 language plpgsql
@@ -169,8 +180,14 @@ begin
   if current_setting('meshground.skip_review_stamp', true) = '1' then
     return new;
   end if;
+  if tg_op = 'INSERT' then
+    if new.stage in ('proving', 'live') then
+      new.reviewed_at := clock_timestamp();
+    end if;
+    return new;
+  end if;
   if new.stage in ('proving', 'live') or (new.stage = 'rejected' and old.stage is distinct from 'rejected') then
-    new.reviewed_at := now();
+    new.reviewed_at := clock_timestamp();
   end if;
   return new;
 end;
@@ -182,6 +199,30 @@ drop trigger if exists games_touch_review on public.games;
 create trigger games_touch_review
   before update of stage on public.games
   for each row execute function public.touch_game_review();
+
+drop trigger if exists games_touch_review_insert on public.games;
+create trigger games_touch_review_insert
+  before insert on public.games
+  for each row execute function public.touch_game_review();
+
+-- When the served bytes landed. record_game_asset stamps updated_at before the
+-- Storage copy; the CDN compares this column, which the portal sets only after
+-- the copy succeeds. Null fails closed.
+alter table public.game_assets
+  add column if not exists content_at timestamptz;
+
+-- Bytes for an uploaded row are already in Storage. Do this before stamping
+-- reviewed_at so clock_timestamp() is not earlier than content_at. A second
+-- apply must not move either timestamp.
+update public.game_assets
+   set content_at = updated_at
+ where status = 'uploaded'
+   and content_at is null;
+
+update public.games
+   set reviewed_at = clock_timestamp()
+ where stage in ('proving', 'live')
+   and reviewed_at is null;
 
 -- Queue for the table editor. security_invoker so a caller cannot bypass RLS on games.
 -- Studio connects as postgres and can read it. anon, authenticated, and public cannot.

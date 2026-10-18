@@ -5,7 +5,7 @@
  * module stops exporting them. A missing-file warning is AS-4, not this upload.
  */
 import crypto from 'node:crypto';
-import { manualReviewEnabled } from '../manual-review';
+import { readManualReview } from './manual-review.ts';
 import { createLimiter } from './abuse.ts';
 import type { AssetDb } from './asset-manifest.ts';
 import { canonicalAssetPath, extensionOf, type ExpectedType } from './asset-scan.ts';
@@ -593,6 +593,7 @@ async function revertAssetRow(
   path: string,
   wroteSha256: string,
   previous: RecordedAssetState | null,
+  previousContentAt: Date | null,
 ): Promise<void> {
   if (previous === null) {
     await sql`
@@ -610,6 +611,7 @@ async function revertAssetRow(
       reject_reason = ${previous.rejectReason},
       source = ${previous.source},
       expected_type = ${previous.expectedType},
+      content_at = ${previousContentAt},
       updated_at = now()
     where game_id = ${gameId} and version = ${version} and path = ${path}
       and status = 'uploaded' and content_sha256 = ${wroteSha256}
@@ -626,15 +628,16 @@ export type AssetSaveResult =
  * With manual review on, a public game goes back to pending before new asset bytes are
  * recorded. The CDN re-reads that stage on the asset row and hides the file until a
  * reviewer sets a public stage again (reviewed_at then moves to at least the asset's
- * updated_at). A rejected upload does not call this. A failed copy can leave the game
+ * content_at). A rejected upload does not call this. A failed copy can leave the game
  * pending, which keeps unreviewed bytes off the public URL.
+ * `enabled` defaults to the database setting. Callers pass the boolean they already read.
  */
 export async function holdApprovedGameForReview(
   sql: AssetDb,
   gameId: string,
-  enabled = manualReviewEnabled(),
+  enabled?: boolean,
 ): Promise<boolean> {
-  if (!enabled) return false;
+  if (!(enabled ?? await readManualReview(sql))) return false;
   const held = await sql<{ id: string }[]>`
     update public.games
     set stage = 'pending'
@@ -661,7 +664,8 @@ async function storeAsset(
 ): Promise<AssetSaveResult> {
   const objectPath = assetObjectPath(gameId, version, decision.path);
   if (!objectPath) return { ok: false, code: 'storage' };
-  await holdApprovedGameForReview(sql, gameId);
+  const reviewOn = await readManualReview(sql);
+  await holdApprovedGameForReview(sql, gameId, reviewOn);
   const recorded = await recordGameAsset(sql, {
     gameId,
     version,
@@ -676,10 +680,52 @@ async function storeAsset(
   if (recorded.kind === 'cap') return { ok: false, code: 'cap' };
   if (recorded.kind === 'too-big') return { ok: false, code: 'too-big', totalBytes: recorded.totalBytes };
   if (recorded.kind !== 'ok') return { ok: false, code: 'storage' };
+  // Hide the row before the copy. An approval that lands while the bytes are moving
+  // stamps reviewed_at against a null content_at, and the stamp below is later.
+  const cleared = await sql<{ content_at: Date | null }[]>`
+    with old as (
+      select content_at
+      from public.game_assets
+      where game_id = ${gameId} and version = ${version} and path = ${decision.path}
+        and status = 'uploaded' and content_sha256 = ${decision.sha256}
+    ),
+    cleared as (
+      update public.game_assets
+      set content_at = null
+      where game_id = ${gameId} and version = ${version} and path = ${decision.path}
+        and status = 'uploaded' and content_sha256 = ${decision.sha256}
+      returning 1
+    )
+    select old.content_at from old, cleared
+  `;
+  const previousContentAt = cleared[0]?.content_at ?? null;
+  if (cleared.length === 0) {
+    await revertAssetRow(sql, gameId, version, decision.path, decision.sha256, recorded.previous, previousContentAt);
+    return { ok: false, code: 'storage' };
+  }
   const put = await storage.upload(objectPath, bytes, decision.contentType);
   if (put.error) {
-    await revertAssetRow(sql, gameId, version, decision.path, decision.sha256, recorded.previous);
+    await revertAssetRow(sql, gameId, version, decision.path, decision.sha256, recorded.previous, previousContentAt);
     return { ok: false, code: 'storage' };
+  }
+  // clock_timestamp() is the wall clock of this statement, after the copy returned.
+  await sql`
+    update public.game_assets
+    set content_at = clock_timestamp()
+    where game_id = ${gameId} and version = ${version} and path = ${decision.path}
+      and status = 'uploaded' and content_sha256 = ${decision.sha256}
+  `;
+  if (!reviewOn) {
+    await sql`
+      update public.games g
+      set reviewed_at = a.content_at
+      from public.game_assets a
+      where a.game_id = g.id
+        and a.game_id = ${gameId} and a.version = ${version} and a.path = ${decision.path}
+        and a.content_sha256 = ${decision.sha256}
+        and g.stage in ('proving', 'live')
+        and (g.reviewed_at is null or g.reviewed_at < a.content_at)
+    `;
   }
   return { ok: true };
 }

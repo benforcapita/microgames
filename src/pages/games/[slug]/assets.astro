@@ -10,7 +10,7 @@ import {
   formatBytes,
   listGameAssets,
 } from '../../../lib/server/asset-upload';
-import { MANUAL_REVIEW } from '../../../lib/server/config';
+import { readManualReview } from '../../../lib/server/manual-review';
 import { sql } from '../../../lib/server/db';
 import { isPublicStage } from '../../../lib/server/game-rules';
 import { getGame } from '../../../lib/server/games';
@@ -34,7 +34,7 @@ const usage = await assetUsage(sql, game.id, version);
 const flash = assetFlashMessage(Astro.url.searchParams, rows.map((row) => row.path));
 const total = usage.codeBytes + usage.uploadedBytes;
 const action = `/api/games/${encodeURIComponent(slug)}/assets`;
-const reviewHold = MANUAL_REVIEW && isPublicStage(game.stage);
+const reviewHold = (await readManualReview()) && isPublicStage(game.stage);
 ---
 
 <Layout title={`${game.title} files`} noindex>

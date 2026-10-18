@@ -1,34 +1,34 @@
 const OFF = new Set(['0', 'false', 'off', 'no']);
 
 /**
- * `MG_MANUAL_REVIEW` defaults on. A passed validation stays `pending` until a person
- * sets the stage. Only `0`, `false`, `off`, or `no` turns that off.
+ * Parse a settings value. Missing or blank is on. Only `0`, `false`, `off`, or `no` is off.
+ * The live switch is the database row; this does not read the environment.
  */
-export function manualReviewEnabled(raw: string | undefined = process.env.MG_MANUAL_REVIEW): boolean {
+export function manualReviewEnabled(raw: string | undefined): boolean {
   if (raw == null || raw.trim() === '') return true;
   return !OFF.has(raw.trim().toLowerCase());
 }
 
 /** What a pass does, for pages and the submission status that are still waiting on validation. */
-export function passPublishLine(enabled = manualReviewEnabled()): string {
+export function passPublishLine(enabled = true): string {
   return enabled
     ? 'A pass waits for a reviewer before it is published.'
     : 'A pass is published to the Proving Grounds automatically.';
 }
 
-export function uploadOutcome(enabled = manualReviewEnabled()): string {
+export function uploadOutcome(enabled = true): string {
   return enabled
     ? 'The game stays private while validation runs. A pass waits for review, then opens in the Proving Grounds.'
     : 'The game stays private while validation runs, then publishes to the Proving Grounds on its own if it passes.';
 }
 
-export function homeCreatorSentence(enabled = manualReviewEnabled()): string {
+export function homeCreatorSentence(enabled = true): string {
   return enabled
     ? 'Upload one HTML file. After review it enters the Proving Grounds, and if it clears that it graduates to the main arcade.'
     : 'Upload one HTML file and it goes live right away. Pass the Proving Grounds and your game graduates to the main arcade.';
 }
 
-export function creatorsLiveStep(enabled = manualReviewEnabled()): { title: string; body: string } {
+export function creatorsLiveStep(enabled = true): { title: string; body: string } {
   return enabled
     ? {
         title: 'Upload → review → the Proving Grounds.',

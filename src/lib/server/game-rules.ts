@@ -171,7 +171,7 @@ export type ValidationStatus = 'queued' | 'running' | 'passed' | 'failed' | 'err
  * Only moves games out of `pending`; never demotes a published game or resurrects a rejected one
  * on a stale/duplicate result. queued/running/error leave the stage unchanged.
  * `manualReview` defaults on: a pass stays `pending` until a person sets the stage to `proving`.
- * Pass `false` to auto-publish a pass to `proving` (MG_MANUAL_REVIEW off).
+ * Pass `false` to auto-publish a pass to `proving` (private.settings mg_manual_review = '0').
  */
 export function stageAfterValidation(current: Stage, status: ValidationStatus, manualReview = true): Stage {
   if (current !== 'pending') return current;

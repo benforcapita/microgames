@@ -1,7 +1,8 @@
 ---
 import Layout from '../layouts/Layout.astro';
 import { creatorsLiveStep } from '../lib/manual-review';
-import { GRADUATION, MANUAL_REVIEW } from '../lib/server/config';
+import { GRADUATION } from '../lib/server/config';
+import { readManualReview } from '../lib/server/manual-review';
 
 const pct = (n: number) => `${Math.round(n * 100)}%`;
 const gates = [
@@ -13,7 +14,7 @@ const gates = [
   ['Median session', `≥ ${GRADUATION.minMedianSessionSec}s`],
   ['Community rating', `≥ ${GRADUATION.minAvgRating}★ once there are ${GRADUATION.minRatingsForRatingGate}+ votes`],
 ];
-const liveStep = creatorsLiveStep(MANUAL_REVIEW);
+const liveStep = creatorsLiveStep(await readManualReview());
 const snippet = `// at game over
 window.parent.postMessage({ type: 'GAME_OVER', score }, '*');
 

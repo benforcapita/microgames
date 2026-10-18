@@ -510,74 +510,67 @@ describe('asset store holds a public game when manual review is on', () => {
     prev_expected_type: null,
   };
 
-  function capturingSql() {
+  function capturingSql(enabled = true) {
     const queries: string[] = [];
     const sql = (async (strings: TemplateStringsArray) => {
-      queries.push(strings.join(' '));
-      if (strings.join(' ').includes('record_game_asset')) return [recorded];
-      if (strings.join(' ').includes('update public.games')) return [{ id: 'abcdEF12' }];
+      const q = strings.join(' ');
+      queries.push(q);
+      if (q.includes('record_game_asset')) return [recorded];
+      if (q.includes('as enabled')) return [{ enabled }];
+      if (q.includes('set stage')) return enabled ? [{ id: 'abcdEF12' }] : [];
+      if (q.includes('content_at')) return [{ content_at: null }];
       return [];
     }) as unknown as AssetDb;
     return { sql, queries };
   }
 
-  async function withFlag<T>(raw: string | undefined, run: () => Promise<T>): Promise<T> {
-    const prev = process.env.MG_MANUAL_REVIEW;
-    if (raw === undefined) delete process.env.MG_MANUAL_REVIEW;
-    else process.env.MG_MANUAL_REVIEW = raw;
-    try {
-      return await run();
-    } finally {
-      if (prev === undefined) delete process.env.MG_MANUAL_REVIEW;
-      else process.env.MG_MANUAL_REVIEW = prev;
-    }
-  }
-
   it('sets stage back to pending before the asset row is written', async () => {
-    await withFlag('1', async () => {
-      const { sql, queries } = capturingSql();
-      let uploaded = false;
-      const storage: AssetStorage = {
-        async upload() {
-          uploaded = true;
-          assert.ok(queries.some((q) => q.includes('update public.games') && q.includes('pending')));
-          return { error: null };
-        },
-        async remove() {
-          return { error: null };
-        },
-      };
-      const decision = assessAssetUpload(input({ rawPath: 'sprites/extra.js', adding: true, existing: null, bytes: script }));
-      assert.equal(decision.kind, 'store');
-      if (decision.kind !== 'store') return;
-      const saved = await saveFinalizedAsset(sql, storage, 'abcdEF12', 1, decision, script);
-      assert.deepEqual(saved, { ok: true });
-      assert.equal(uploaded, true);
-      const holdAt = queries.findIndex((q) => q.includes('update public.games'));
-      const rowAt = queries.findIndex((q) => q.includes('record_game_asset'));
-      assert.ok(holdAt >= 0 && holdAt < rowAt);
-    });
+    const { sql, queries } = capturingSql(true);
+    let uploaded = false;
+    const storage: AssetStorage = {
+      async upload() {
+        uploaded = true;
+        assert.ok(queries.some((q) => q.includes('set stage') && q.includes('pending')));
+        assert.ok(queries.some((q) => q.includes('content_at = null')));
+        assert.equal(queries.some((q) => q.includes('clock_timestamp')), false);
+        return { error: null };
+      },
+      async remove() {
+        return { error: null };
+      },
+    };
+    const decision = assessAssetUpload(input({ rawPath: 'sprites/extra.js', adding: true, existing: null, bytes: script }));
+    assert.equal(decision.kind, 'store');
+    if (decision.kind !== 'store') return;
+    const saved = await saveFinalizedAsset(sql, storage, 'abcdEF12', 1, decision, script);
+    assert.deepEqual(saved, { ok: true });
+    assert.equal(uploaded, true);
+    const holdAt = queries.findIndex((q) => q.includes('set stage'));
+    const rowAt = queries.findIndex((q) => q.includes('record_game_asset'));
+    const stampAt = queries.findIndex((q) => q.includes('clock_timestamp'));
+    assert.ok(holdAt >= 0 && holdAt < rowAt);
+    assert.ok(stampAt > rowAt);
   });
 
-  it('does not change stage when review is off', async () => {
-    await withFlag('0', async () => {
-      const { sql, queries } = capturingSql();
-      assert.equal(await holdApprovedGameForReview(sql, 'abcdEF12'), false);
-      assert.equal(queries.length, 0);
-      const storage: AssetStorage = {
-        async upload() {
-          return { error: null };
-        },
-        async remove() {
-          return { error: null };
-        },
-      };
-      const decision = assessAssetUpload(input({ rawPath: 'sprites/extra.js', adding: true, existing: null, bytes: script }));
-      assert.equal(decision.kind, 'store');
-      if (decision.kind !== 'store') return;
-      assert.equal((await saveFinalizedAsset(sql, storage, 'abcdEF12', 1, decision, script)).ok, true);
-      assert.equal(queries.some((q) => q.includes('update public.games')), false);
-    });
+  it('does not change stage when review is off, and moves reviewed_at up to the new bytes', async () => {
+    const { sql, queries } = capturingSql(false);
+    assert.equal(await holdApprovedGameForReview(sql, 'abcdEF12'), false);
+    assert.equal(queries.some((q) => q.includes('set stage')), false);
+    const storage: AssetStorage = {
+      async upload() {
+        return { error: null };
+      },
+      async remove() {
+        return { error: null };
+      },
+    };
+    const decision = assessAssetUpload(input({ rawPath: 'sprites/extra.js', adding: true, existing: null, bytes: script }));
+    assert.equal(decision.kind, 'store');
+    if (decision.kind !== 'store') return;
+    assert.equal((await saveFinalizedAsset(sql, storage, 'abcdEF12', 1, decision, script)).ok, true);
+    assert.equal(queries.some((q) => q.includes('set stage')), false);
+    assert.ok(queries.some((q) => q.includes('reviewed_at')));
+    assert.ok(queries.some((q) => q.includes('clock_timestamp')));
   });
 });
 

@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import type postgres from 'postgres';
 import { GRADUATION } from './config';
 import { sql } from './db';
 import { BAYES_PRIOR_VOTES, CREATED_GAME_LOOKUP, LISTABLE_STAGES, PUBLIC_STAGES, assessHealth, canViewGame, visibleStages, clampDurationMs, clampFirstFrameMs, ratingUserId, slugify, uniqueSlug, type HealthCheck, type Stage } from './game-rules';
@@ -323,9 +324,11 @@ export async function recordTelemetry(
   await evaluateGraduation(gameId);
 }
 
-export async function getHealth(gameId: string): Promise<{ checks: HealthCheck[]; eligible: boolean }> {
+type GameDb = postgres.Sql | postgres.TransactionSql;
+
+export async function getHealth(gameId: string, db: GameDb = sql): Promise<{ checks: HealthCheck[]; eligible: boolean }> {
   const G = GRADUATION;
-  const [s] = await sql<
+  const [s] = await db<
     {
       plays: number;
       ff_ok: number | null;
@@ -359,11 +362,11 @@ export async function getHealth(gameId: string): Promise<{ checks: HealthCheck[]
   }, G);
 }
 
-export async function evaluateGraduation(gameId: string): Promise<boolean> {
-  const [row] = await sql<{ stage: Stage }[]>`select stage from games where id = ${gameId}`;
-  if (!row || row.stage === 'live' || !(await getHealth(gameId)).eligible) return false;
+export async function evaluateGraduation(gameId: string, db: GameDb = sql): Promise<boolean> {
+  const [row] = await db<{ stage: Stage }[]>`select stage from games where id = ${gameId}`;
+  if (!row || row.stage === 'live' || !(await getHealth(gameId, db)).eligible) return false;
   // The stage write stamps reviewed_at (games_touch_review). That is intentional:
-  // graduation is a publish, and the CDN serves an asset only while updated_at <= reviewed_at.
-  await sql`update games set stage = 'live', graduated_at = now() where id = ${gameId} and stage = 'proving'`;
+  // graduation is a publish, and the CDN serves an asset only while content_at <= reviewed_at.
+  await db`update games set stage = 'live', graduated_at = now() where id = ${gameId} and stage = 'proving'`;
   return true;
 }
