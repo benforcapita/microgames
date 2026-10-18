@@ -567,7 +567,7 @@ describe('runAssetMaintenance', () => {
     const { sql } = c;
     const gameId = await makeGame(sql);
     const overCap = MAINTENANCE_MAX_STAGING_REMOVES + 1;
-    const names = Array.from({ length: overCap }, (_, i) => `${gameId}/_staging/${i}`);
+    const names = Array.from({ length: overCap }, (_, i) => `${gameId}/_staging/${i + 1}`);
     try {
       // Object rows without files are enough: listing is a storage.objects query, and the
       // refusal must fire before the first Storage API remove.

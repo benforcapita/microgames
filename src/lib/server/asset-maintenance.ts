@@ -14,14 +14,20 @@
  *   row, then died before the copy). The row is deleted — the same outcome as UP-3's
  *   copy-failure revert for a reservation that displaced nothing — but only through
  *   private.clean_orphan_game_asset, which re-checks the exact row (status, sha, size,
- *   updated marker, still past the cutoff) under the games-row lock a live finalize holds.
+ *   updated marker, still past the cutoff) AND the object's absence in storage.objects,
+ *   under the games-row lock a live finalize holds. A row whose object exists, or one
+ *   reserved inside the active window, is never touched.
  *
- * NOTE: this commit carries the API surface the safety fixes plug into; the guards
- * themselves land in the next commit.
+ * Safety posture (QA #79): "object missing" is decided in SQL against storage.objects over
+ * the same connection and project as the delete — never by a Storage API answer, which an
+ * under-privileged or wrong-project key can answer 'Object not found' for live objects.
+ * Before deleting anything the pass refuses when the candidate count exceeds a per-run cap
+ * and runs a storage canary proving the credential sees the same project the database does.
  *
  * scripts/asset-maintenance.mjs runs runAssetMaintenance; everything here takes injected
  * sql + storage so the db test drives the same code.
  */
+import { randomBytes } from 'node:crypto';
 import type { AssetDb } from './asset-manifest.ts';
 import { ASSET_STALE_AGE_MS } from './asset-upload.ts';
 
@@ -49,7 +55,9 @@ interface MaintenanceBucket {
 
 /**
  * The one real adapter over the Supabase Storage bucket — used by scripts/asset-maintenance.mjs
- * and the db tests so there is a single implementation.
+ * and the db tests so there is a single implementation. `sees` is deliberately a plain
+ * boolean (any error or absence reports "not seen"): only the canary consults it, where
+ * not-seen aborts the run before anything is deleted.
  */
 export function maintenanceStorage(bucket: MaintenanceBucket): MaintenanceStorage {
   return {
@@ -79,34 +87,80 @@ export class MaintenanceRefusal extends Error {
   }
 }
 
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
+
 /**
- * Local-only by default: both endpoints must name a loopback host or the run is refused
- * before any connection is attempted (--allow-remote overrides).
- * STUB: not yet implemented.
+ * The pass deletes real rows and objects, so by default it is local-only: both endpoints
+ * must name a loopback host or the run is refused before any connection is attempted.
+ * A deliberate hosted run passes --allow-remote (scripts/asset-maintenance.mjs).
  */
 export function maintenanceRemoteRefusal(targets: { supabaseUrl: string; databaseUrl: string }): string | null {
-  void targets;
+  for (const [name, raw] of [
+    ['PUBLIC_SUPABASE_URL', targets.supabaseUrl],
+    ['DATABASE_URL', targets.databaseUrl],
+  ] as const) {
+    let host: string;
+    try {
+      host = new URL(raw).hostname;
+    } catch {
+      return `${name} is not a URL`;
+    }
+    if (!LOOPBACK_HOSTS.has(host)) {
+      return `${name} host '${host || '(none)'}' is not loopback — refusing to run maintenance against a remote target without --allow-remote`;
+    }
+  }
   return null;
 }
 
 /**
- * fetch that aborts a Storage call after `timeoutMs`.
- * STUB: timeout not applied yet.
+ * fetch that aborts a Storage call after `timeoutMs` — a Storage endpoint that hangs must
+ * fail the run (as an error, with nothing deleted), never hang it. A caller signal still
+ * wins when it fires first.
  */
 export function maintenanceFetch(timeoutMs: number): typeof fetch {
-  void timeoutMs;
-  return (input, init) => fetch(input, init);
+  return (input, init) =>
+    fetch(input, {
+      ...init,
+      signal: init?.signal ? AbortSignal.any([init.signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs),
+    });
 }
+
+const CANARY_PREFIX = 'maintenance-canary/';
+const CANARY_BYTES = new Uint8Array([0x6d, 0x67]);
 
 /**
  * Positive control run before anything is deleted: the Storage credential must see the
- * same project the database connection does.
- * STUB: not yet implemented.
+ * same project the database connection does. When the database lists an object, the API
+ * must `info` it — a publishable or other-project key answers 'Object not found' and the
+ * run refuses (QA #79 B1: Storage RLS hid every object and three live rows were deleted).
+ * When the bucket is empty there is nothing to check against, so a scratch object is
+ * uploaded through the API and must appear in storage.objects — the same-project proof in
+ * the other direction (and proof the key can write).
  */
 export async function storageCanary(sql: AssetDb, storage: MaintenanceStorage): Promise<string | null> {
-  void sql;
-  void storage;
-  return null;
+  const [listed] = await sql<{ name: string }[]>`
+    select o.name from storage.objects o where o.bucket_id = 'games' order by o.name limit 1
+  `;
+  if (listed) {
+    try {
+      if (await storage.sees(listed.name)) return null;
+    } catch (error) {
+      return `storage canary failed checking '${listed.name}': ${error instanceof Error ? error.message : String(error)}`;
+    }
+    return `storage canary failed: the database lists object '${listed.name}' but the Storage API cannot see it (wrong key or wrong project)`;
+  }
+  const name = `${CANARY_PREFIX}${randomBytes(9).toString('base64url')}`;
+  const put = await storage
+    .upload(name, CANARY_BYTES, 'application/octet-stream')
+    .catch((error: unknown) => ({ error: { message: error instanceof Error ? error.message : String(error) } }));
+  if (put.error) return `storage canary failed: cannot upload a canary object: ${put.error.message}`;
+  try {
+    const [seen] = await sql`select 1 as x from storage.objects o where o.bucket_id = 'games' and o.name = ${name}`;
+    if (!seen) return 'storage canary failed: an object just uploaded through the API is not visible to the database (wrong project)';
+    return null;
+  } finally {
+    await storage.remove([name]).catch(() => {});
+  }
 }
 
 export interface MaintenanceOptions {
@@ -185,19 +239,29 @@ interface OrphanCandidate {
 }
 
 /**
- * 'uploaded' rows untouched past `olderThan`. The updated_at cutoff is the active-window
- * guard: a finalize's reservation is always fresher than the stale age (uploadId TTL plus
- * margin), so nothing in flight is ever a candidate. The marker is selected as epoch
- * seconds (numeric text) so it round-trips with microsecond precision.
+ * 'uploaded' rows untouched past `olderThan` whose served object is absent from
+ * storage.objects — the same judgement private.clean_orphan_game_asset re-applies under
+ * the games-row lock. Existence is decided in SQL over this same connection and project;
+ * a Storage credential that cannot see an object can never make a live row look orphaned.
+ * The updated_at cutoff is the active-window guard: a finalize's reservation is always
+ * fresher than the stale age (uploadId TTL plus margin), so nothing in flight is ever a
+ * candidate. The marker is selected as epoch seconds (numeric text) so it round-trips
+ * with microsecond precision.
  */
 async function orphanCandidates(sql: AssetDb, olderThan: Date): Promise<OrphanCandidate[]> {
   const rows = await sql<
     { game_id: string; version: number; path: string; size_bytes: number | null; content_sha256: string | null; updated_at: string }[]
   >`
-    select game_id, version, path, size_bytes, content_sha256, extract(epoch from updated_at)::text as updated_at
-    from public.game_assets
-    where status = 'uploaded' and updated_at < ${olderThan}
-    order by game_id, version, path
+    select a.game_id, a.version, a.path, a.size_bytes, a.content_sha256,
+           extract(epoch from a.updated_at)::text as updated_at
+    from public.game_assets a
+    where a.status = 'uploaded' and a.updated_at < ${olderThan}
+      and not exists (
+        select 1 from storage.objects o
+        where o.bucket_id = 'games'
+          and o.name = concat(a.game_id, '/', a.version, '/', a.path)
+      )
+    order by a.game_id, a.version, a.path
   `;
   return rows.map((r) => ({
     gameId: r.game_id,
@@ -234,8 +298,10 @@ async function deleteOrphanRows(
 }
 
 /**
- * Delete 'uploaded' rows past the cutoff through private.clean_orphan_game_asset —
- * a compare-and-set delete under the same games-row lock record_game_asset holds.
+ * Delete 'uploaded' rows whose served object is gone. Whether the object exists is decided
+ * inside private.clean_orphan_game_asset — the delete predicate itself checks
+ * storage.objects over this same connection, under the games-row lock, alongside the
+ * compare-and-set pins. A row that errors is left alone and reported.
  */
 export async function cleanOrphanedAssetRows(
   sql: AssetDb,
@@ -247,8 +313,10 @@ export async function cleanOrphanedAssetRows(
 }
 
 /**
- * One full pass: staging sweep, then orphan cleanup, both against the same cutoff.
- * STUB: options (dry run, caps) and the storage canary are not wired yet.
+ * One full pass over the signed-upload pipeline. Candidates for both halves are listed
+ * first; a real (non-dry) run then refuses — deleting nothing at all — when either list
+ * exceeds its per-run cap or when the storage canary fails. Only after those checks does
+ * the sweep remove staging objects and the orphan pass delete rows.
  */
 export async function runAssetMaintenance(
   sql: AssetDb,
@@ -257,15 +325,47 @@ export async function runAssetMaintenance(
 ): Promise<MaintenanceReport> {
   const now = options.now ?? Date.now();
   const olderThan = new Date(now - ASSET_STALE_AGE_MS);
-  const staging = await sweepStaleStagingObjects(sql, storage, olderThan);
-  const orphans = await cleanOrphanedAssetRows(sql, olderThan);
+  const dryRun = options.dryRun === true;
+  const stagingNames = await staleStagingObjectNames(sql, olderThan);
+  const orphans = await orphanCandidates(sql, olderThan);
+
+  if (!dryRun) {
+    const maxOrphans = options.maxOrphanDeletes ?? MAINTENANCE_MAX_ORPHAN_DELETES;
+    const maxStaging = options.maxStagingRemoves ?? MAINTENANCE_MAX_STAGING_REMOVES;
+    if (orphans.length > maxOrphans) {
+      throw new MaintenanceRefusal(
+        `refusing to run: ${orphans.length} orphan asset rows exceed the per-run cap of ${maxOrphans} (--max-orphans raises it)`,
+      );
+    }
+    if (stagingNames.length > maxStaging) {
+      throw new MaintenanceRefusal(
+        `refusing to run: ${stagingNames.length} stale staging objects exceed the per-run cap of ${maxStaging} (--max-staging raises it)`,
+      );
+    }
+    const canary = await storageCanary(sql, storage);
+    if (canary) throw new MaintenanceRefusal(canary);
+  }
+
+  const errors: string[] = [];
+  let stagingRemoved = 0;
+  let orphansKept = 0;
+  let orphansDeleted = 0;
+  if (!dryRun) {
+    const swept = await removeStagingObjects(storage, stagingNames);
+    stagingRemoved = swept.removed;
+    errors.push(...swept.errors);
+    const cleaned = await deleteOrphanRows(sql, orphans, olderThan);
+    orphansKept = cleaned.kept;
+    orphansDeleted = cleaned.deleted;
+    errors.push(...cleaned.errors);
+  }
   return {
-    dryRun: false,
-    stagingCandidates: staging.candidates,
-    stagingRemoved: staging.removed,
-    orphanCandidates: orphans.candidates,
-    orphansKept: orphans.kept,
-    orphansDeleted: orphans.deleted,
-    errors: [...staging.errors, ...orphans.errors],
+    dryRun,
+    stagingCandidates: stagingNames.length,
+    stagingRemoved,
+    orphanCandidates: orphans.length,
+    orphansKept,
+    orphansDeleted,
+    errors,
   };
 }
