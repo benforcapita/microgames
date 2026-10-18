@@ -9,7 +9,8 @@
 // so litter never gets much older than the cutoff.
 import { createClient } from '@supabase/supabase-js';
 import postgres from 'postgres';
-import { runAssetMaintenance } from '../src/lib/server/asset-maintenance.ts';
+import { maintenanceStorage, runAssetMaintenance } from '../src/lib/server/asset-maintenance.ts';
+import { GAMES_BUCKET } from '../src/lib/server/config.ts';
 
 const required = (name) => {
   const value = process.env[name];
@@ -22,15 +23,9 @@ const required = (name) => {
 
 const games = createClient(required('PUBLIC_SUPABASE_URL'), required('SUPABASE_SECRET_KEY'), {
   auth: { persistSession: false },
-}).storage.from('games');
+}).storage.from(GAMES_BUCKET);
 
-const storage = {
-  exists: async (path) => (await games.exists(path)).data === true,
-  remove: async (paths) => {
-    const res = await games.remove(paths);
-    return { error: res.error ? { message: res.error.message } : null };
-  },
-};
+const storage = maintenanceStorage(games);
 
 const sql = postgres(required('DATABASE_URL'), { max: 2 });
 try {

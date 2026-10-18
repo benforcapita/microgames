@@ -32,17 +32,36 @@ export interface MaintenanceStorage {
 
 /** The bucket methods the real adapter uses — structurally compatible with StorageFileApi. */
 interface MaintenanceBucket {
-  exists(path: string): Promise<{ data: boolean; error: unknown }>;
+  info(path: string): Promise<{ data: unknown; error: unknown }>;
   remove(paths: string[]): Promise<{ data: unknown; error: { message: string } | null }>;
 }
 
+/** A definite not-found only: the Storage API's `info` answers a missing object with
+ *  statusCode '404' AND message 'Object not found' — the same statusCode also covers
+ *  'Bucket not found' (a bad/unauthorized key), so both halves must match. Anything else
+ *  must not count as "missing". */
+const isStorageNotFound = (error: unknown): boolean =>
+  typeof error === 'object' &&
+  error !== null &&
+  'statusCode' in error &&
+  error.statusCode === '404' &&
+  'message' in error &&
+  error.message === 'Object not found';
+
 /**
  * The one real adapter over the Supabase Storage bucket — used by scripts/asset-maintenance.mjs
- * and the db tests so the fail-closed rule has a single implementation.
+ * and the db tests so the fail-closed rule has a single implementation. exists() fails closed:
+ * only a definite not-found reports "missing"; every other failure throws, so the caller keeps
+ * the row and reports the error rather than deleting live data.
  */
 export function maintenanceStorage(bucket: MaintenanceBucket): MaintenanceStorage {
   return {
-    exists: async (path) => (await bucket.exists(path)).data === true,
+    exists: async (path) => {
+      const res = await bucket.info(path);
+      if (res.data) return true;
+      if (isStorageNotFound(res.error)) return false;
+      throw res.error instanceof Error ? res.error : new Error(`storage info failed for ${path}: ${String(res.error)}`);
+    },
     remove: async (paths) => {
       const res = await bucket.remove(paths);
       return { error: res.error ? { message: res.error.message } : null };
