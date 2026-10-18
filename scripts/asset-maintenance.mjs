@@ -13,7 +13,21 @@
 // Run on a schedule — e.g. `npm run maintenance` from a cron — more often than
 // ASSET_STALE_AGE_MS so litter never gets much older than the cutoff.
 //
-// Flags: --dry-run (report candidates, delete nothing), --allow-remote,
+// --dry-run lists the candidates AND runs every check a real run would — both caps and
+// the storage canary — while writing nothing at all (no row deletes, no object removes,
+// not even the scratch canary object). It therefore proves the key and the project
+// before any real run: the report's `wouldAbort` field carries what a real run would
+// refuse on. One caveat: on an EMPTY games bucket the canary has nothing to check, so
+// a dry run there cannot prove key+project — it exits 3.
+//
+// Exit codes: 0 pass ran clean (dry or real)
+//             1 refused — over a cap or the canary failed (or a removal errored);
+//               a dry run that would abort exits here too, with wouldAbort set
+//             2 usage error — bad flags or missing env
+//             3 dry-run only — the canary could not be verified because the games
+//               bucket is empty; nothing was written
+//
+// Flags: --dry-run (checks + candidates, zero writes), --allow-remote,
 //        --max-orphans N (default 20), --max-staging N (default 200),
 //        --storage-timeout-ms N (default 15000).
 import { parseArgs } from 'node:util';
@@ -30,7 +44,9 @@ import {
 } from '../src/lib/server/asset-maintenance.ts';
 
 const USAGE = `asset-maintenance: sweep stale _staging objects and delete orphaned asset rows
-  --dry-run              report candidates, delete nothing (rows and objects untouched)
+  --dry-run              report candidates and run the caps + canary, writing nothing
+                         (exits 1 when a real run would abort, 3 when the canary cannot
+                         be verified on an empty bucket, 0 when all checks pass)
   --allow-remote         permit non-loopback PUBLIC_SUPABASE_URL / DATABASE_URL
   --max-orphans N        refuse when more than N orphan rows are candidates (default ${MAINTENANCE_MAX_ORPHAN_DELETES})
   --max-staging N        refuse when more than N stale staging objects are candidates (default ${MAINTENANCE_MAX_STAGING_REMOVES})
@@ -112,6 +128,8 @@ try {
   });
   console.log(`asset-maintenance${report.dryRun ? ' (dry run — nothing deleted)' : ''}: ${JSON.stringify(report)}`);
   if (report.errors.length) process.exitCode = 1;
+  if (report.canaryUnverified) process.exitCode = 3;
+  else if (report.wouldAbort) process.exitCode = 1;
 } catch (error) {
   console.error(`asset-maintenance: ${error instanceof Error ? error.message : String(error)}`);
   process.exitCode = 1;

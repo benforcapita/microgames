@@ -128,6 +128,13 @@ export function maintenanceFetch(timeoutMs: number): typeof fetch {
 const CANARY_PREFIX = 'maintenance-canary/';
 const CANARY_BYTES = new Uint8Array([0x6d, 0x67]);
 
+export interface StorageCanaryResult {
+  /** Non-null when the proof failed — or, on an empty bucket with writes off, could not run. */
+  refusal: string | null;
+  /** The bucket was empty and `mayWrite` was off, so the canary could not be verified at all. */
+  unverifiable: boolean;
+}
+
 /**
  * Positive control run before anything is deleted: the Storage credential must see the
  * same project the database connection does. When the database lists an object, the API
@@ -135,29 +142,51 @@ const CANARY_BYTES = new Uint8Array([0x6d, 0x67]);
  * run refuses (QA #79 B1: Storage RLS hid every object and three live rows were deleted).
  * When the bucket is empty there is nothing to check against, so a scratch object is
  * uploaded through the API and must appear in storage.objects — the same-project proof in
- * the other direction (and proof the key can write).
+ * the other direction (and proof the key can write). `mayWrite: false` (a dry run) skips
+ * that upload: the canary is then unverifiable, which the caller must report as a refusal.
  */
-export async function storageCanary(sql: AssetDb, storage: MaintenanceStorage): Promise<string | null> {
+export async function storageCanary(
+  sql: AssetDb,
+  storage: MaintenanceStorage,
+  opts: { mayWrite?: boolean } = {},
+): Promise<StorageCanaryResult> {
   const [listed] = await sql<{ name: string }[]>`
     select o.name from storage.objects o where o.bucket_id = 'games' order by o.name limit 1
   `;
   if (listed) {
     try {
-      if (await storage.sees(listed.name)) return null;
+      if (await storage.sees(listed.name)) return { refusal: null, unverifiable: false };
     } catch (error) {
-      return `storage canary failed checking '${listed.name}': ${error instanceof Error ? error.message : String(error)}`;
+      return {
+        refusal: `storage canary failed checking '${listed.name}': ${error instanceof Error ? error.message : String(error)}`,
+        unverifiable: false,
+      };
     }
-    return `storage canary failed: the database lists object '${listed.name}' but the Storage API cannot see it (wrong key or wrong project)`;
+    return {
+      refusal: `storage canary failed: the database lists object '${listed.name}' but the Storage API cannot see it (wrong key or wrong project)`,
+      unverifiable: false,
+    };
+  }
+  if (opts.mayWrite === false) {
+    return {
+      refusal:
+        'storage canary could not be verified: the games bucket is empty and a dry run may not upload the scratch canary object',
+      unverifiable: true,
+    };
   }
   const name = `${CANARY_PREFIX}${randomBytes(9).toString('base64url')}`;
   const put = await storage
     .upload(name, CANARY_BYTES, 'application/octet-stream')
     .catch((error: unknown) => ({ error: { message: error instanceof Error ? error.message : String(error) } }));
-  if (put.error) return `storage canary failed: cannot upload a canary object: ${put.error.message}`;
+  if (put.error) return { refusal: `storage canary failed: cannot upload a canary object: ${put.error.message}`, unverifiable: false };
   try {
     const [seen] = await sql`select 1 as x from storage.objects o where o.bucket_id = 'games' and o.name = ${name}`;
-    if (!seen) return 'storage canary failed: an object just uploaded through the API is not visible to the database (wrong project)';
-    return null;
+    if (!seen)
+      return {
+        refusal: 'storage canary failed: an object just uploaded through the API is not visible to the database (wrong project)',
+        unverifiable: false,
+      };
+    return { refusal: null, unverifiable: false };
   } finally {
     await storage.remove([name]).catch(() => {});
   }
@@ -166,7 +195,8 @@ export async function storageCanary(sql: AssetDb, storage: MaintenanceStorage): 
 export interface MaintenanceOptions {
   /** Clock injection for tests. Defaults to Date.now(). */
   now?: number;
-  /** Report candidates without deleting anything (no row deletes, no object removes). */
+  /** Report candidates and run the caps + canary without a single write (no row deletes,
+   *  no object removes, no scratch canary upload). */
   dryRun?: boolean;
   maxOrphanDeletes?: number;
   maxStagingRemoves?: number;
@@ -179,6 +209,10 @@ export interface MaintenanceReport {
   orphanCandidates: number;
   orphansKept: number;
   orphansDeleted: number;
+  /** Why this pass would refuse a real run (over a cap, or the canary); null means the checks passed. */
+  wouldAbort: string | null;
+  /** Dry-run only: the bucket held no object for the canary to check and writes were off. */
+  canaryUnverified: boolean;
   errors: string[];
 }
 
@@ -314,9 +348,13 @@ export async function cleanOrphanedAssetRows(
 
 /**
  * One full pass over the signed-upload pipeline. Candidates for both halves are listed
- * first; a real (non-dry) run then refuses — deleting nothing at all — when either list
- * exceeds its per-run cap or when the storage canary fails. Only after those checks does
- * the sweep remove staging objects and the orphan pass delete rows.
+ * first, then the same checks run in both modes: a run whose candidate list exceeds a
+ * per-run cap refuses, and the storage canary must prove the credential sees the project
+ * the database does. A real run throws MaintenanceRefusal on the first failure — deleting
+ * nothing at all — while a dry run reports it in `wouldAbort`; the dry run runs every
+ * check (its canary is read-only: no scratch upload) so a hosted `--dry-run` proves the
+ * key, the project and the scale before any real run. Only after the checks does a real
+ * run remove staging objects and delete orphan rows.
  */
 export async function runAssetMaintenance(
   sql: AssetDb,
@@ -329,21 +367,21 @@ export async function runAssetMaintenance(
   const stagingNames = await staleStagingObjectNames(sql, olderThan);
   const orphans = await orphanCandidates(sql, olderThan);
 
-  if (!dryRun) {
-    const maxOrphans = options.maxOrphanDeletes ?? MAINTENANCE_MAX_ORPHAN_DELETES;
-    const maxStaging = options.maxStagingRemoves ?? MAINTENANCE_MAX_STAGING_REMOVES;
-    if (orphans.length > maxOrphans) {
-      throw new MaintenanceRefusal(
-        `refusing to run: ${orphans.length} orphan asset rows exceed the per-run cap of ${maxOrphans} (--max-orphans raises it)`,
-      );
-    }
-    if (stagingNames.length > maxStaging) {
-      throw new MaintenanceRefusal(
-        `refusing to run: ${stagingNames.length} stale staging objects exceed the per-run cap of ${maxStaging} (--max-staging raises it)`,
-      );
-    }
-    const canary = await storageCanary(sql, storage);
-    if (canary) throw new MaintenanceRefusal(canary);
+  const maxOrphans = options.maxOrphanDeletes ?? MAINTENANCE_MAX_ORPHAN_DELETES;
+  const maxStaging = options.maxStagingRemoves ?? MAINTENANCE_MAX_STAGING_REMOVES;
+  let wouldAbort: string | null = null;
+  if (orphans.length > maxOrphans) {
+    wouldAbort = `refusing to run: ${orphans.length} orphan asset rows exceed the per-run cap of ${maxOrphans} (--max-orphans raises it)`;
+  } else if (stagingNames.length > maxStaging) {
+    wouldAbort = `refusing to run: ${stagingNames.length} stale staging objects exceed the per-run cap of ${maxStaging} (--max-staging raises it)`;
+  }
+  // A real run stops here, before the canary may write anything; a dry run continues and
+  // reports the first refusal — the same order a real run would hit them.
+  if (wouldAbort && !dryRun) throw new MaintenanceRefusal(wouldAbort);
+  const canary = await storageCanary(sql, storage, { mayWrite: !dryRun });
+  if (canary.refusal) {
+    if (!dryRun) throw new MaintenanceRefusal(canary.refusal);
+    wouldAbort ??= canary.refusal;
   }
 
   const errors: string[] = [];
@@ -366,6 +404,8 @@ export async function runAssetMaintenance(
     orphanCandidates: orphans.length,
     orphansKept,
     orphansDeleted,
+    wouldAbort,
+    canaryUnverified: canary.unverifiable,
     errors,
   };
 }
