@@ -1,7 +1,14 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { GAME_VERSION_MAX_BYTES, MAX_ASSET_FILES, assetWriteAddsCountedRow, type AssetUsage } from './asset-upload.ts';
-import { assessAssetSign, mintAssetUploadId, parseAssetFinalizeBody, parseAssetSignBody, stagedObjectPath } from './asset-sign.ts';
+import {
+  ASSET_STALE_AGE_MS,
+  ASSET_UPLOAD_ID_TTL_MS,
+  GAME_VERSION_MAX_BYTES,
+  MAX_ASSET_FILES,
+  assetWriteAddsCountedRow,
+  type AssetUsage,
+} from './asset-upload.ts';
+import { assessAssetSign, mintAssetUploadId, parseAssetFinalizeBody, parseAssetSignBody, verifyAssetUploadId } from './asset-sign.ts';
 
 const OWNER = 'owner-1';
 const usage = (over: Partial<AssetUsage> = {}): AssetUsage => ({ codeBytes: 1000, uploadedBytes: 2000, fileCount: 3, ...over });
@@ -45,34 +52,81 @@ describe('UP-2a parseAssetSignBody', () => {
 
 describe('UP-2a uploadId binding and staging path', () => {
   const SECRET = 'test-service-key';
+  // A fixed clock on a whole-second boundary: the wire expiry is epoch seconds, so the
+  // expiry assertions below must not depend on the wall clock.
+  const NOW = 1_800_000_000_000;
+
   it('mints an uploadId that resolves to the staged object for the same game/version/path', () => {
-    const { uploadId, nonce } = mintAssetUploadId(SECRET, 'gameId01', 3, 'sfx/jump.wav');
-    assert.match(uploadId, /^[A-Za-z0-9_-]{16}\.[A-Za-z0-9_-]{43}$/);
-    assert.equal(stagedObjectPath(SECRET, 'gameId01', 3, 'sfx/jump.wav', uploadId), `gameId01/_staging/${nonce}`);
+    const { uploadId, nonce, expiresAt } = mintAssetUploadId(SECRET, 'gameId01', 3, 'sfx/jump.wav', NOW);
+    assert.match(uploadId, /^[A-Za-z0-9_-]{16}\.\d{6,13}\.[A-Za-z0-9_-]{43}$/);
+    assert.equal(expiresAt, NOW + ASSET_UPLOAD_ID_TTL_MS);
+    assert.deepEqual(verifyAssetUploadId(SECRET, 'gameId01', 3, 'sfx/jump.wav', uploadId, NOW + 1), {
+      kind: 'ok',
+      stagedPath: `gameId01/_staging/${nonce}`,
+    });
   });
+
+  it('signs the expiry: a tampered or two-segment id is invalid, an authentic one reports expired past its TTL', () => {
+    const { uploadId, nonce } = mintAssetUploadId(SECRET, 'gameId01', 1, 'sfx/jump.wav', NOW);
+    const [n, exp, sig] = uploadId.split('.');
+    // Extending the expiry breaks the HMAC — the window cannot be widened client-side.
+    assert.equal(
+      verifyAssetUploadId(SECRET, 'gameId01', 1, 'sfx/jump.wav', `${n}.${Number(exp) + 100000}.${sig}`, NOW).kind,
+      'invalid',
+    );
+    // A pre-UP-4 two-segment id no longer verifies at all.
+    assert.equal(verifyAssetUploadId(SECRET, 'gameId01', 1, 'sfx/jump.wav', `${nonce}.${sig}`, NOW).kind, 'invalid');
+    // Inside the TTL it verifies; past it the same authentic id reports 'expired', not
+    // 'invalid' — finalize answers that with the distinct upload_expired code.
+    assert.equal(
+      verifyAssetUploadId(SECRET, 'gameId01', 1, 'sfx/jump.wav', uploadId, NOW + ASSET_UPLOAD_ID_TTL_MS - 1).kind,
+      'ok',
+    );
+    const late = verifyAssetUploadId(SECRET, 'gameId01', 1, 'sfx/jump.wav', uploadId, NOW + ASSET_UPLOAD_ID_TTL_MS + 1);
+    assert.equal(late.kind, 'expired');
+    // The expired verdict still carries the staged path so the caller can clean it up.
+    if (late.kind === 'expired') assert.match(late.stagedPath, /^gameId01\/_staging\//);
+  });
+
   it('rejects a tampered, foreign, malformed or wrong-secret uploadId', () => {
-    const { uploadId } = mintAssetUploadId(SECRET, 'gameId01', 1, 'sfx/jump.wav');
-    const [nonce, sig] = uploadId.split('.');
+    const { uploadId } = mintAssetUploadId(SECRET, 'gameId01', 1, 'sfx/jump.wav', NOW);
+    const [nonce, exp, sig] = uploadId.split('.');
     for (const bad of [
-      `${nonce}.${sig.slice(0, -1)}${sig.endsWith('A') ? 'B' : 'A'}`, // tampered signature
-      `${nonce.slice(0, -1)}${nonce.endsWith('A') ? 'B' : 'A'}.${sig}`, // tampered nonce
-      'no-dot', `${nonce}`, `..${sig}`, `${nonce}.`, `.${sig}`,
+      `${nonce}.${exp}.${sig.slice(0, -1)}${sig.endsWith('A') ? 'B' : 'A'}`, // tampered signature
+      `${nonce.slice(0, -1)}${nonce.endsWith('A') ? 'B' : 'A'}.${exp}.${sig}`, // tampered nonce
+      'no-dot', `${nonce}`, `..${exp}.${sig}`, `${nonce}.${exp}.`, `${nonce}..${sig}`, `${nonce}.${exp}`,
+      `${nonce}.notanumber.${sig}`, `${nonce}.${exp}.${sig}.extra`,
     ]) {
-      assert.equal(stagedObjectPath(SECRET, 'gameId01', 1, 'sfx/jump.wav', bad), null, bad);
+      assert.equal(verifyAssetUploadId(SECRET, 'gameId01', 1, 'sfx/jump.wav', bad, NOW).kind, 'invalid', bad);
     }
     // Bound to (game, version, path): none of these may resolve.
-    assert.equal(stagedObjectPath(SECRET, 'gameId01', 1, 'sfx/other.wav', uploadId), null);
-    assert.equal(stagedObjectPath(SECRET, 'gameId01', 2, 'sfx/jump.wav', uploadId), null);
-    assert.equal(stagedObjectPath(SECRET, 'othergm1', 1, 'sfx/jump.wav', uploadId), null);
-    assert.equal(stagedObjectPath('wrong-secret', 'gameId01', 1, 'sfx/jump.wav', uploadId), null);
+    assert.equal(verifyAssetUploadId(SECRET, 'gameId01', 1, 'sfx/other.wav', uploadId, NOW).kind, 'invalid');
+    assert.equal(verifyAssetUploadId(SECRET, 'gameId01', 2, 'sfx/jump.wav', uploadId, NOW).kind, 'invalid');
+    assert.equal(verifyAssetUploadId(SECRET, 'othergm1', 1, 'sfx/jump.wav', uploadId, NOW).kind, 'invalid');
+    assert.equal(verifyAssetUploadId('wrong-secret', 'gameId01', 1, 'sfx/jump.wav', uploadId, NOW).kind, 'invalid');
     // Unsafe to join: ids and nonces outside the charset never reach Storage.
-    assert.equal(stagedObjectPath(SECRET, '../evil', 1, 'sfx/jump.wav', uploadId), null);
-    assert.equal(stagedObjectPath(SECRET, 'gameId01', 0, 'sfx/jump.wav', uploadId), null);
+    assert.equal(verifyAssetUploadId(SECRET, '../evil', 1, 'sfx/jump.wav', uploadId, NOW).kind, 'invalid');
+    assert.equal(verifyAssetUploadId(SECRET, 'gameId01', 0, 'sfx/jump.wav', uploadId, NOW).kind, 'invalid');
   });
+
   it('the staging prefix is outside anything the CDN maps (version must be numeric)', () => {
-    const path = stagedObjectPath(SECRET, 'gameId01', 1, 'x.png', mintAssetUploadId(SECRET, 'gameId01', 1, 'x.png').uploadId);
-    assert.ok(path !== null && path.startsWith('gameId01/_staging/'), 'staged key under the game prefix');
-    assert.doesNotMatch(path.split('/')[1], /^\d{1,9}$/);
+    const minted = mintAssetUploadId(SECRET, 'gameId01', 1, 'x.png', NOW);
+    const verified = verifyAssetUploadId(SECRET, 'gameId01', 1, 'x.png', minted.uploadId, NOW);
+    assert.ok(verified.kind === 'ok', 'a fresh uploadId verifies');
+    if (verified.kind === 'ok') {
+      assert.ok(verified.stagedPath.startsWith('gameId01/_staging/'), 'staged key under the game prefix');
+      assert.doesNotMatch(verified.stagedPath.split('/')[1], /^\d{1,9}$/);
+    }
+  });
+});
+
+describe('UP-4 uploadId and sweep TTLs', () => {
+  it('the sweep age is the uploadId TTL plus a wide margin', () => {
+    // An uploadId stays finalizable for ASSET_UPLOAD_ID_TTL_MS; its staged object (and an
+    // unfinished reservation) may only be swept after ASSET_STALE_AGE_MS. The margin absorbs
+    // clock skew and a slow finalize so a still-valid upload is never swept.
+    assert.ok(ASSET_UPLOAD_ID_TTL_MS > 0);
+    assert.ok(ASSET_STALE_AGE_MS >= ASSET_UPLOAD_ID_TTL_MS + 30 * 60_000);
   });
 });
 

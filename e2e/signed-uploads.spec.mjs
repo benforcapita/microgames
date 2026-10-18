@@ -9,6 +9,7 @@ import postgres from 'postgres';
 import { createClient } from '@supabase/supabase-js';
 import { localSupabaseEnv } from '../scripts/lib/local-supabase.mjs';
 import { GAME_VERSION_MAX_BYTES } from '../src/lib/asset-limits.ts';
+import { mintAssetUploadId } from '../src/lib/server/asset-sign.ts';
 
 const WEB = `http://127.0.0.1:${process.env.E2E_WEB_PORT ?? 4721}`;
 const CDN = `http://127.0.0.1:${process.env.E2E_CDN_PORT ?? 4722}`;
@@ -462,5 +463,33 @@ test('UP-2a finalize re-checks the whole-version 4 MB cap', async () => {
   }
   const [count] = await sql`select count(*)::int as n from public.game_assets where game_id = ${game.id} and version = 1 and status = 'uploaded'`;
   expect(count.n, 'only the two admitted files count toward the version').toBe(2);
+  await c.dispose();
+});
+
+test('UP-4 finalize rejects an expired uploadId with 410 upload_expired', async () => {
+  const c = await ctx();
+  await signup(c, 'expr');
+  const game = await uploadGame(c, `UP4 expired ${uniq()}`);
+
+  // Sign tells the client how long the uploadId stays finalizable.
+  const s = await sign(c, game.slug, { path: 'sfx/old.wav', size: SMALL_WAV.length, contentType: 'audio/wav' });
+  expect(s.status()).toBe(200);
+  const data = await s.json();
+  expect(Date.parse(data.expiresAt), 'sign returns an expiresAt timestamp').toBeGreaterThan(Date.now());
+
+  // An authentic uploadId whose signed expiry has already passed: minted here by the
+  // server's own recipe (same secret, same HMAC inputs) with the clock turned back past
+  // the TTL. The staged bytes exist — only the deadline is gone.
+  const stale = mintAssetUploadId(sb.SUPABASE_SECRET_KEY, game.id, 1, 'sfx/old.wav', Date.now() - 60 * 60_000);
+  const uploadPath = `${game.id}/_staging/${stale.nonce}`;
+  expect((await gamesBucket().upload(uploadPath, SMALL_WAV, { contentType: 'audio/wav' })).error).toBeNull();
+
+  const f = await finalize(c, game.slug, { path: 'sfx/old.wav', uploadId: stale.uploadId });
+  expect(f.status()).toBe(410);
+  const body = await f.json();
+  expect(body.error).toBe('upload_expired');
+  expect(await objectExists(uploadPath), 'the expired staged object is cleaned up').toBe(false);
+  const [row] = await sql`select status from public.game_assets where game_id = ${game.id} and path = 'sfx/old.wav'`;
+  expect(row, 'an expired upload never becomes an asset row').toBeUndefined();
   await c.dispose();
 });
