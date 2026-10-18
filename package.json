@@ -26,6 +26,7 @@
     "backfill:input": "node --experimental-strip-types --disable-warning=ExperimentalWarning --import ./scripts/register-ts.mjs scripts/backfill-input-support.mjs",
     "launch:video": "node launch/render.mjs",
     "check:copy": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/check-site-copy.mjs",
+    "maintenance": "node --experimental-strip-types --disable-warning=ExperimentalWarning --import ./scripts/register-ts.mjs scripts/asset-maintenance.mjs",
     "copy:site-content": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/list-site-content-money.mjs"
   },
   "dependencies": {

@@ -1,7 +1,7 @@
 import type { APIRoute } from 'astro';
 import { gameBundleVersion } from '../../../../../lib/server/asset-manifest';
 import { canonicalAssetPath } from '../../../../../lib/server/asset-scan';
-import { parseAssetFinalizeBody, stagedObjectPath } from '../../../../../lib/server/asset-sign';
+import { parseAssetFinalizeBody, verifyAssetUploadId } from '../../../../../lib/server/asset-sign';
 import {
   ASSET_UPLOAD_MESSAGES,
   assetPathRejection,
@@ -47,9 +47,32 @@ export const POST: APIRoute = async ({ request, params, locals }) => {
   const version = await gameBundleVersion(sql, game.id);
   const canonical = canonicalAssetPath(body.path);
   const assetPath = canonical.kind === 'path' ? canonical.path : null;
-  const stagedPath = assetPath ? stagedObjectPath(SUPABASE_SERVICE_KEY, game.id, version, assetPath, body.uploadId) : null;
-  if (!assetPath || !stagedPath) {
+  const verified = assetPath ? verifyAssetUploadId(SUPABASE_SERVICE_KEY, game.id, version, assetPath, body.uploadId) : null;
+  if (!assetPath || !verified || verified.kind === 'invalid') {
     return deny({ status: 404, error: 'not-uploaded', message: ASSET_UPLOAD_MESSAGES['not-uploaded'], flash: { error: 'not-uploaded' } });
+  }
+  const stagedPath = verified.stagedPath;
+
+  const storage = {
+    upload: async (path: string, body: Uint8Array, contentType: string) => {
+      const put = await bucket().upload(path, body, { contentType, upsert: true });
+      return { error: put.error ? { message: put.error.message } : null };
+    },
+    remove: async (path: string) => {
+      const removed = await bucket().remove([path]);
+      return { error: removed.error ? { message: removed.error.message } : null };
+    },
+  };
+
+  if (verified.kind === 'expired') {
+    // The uploadId's signed deadline passed: never scan, copy or row-write the bytes, but
+    // still delete the staged object rather than leaving it for the sweep.
+    const removed = await storage.remove(stagedPath).catch((error: unknown) => ({ error: { message: String(error) } }));
+    if (removed.error) console.error(`Expired-upload cleanup failed for game ${game.id} ${stagedPath}`, removed.error);
+    // No `flash` here on purpose: a flash reload would blank the creator's half-filled
+    // form — nothing changed server-side that needs a re-render, so the client shows
+    // this error inline and the path field keeps its value for the retry (QA #79).
+    return deny({ status: 410, error: 'upload_expired', message: ASSET_UPLOAD_MESSAGES.upload_expired });
   }
 
   const stored = await bucket().download(stagedPath);
@@ -63,17 +86,6 @@ export const POST: APIRoute = async ({ request, params, locals }) => {
     });
   }
   const bytes = new Uint8Array(await stored.data.arrayBuffer());
-
-  const storage = {
-    upload: async (path: string, body: Uint8Array, contentType: string) => {
-      const put = await bucket().upload(path, body, { contentType, upsert: true });
-      return { error: put.error ? { message: put.error.message } : null };
-    },
-    remove: async (path: string) => {
-      const removed = await bucket().remove([path]);
-      return { error: removed.error ? { message: removed.error.message } : null };
-    },
-  };
 
   try {
     const [existing, usage] = await Promise.all([
