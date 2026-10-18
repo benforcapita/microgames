@@ -55,6 +55,7 @@ export function statusFromReport(report: StaticReport): ValidationStatus {
 /** Game ids are base64url (createGame uses randomBytes(6).toString('base64url')), so - and _ are valid. */
 export const GAME_ID_RE = /^[A-Za-z0-9_-]{1,32}$/;
 
+/** In-memory tests only. The REST store does not send this; SQL reads private.settings. */
 function runtimeManualReview(): boolean {
   let raw: string | undefined;
   const deno = (globalThis as { Deno?: { env?: { get(name: string): string | undefined } } }).Deno;

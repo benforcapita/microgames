@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { createHandler, isTraversal, IMMUTABLE } from './handler.mjs';
+import { createHandler, isTraversal, SHORT_CACHE } from './handler.mjs';
 import { mintPreviewToken } from './preview-token.mjs';
 
 const SECRET = 'test-preview-secret';
@@ -40,7 +40,13 @@ function harness() {
       if (id === 'live0001' && version === '1' && assetPath === 'sprites/hidden.png') status = 'rejected';
       else if (id === 'live0001' && version === '1' && assetPath === 'sprites/orphan.png') status = null; // stored object, never finalized: no row
       else if (STAGES[id] && FILES[`${version}/${assetPath}`] !== undefined) status = 'uploaded';
-      return new Response(JSON.stringify(status ? [{ status }] : []), { status: 200 });
+      if (!status || !STAGES[id]) return new Response(JSON.stringify([]), { status: 200 });
+      const pub = STAGES[id] === 'live' || STAGES[id] === 'proving';
+      return new Response(JSON.stringify([{
+        status,
+        updated_at: '2026-10-18T00:00:00.000Z',
+        games: { stage: STAGES[id], reviewed_at: pub ? '2026-10-18T01:00:00.000Z' : null },
+      }]), { status: 200 });
     }
     const m = /\/storage\/v1\/object\/authenticated\/games\/([^/]+)\/(.+)$/.exec(u.pathname);
     if (m && STAGES[m[1]] && FILES[m[2]] !== undefined) return new Response(FILES[m[2]]);
@@ -116,13 +122,13 @@ describe('AS-3 versioned asset serving', () => {
     assert.equal(r.headers['cache-control'], 'private, no-store');
     assert.equal(r.headers['x-content-type-options'], 'nosniff');
   });
-  it('sends nosniff and a long immutable cache on versioned assets', async () => {
+  it('sends nosniff and a short revalidating cache on versioned assets', async () => {
     const { get } = harness();
     for (const p of ['sprites/hero.png', 'audio/jump.ogg', 'fonts/pixel.woff2', 'data/level.json', 'readme.txt']) {
       const r = await get(`/g/live0001/1/${p}`);
       assert.equal(r.headers['x-content-type-options'], 'nosniff', p);
-      assert.equal(r.headers['cache-control'], IMMUTABLE, p);
-      assert.equal(r.headers['cache-control'], 'public, max-age=31536000, immutable');
+      assert.equal(r.headers['cache-control'], SHORT_CACHE, p);
+      assert.doesNotMatch(r.headers['cache-control'], /immutable|31536000/);
     }
     assert.equal((await get('/g/live0001/1/missing.png')).headers['x-content-type-options'], 'nosniff');
   });

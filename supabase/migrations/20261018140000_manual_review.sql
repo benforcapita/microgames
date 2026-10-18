@@ -6,7 +6,29 @@ alter table public.games
   add column if not exists review_note text,
   add column if not exists reviewed_at timestamptz;
 
--- Latest body is 20261015160000, plus an optional p_manual_review flag (default on).
+-- The portal writes this from MG_MANUAL_REVIEW ('1' or '0'). Re-applying the file must
+-- not reset an operator's choice. Missing, or anything other than '0', means review is on.
+insert into private.settings (key, value) values ('mg_manual_review', '1')
+on conflict (key) do nothing;
+
+create or replace function public.manual_review_enabled()
+returns boolean
+language sql
+stable
+security definer
+set search_path = ''
+as $$
+  select coalesce(
+    (select s.value from private.settings s where s.key = 'mg_manual_review'),
+    '1'
+  ) is distinct from '0';
+$$;
+
+revoke all on function public.manual_review_enabled() from public, anon, authenticated;
+grant execute on function public.manual_review_enabled() to service_role;
+
+-- Latest body is 20261015160000, plus an optional p_manual_review flag.
+-- Null uses manual_review_enabled() (the settings row). An explicit boolean is for tests.
 -- Passed + hold stays pending. Passed + flag off moves to proving. Failed still rejects.
 -- A game that is already proving or live is not demoted.
 drop function if exists public.record_game_validation(text, text, text, jsonb);
@@ -26,7 +48,7 @@ as $$
 declare
   cur text;
   nxt text;
-  hold boolean := coalesce(p_manual_review, true);
+  hold boolean := coalesce(p_manual_review, public.manual_review_enabled());
   v public.game_validations%rowtype;
 begin
   select g.stage into cur from public.games g where g.id = p_game_id for update;
@@ -107,7 +129,7 @@ declare
   cur text;
   st text;
   nxt text;
-  hold boolean := coalesce(p_manual_review, true);
+  hold boolean := coalesce(p_manual_review, public.manual_review_enabled());
 begin
   select g.stage into cur from public.games g where g.id = p_game_id for update;
   if not found then return; end if;
@@ -133,6 +155,10 @@ grant execute on function public.apply_stored_validation(text, text, boolean) to
 -- (proving or live), including setting the same stage again, stamp reviewed_at.
 -- So does a human rejection. record_game_validation sets meshground.skip_review_stamp
 -- so an automatic pass or fail does not.
+-- Graduation sets stage to live on purpose, and this stamp moves with it: assets
+-- already public (updated_at <= reviewed_at) stay servable. An upload demotes a
+-- proving game to pending first, so graduation cannot publish a file that has not
+-- been reviewed.
 create or replace function public.touch_game_review()
 returns trigger
 language plpgsql

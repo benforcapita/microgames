@@ -26,7 +26,13 @@ export function fixtureHandler(opts: { webOrigins?: string; cdnOrigin?: string }
       const version = (u.searchParams.get('version') ?? '').replace(/^eq\./, '');
       const assetPath = decodeURIComponent((u.searchParams.get('path') ?? '').replace(/^eq\./, ''));
       const file = DIRS[id] ? new URL(`./${DIRS[id]}/${version}/${assetPath}`, import.meta.url) : null;
-      return new Response(JSON.stringify(file && fs.existsSync(file) ? [{ status: 'uploaded' }] : []), { status: 200 });
+      if (!file || !fs.existsSync(file) || !STAGES[id]) return new Response(JSON.stringify([]), { status: 200 });
+      const pub = STAGES[id] === 'live' || STAGES[id] === 'proving';
+      return new Response(JSON.stringify([{
+        status: 'uploaded',
+        updated_at: '2026-10-18T00:00:00.000Z',
+        games: { stage: STAGES[id], reviewed_at: pub ? '2026-10-18T01:00:00.000Z' : null },
+      }]), { status: 200 });
     }
     const m = /\/storage\/v1\/object\/authenticated\/games\/([^/]+)\/(.+)$/.exec(u.pathname);
     const file = m && DIRS[m[1]] ? new URL(`./${DIRS[m[1]]}/${m[2]}`, import.meta.url) : null;

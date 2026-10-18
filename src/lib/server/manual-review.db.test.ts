@@ -42,14 +42,18 @@ if (isLocal) {
 
 let sql: typeof import('./db.ts').sql;
 let getGame: typeof import('./games.ts').getGame;
+let listTags: typeof import('./games.ts').listTags;
+let platformStats: typeof import('./games.ts').platformStats;
 let readSubmission: typeof import('./submissions.ts').readSubmission;
 let sqlSubmissionStore: typeof import('./submissions-db.ts').sqlSubmissionStore;
+let writeManualReviewSetting: typeof import('./manual-review-sync.ts').writeManualReviewSetting;
 
 if (probeOk) {
   sql = (await import('./db.ts')).sql;
-  getGame = (await import('./games.ts')).getGame;
+  ({ getGame, listTags, platformStats } = await import('./games.ts'));
   readSubmission = (await import('./submissions.ts')).readSubmission;
   sqlSubmissionStore = (await import('./submissions-db.ts')).sqlSubmissionStore;
+  writeManualReviewSetting = (await import('./manual-review-sync.ts')).writeManualReviewSetting;
 }
 
 const userId = randomUUID();
@@ -262,6 +266,8 @@ describe('manual review (db)', () => {
     const shown = await cdnGet(assetId, '/g/' + assetId + '/1/sprites/extra.js', bytes);
     assert.equal(shown.status, 200);
     assert.match(shown.body, /const extra/);
+    assert.match(shown.headers['cache-control'] ?? '', /max-age=60/);
+    assert.doesNotMatch(shown.headers['cache-control'] ?? '', /immutable|31536000/);
     const doc = await cdnGet(assetId, '/g/' + assetId + '/index.html', bytes);
     assert.equal(doc.status, 302);
     assert.match(doc.headers.location ?? '', new RegExp(`/g/${assetId}/1/index\\.html$`));
@@ -279,6 +285,147 @@ describe('manual review (db)', () => {
     assert.equal(row?.reviewed_at, null);
     const queued = await sql`select id from public.games_awaiting_review where id = ${legacyId}`;
     assert.equal(queued.length, 0);
+  });
+
+  it('a proving game is demoted on upload and returns to the review queue', async (t) => {
+    if (skip(t)) return;
+    const id = `mrprv${userId.replace(/-/g, '').slice(0, 8)}`;
+    const bytes = new TextEncoder().encode('const extra = 1;\n');
+    try {
+      await sql`
+        insert into public.games (id, slug, title, creator, owner_id, stage)
+        values (${id}, ${id}, 'Proving', ${handle}, ${userId}, 'pending')`;
+      await sql`select stage from public.record_game_validation(${id}, ${sha('p1')}, 'passed', ${sql.json(passReport)})`;
+      await sql`update public.games set stage = 'proving' where id = ${id}`;
+      const decision = assessAssetUpload({
+        userId,
+        ownerId: userId,
+        rawPath: 'sprites/extra.js',
+        adding: true,
+        bytes,
+        existing: null,
+        codeBytes: 100,
+        uploadedBytes: 0,
+        fileCount: 0,
+        rateAllowed: true,
+      });
+      assert.equal(decision.kind, 'store');
+      if (decision.kind !== 'store') return;
+      const storage: AssetStorage = {
+        async upload() { return { error: null }; },
+        async remove() { return { error: null }; },
+      };
+      assert.deepEqual(await saveFinalizedAsset(sql, storage, id, 1, decision, bytes), { ok: true });
+      const [held] = await sql<{ stage: string }[]>`select stage from public.games where id = ${id}`;
+      assert.equal(held?.stage, 'pending');
+      assert.equal(await getGame(id), null);
+      const [queued] = await sql<{ id: string }[]>`select id from public.games_awaiting_review where id = ${id}`;
+      assert.equal(queued?.id, id);
+      assert.equal((await cdnGet(id, '/g/' + id + '/1/sprites/extra.js', bytes)).status, 404);
+    } finally {
+      await sql`delete from public.games where id = ${id}`;
+    }
+  });
+
+  it('anon and authenticated cannot execute review or validation functions', async (t) => {
+    if (skip(t)) return;
+    const fns = [
+      'public.record_game_validation(text, text, text, jsonb, boolean)',
+      'public.apply_stored_validation(text, text, boolean)',
+      'public.touch_game_review()',
+      'public.manual_review_enabled()',
+    ];
+    for (const role of ['anon', 'authenticated', 'public']) {
+      for (const fn of fns) {
+        const [row] = await sql<{ ok: boolean }[]>`
+          select has_function_privilege(${role}, ${fn}, 'EXECUTE') as ok`;
+        assert.equal(row?.ok, false, `${role} ${fn}`);
+      }
+    }
+  });
+
+  it('homepage stats ignore a pending game', async (t) => {
+    if (skip(t)) return;
+    const id = `mrf6${userId.replace(/-/g, '').slice(0, 8)}`;
+    const creator = `mrstat${userId.replace(/-/g, '').slice(0, 8)}`;
+    try {
+      const before = await platformStats();
+      await sql`
+        insert into public.games (id, slug, title, creator, stage)
+        values (${id}, ${id}, 'Pending stats', ${creator}, 'pending')`;
+      await sql`insert into public.sessions (id, game_id) values (${randomUUID()}, ${id})`;
+      const after = await platformStats();
+      assert.deepEqual(after, before);
+      const [live] = await sql<{ n: number }[]>`select count(*)::int as n from public.games where stage = 'live'`;
+      assert.equal(after?.live, live?.n);
+      assert.equal(after?.games, live?.n);
+    } finally {
+      await sql`delete from public.games where id = ${id}`;
+    }
+  });
+
+  it('the tag cloud omits a pending tag and keeps a live one', async (t) => {
+    if (skip(t)) return;
+    const suffix = userId.replace(/-/g, '').slice(0, 8);
+    const pendingTag = `zzpend${suffix}`;
+    const liveTag = `zzlive${suffix}`;
+    const liveId = `mrf7l${suffix}`;
+    const prefix = `mrf7${suffix}`;
+    try {
+      await sql`
+        insert into public.games (id, slug, title, creator, stage, tags)
+        values (${liveId}, ${liveId}, 'Live tag', 'legacy', 'live', ${[liveTag]})`;
+      await sql`
+        insert into public.games (id, slug, title, creator, stage, tags)
+        select ${prefix} || g::text, ${prefix} || g::text, 'Pending tag', 'legacy', 'pending', ${[pendingTag]}
+        from generate_series(1, 40) g`;
+      const cloud = await listTags();
+      assert.equal(cloud.some((row) => row.tag === pendingTag), false);
+      const live = cloud.find((row) => row.tag === liveTag);
+      assert.ok(live, 'live tag is in the cloud');
+      assert.equal(live?.count, 1);
+    } finally {
+      await sql`delete from public.games where id = ${liveId} or id like ${prefix + '%'}`;
+    }
+  });
+
+  it('MG_MANUAL_REVIEW is the switch the database function reads', async (t) => {
+    if (skip(t)) return;
+    const prev = process.env.MG_MANUAL_REVIEW;
+    const offId = `mro0${userId.replace(/-/g, '').slice(0, 8)}`;
+    const onId = `mro1${userId.replace(/-/g, '').slice(0, 8)}`;
+    const rollback = new Error('rollback-settings');
+    try {
+      await sql.begin(async (tx) => {
+        process.env.MG_MANUAL_REVIEW = '0';
+        await writeManualReviewSetting(tx);
+        const [off] = await tx<{ enabled: boolean }[]>`select public.manual_review_enabled() as enabled`;
+        assert.equal(off?.enabled, false);
+        await tx`
+          insert into public.games (id, slug, title, creator, stage)
+          values (${offId}, ${offId}, 'Off', 'legacy', 'pending')`;
+        const [published] = await tx<{ stage: string }[]>`
+          select stage from public.record_game_validation(${offId}, ${sha('01')}, 'passed', ${tx.json(passReport)})`;
+        assert.equal(published?.stage, 'proving');
+
+        process.env.MG_MANUAL_REVIEW = '1';
+        await writeManualReviewSetting(tx);
+        const [on] = await tx<{ enabled: boolean }[]>`select public.manual_review_enabled() as enabled`;
+        assert.equal(on?.enabled, true);
+        await tx`
+          insert into public.games (id, slug, title, creator, stage)
+          values (${onId}, ${onId}, 'On', 'legacy', 'pending')`;
+        const [held] = await tx<{ stage: string }[]>`
+          select stage from public.record_game_validation(${onId}, ${sha('10')}, 'passed', ${tx.json(passReport)})`;
+        assert.equal(held?.stage, 'pending');
+        throw rollback;
+      });
+    } catch (err) {
+      if (err !== rollback) throw err;
+    } finally {
+      if (prev === undefined) delete process.env.MG_MANUAL_REVIEW;
+      else process.env.MG_MANUAL_REVIEW = prev;
+    }
   });
 
   it('manual review off still publishes a pass to proving', async (t) => {
@@ -309,10 +456,16 @@ async function cdnGet(gameId: string, path: string, bytes: Uint8Array): Promise<
     if (u.pathname === '/rest/v1/game_validations') return Response.json([{ version: 1 }]);
     if (u.pathname === '/rest/v1/game_assets') {
       const assetPath = decodeURIComponent((u.searchParams.get('path') ?? '').replace(/^eq\./, ''));
-      const [row] = await sql<{ status: string }[]>`
-        select status from public.game_assets
-        where game_id = ${gameId} and version = 1 and path = ${assetPath}`;
-      return Response.json(row ? [{ status: row.status }] : []);
+      const [row] = await sql<{ status: string; updated_at: Date; stage: string; reviewed_at: Date | null }[]>`
+        select a.status, a.updated_at, g.stage, g.reviewed_at
+        from public.game_assets a
+        join public.games g on g.id = a.game_id
+        where a.game_id = ${gameId} and a.version = 1 and a.path = ${assetPath}`;
+      return Response.json(row ? [{
+        status: row.status,
+        updated_at: row.updated_at.toISOString(),
+        games: { stage: row.stage, reviewed_at: row.reviewed_at ? row.reviewed_at.toISOString() : null },
+      }] : []);
     }
     if (u.pathname.includes('/storage/')) {
       const html = '<!doctype html><canvas id="c"></canvas>';

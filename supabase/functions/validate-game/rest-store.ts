@@ -26,19 +26,20 @@ export function createRestStore(supabaseUrl: string, secretKey: string): Store {
       const [row] = await rest<ValidationRow[]>(`game_validations?select=id,status,bundle_sha256,version&game_id=${eq(gameId)}&bundle_sha256=${eq(sha256)}`);
       return row ?? null;
     },
-    async recordValidation({ gameId, sha256, status, report, manualReview }) {
-      // The stage transition happens in SQL (record_game_validation mirrors stageAfterValidation) so it is atomic.
+    async recordValidation({ gameId, sha256, status, report }) {
+      // The stage transition happens in SQL. p_manual_review is omitted so the function
+      // reads private.settings (the portal's copy of MG_MANUAL_REVIEW), not this process's env.
       const [row] = await rest<(ValidationRow & { stage: Stage })[]>('rpc/record_game_validation', {
         method: 'POST',
-        body: JSON.stringify({ p_game_id: gameId, p_sha256: sha256, p_status: status, p_report: report, p_manual_review: manualReview }),
+        body: JSON.stringify({ p_game_id: gameId, p_sha256: sha256, p_status: status, p_report: report }),
       });
       return row ? { row, stage: row.stage } : null;
     },
-    async applyStoredVerdict(gameId, sha256, manualReview) {
+    async applyStoredVerdict(gameId, sha256) {
       // Atomic in SQL too: lock the game, move it only if it is pending, using the stored verdict for this bundle.
       const [row] = await rest<{ stage: Stage }[]>('rpc/apply_stored_validation', {
         method: 'POST',
-        body: JSON.stringify({ p_game_id: gameId, p_sha256: sha256, p_manual_review: manualReview }),
+        body: JSON.stringify({ p_game_id: gameId, p_sha256: sha256 }),
       });
       return row?.stage ?? null;
     },

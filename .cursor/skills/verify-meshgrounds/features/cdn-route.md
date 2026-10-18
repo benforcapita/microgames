@@ -7,7 +7,7 @@ The cookieless CDN origin serves game documents with an injected runtime and a s
 - `cdn-doc` `GET /g/<id>/index.html` → 200, `text/html`, runtime injected (`window.Meshground`), `Cache-Control: no-cache`, `Vary: Origin, Referer`.
 - `cdn-csp` CSP starts `sandbox allow-scripts allow-pointer-lock; default-src 'none'` and ends `frame-ancestors <portal origins>`; a foreign Referer never appears in it.
 - `cdn-source` `?source` → `text/plain`, CSP `sandbox; default-src 'none'`, `Access-Control-Allow-Origin` only for the portal origin.
-- `cdn-assets` `/g/<id>/<version>/<path>` js/css/mjs/wasm: byte-for-byte, `Access-Control-Allow-Origin: null` only for `Origin: null`, `Cache-Control` `public, max-age=31536000, immutable` when live, `public, max-age=60, must-revalidate` while proving.
+- `cdn-assets` `/g/<id>/<version>/<path>` js/css/mjs/wasm: byte-for-byte, `Access-Control-Allow-Origin: null` only for `Origin: null`, `Cache-Control` `public, max-age=60, must-revalidate` for proving and live (owner-replaceable; not immutable). Served only when the asset row is uploaded, the joined game stage is public, and `updated_at <= reviewed_at`.
 - `cdn-thumb` `thumb.*` → `public, max-age=3600, stale-while-revalidate=86400`.
 - `cdn-deny` unknown id, pending/rejected without `pt=`, and `..`/encoded traversal → 404.
 

@@ -613,9 +613,10 @@ export type AssetSaveResult =
 
 /**
  * With manual review on, a public game goes back to pending before new asset bytes are
- * recorded. The CDN stage gate then hides the file until a reviewer sets a public stage
- * again. A rejected upload does not call this. A failed copy can leave the game pending,
- * which keeps unreviewed bytes off the public URL.
+ * recorded. The CDN re-reads that stage on the asset row and hides the file until a
+ * reviewer sets a public stage again (reviewed_at then moves to at least the asset's
+ * updated_at). A rejected upload does not call this. A failed copy can leave the game
+ * pending, which keeps unreviewed bytes off the public URL.
  */
 export async function holdApprovedGameForReview(
   sql: AssetDb,

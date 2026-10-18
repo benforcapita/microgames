@@ -43,8 +43,15 @@ function harness(opts: { cdnOrigin?: string } = {}) {
       // exactly what used to turn into a 502 before this validation moved to the path boundary.
       if (!/^\d+$/.test(eq('version'))) return new Response('invalid input syntax for type integer', { status: 400 });
       // A versioned asset is served only with a finalized 'uploaded' row; every fixture object counts.
-      const key = `${eq('game_id')}/${eq('version')}/${decodeURIComponent(eq('path'))}`;
-      return Response.json(FILES[key] !== undefined ? [{ status: 'uploaded' }] : []);
+      const id = eq('game_id');
+      const key = `${id}/${eq('version')}/${decodeURIComponent(eq('path'))}`;
+      if (FILES[key] === undefined || !STAGES[id]) return Response.json([]);
+      const pub = STAGES[id] === 'live' || STAGES[id] === 'proving';
+      return Response.json([{
+        status: 'uploaded',
+        updated_at: '2026-10-18T00:00:00.000Z',
+        games: { stage: STAGES[id], reviewed_at: pub ? '2026-10-18T01:00:00.000Z' : null },
+      }]);
     }
     const m = /\/storage\/v1\/object\/authenticated\/games\/([^/]+)\/(.+)$/.exec(u.pathname);
     if (m && FILES[`${m[1]}/${decodeURIComponent(m[2])}`] !== undefined) return new Response(FILES[`${m[1]}/${decodeURIComponent(m[2])}`]);

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { IMMUTABLE, SHORT_CACHE } from './handler.mjs';
+import { SHORT_CACHE } from './handler.mjs';
 import { gameCsp, ownAssetSource } from './csp.mjs';
 import { fixtureHandler } from './fixtures/stub.ts';
 
@@ -87,9 +87,12 @@ describe('AS-5 game assets', () => {
     assert.equal((await req('/g/assetgm1/1/add.wasm', { origin: 'null' }, 'OPTIONS')).headers['access-control-allow-origin'], undefined);
   });
 
-  it('live assets are immutable for a year; proving assets get a short cache', async () => {
+  it('live and proving assets use a short revalidating cache', async () => {
     const { req } = client();
-    assert.equal((await req('/g/assetgm1/1/game.js')).headers['cache-control'], IMMUTABLE);
+    const live = await req('/g/assetgm1/1/game.js');
+    assert.equal(live.status, 200);
+    assert.equal(live.headers['cache-control'], SHORT_CACHE);
+    assert.doesNotMatch(live.headers['cache-control'], /immutable|31536000/);
     const proving = await req('/g/provgm01/1/game.js');
     assert.equal(proving.status, 200);
     assert.equal(proving.headers['cache-control'], SHORT_CACHE);

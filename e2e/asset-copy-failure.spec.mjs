@@ -9,6 +9,7 @@ import { test, expect, request as pwRequest } from '@playwright/test';
 import postgres from 'postgres';
 import { createClient } from '@supabase/supabase-js';
 import { localSupabaseEnv } from '../scripts/lib/local-supabase.mjs';
+import { approveGame } from './approve-game.mjs';
 
 const WEB = `http://127.0.0.1:${process.env.E2E_WEB_PORT ?? 4721}`;
 const CDN = `http://127.0.0.1:${process.env.E2E_CDN_PORT ?? 4722}`;
@@ -160,6 +161,7 @@ test('UP-3 copy failure on a replace: the displaced row is restored exactly and 
     const one = await s1.json();
     expect((await putSigned(one.url, v1, 'audio/wav')).status).toBe(200);
     expect((await finalize(c, game.slug, { path: 'cf/rep.wav', uploadId: one.uploadId })).status()).toBe(200);
+    await approveGame(game.id, sql);
     const before = await rowOf();
     const cdnBefore = await fetch(assetUrl(game.id, 'cf/rep.wav'));
     expect(cdnBefore.status).toBe(200);
@@ -177,6 +179,9 @@ test('UP-3 copy failure on a replace: the displaced row is restored exactly and 
     expect(describeRow(after), 'status, size, sha, type, source, reject_reason and row identity are restored').toEqual(
       describeRow(before),
     );
+    // The failed replace demoted the game again. Approve after the revert so reviewed_at
+    // is not older than the restored row's updated_at.
+    await approveGame(game.id, sql);
     // The served object was never touched: storage and the CDN still hand out v1 bytes,
     // byte-identical (storage read first — the CDN object cache can mask an overwrite).
     const stored = await gamesBucket().download(servedKey);

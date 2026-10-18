@@ -362,6 +362,8 @@ export async function getHealth(gameId: string): Promise<{ checks: HealthCheck[]
 export async function evaluateGraduation(gameId: string): Promise<boolean> {
   const [row] = await sql<{ stage: Stage }[]>`select stage from games where id = ${gameId}`;
   if (!row || row.stage === 'live' || !(await getHealth(gameId)).eligible) return false;
+  // The stage write stamps reviewed_at (games_touch_review). That is intentional:
+  // graduation is a publish, and the CDN serves an asset only while updated_at <= reviewed_at.
   await sql`update games set stage = 'live', graduated_at = now() where id = ${gameId} and stage = 'proving'`;
   return true;
 }
