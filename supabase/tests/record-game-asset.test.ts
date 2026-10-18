@@ -341,8 +341,9 @@ describe('private.record_game_asset', () => {
     const lockHeld = new Promise<void>((resolve) => (signalLockHeld = resolve));
     const bDone = new Promise<void>((resolve) => (signalBDone = resolve));
     const rollback = new Error('roll back the lock-holding transaction');
+    let aTxn: Promise<string> | undefined;
     try {
-      const aTxn = a
+      aTxn = a
         .begin(async (tx) => {
           try {
             const res = await call(tx, gameId, `lk/${uniq}-a.png`);
@@ -413,6 +414,10 @@ describe('private.record_game_asset', () => {
       assert.equal(await aTxn, 'rolled back');
     } finally {
       signalBDone();
+      // A's own failure (the pg_locks probe inside its transaction) must win over whatever
+      // B threw: when A doesn't take the lock, B's probes fail too and would mask the real
+      // assertion — report A's outcome here, whatever path the body took.
+      if (aTxn) assert.equal(await aTxn, 'rolled back');
       await a`delete from public.games where id = ${gameId}`.catch(() => {});
       await a.end({ timeout: 1 }).catch(() => {});
       await b.end({ timeout: 1 }).catch(() => {});
