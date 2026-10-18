@@ -416,11 +416,14 @@ describe('private.record_game_asset', () => {
       signalBDone();
       // A's own failure (the pg_locks probe inside its transaction) must win over whatever
       // B threw: when A doesn't take the lock, B's probes fail too and would mask the real
-      // assertion — report A's outcome here, whatever path the body took.
-      if (aTxn) assert.equal(await aTxn, 'rolled back');
+      // assertion — report A's outcome here, whatever path the body took. But clean up
+      // FIRST: if the assertion runs before the delete, a failing run leaks the rga- game
+      // row and both connections (QA #79 item 6).
+      const aOutcome = aTxn ? await aTxn : undefined;
       await a`delete from public.games where id = ${gameId}`.catch(() => {});
       await a.end({ timeout: 1 }).catch(() => {});
       await b.end({ timeout: 1 }).catch(() => {});
+      if (aOutcome !== undefined) assert.equal(aOutcome, 'rolled back');
     }
   });
 });
