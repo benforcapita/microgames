@@ -17,12 +17,12 @@ const MAX_FILES = MAX_ASSET_FILES;
 const MAX_BYTES = GAME_VERSION_MAX_BYTES;
 const FN = `private.record_game_asset(text, integer, text, text, text, integer, text, text, text, integer, bigint)`;
 
-describe('record_game_asset migration file', () => {
-  it('sorts after the asset function it replaces', () => {
+describe('record_game_asset migration files', () => {
+  it('apply in order so the cap fix is the live definition', () => {
     const names = readdirSync(join(supabaseDir, 'migrations')).sort();
-    const prior = '20261017120000_record_game_asset.sql';
-    assert.ok(names.includes(`${MIGRATION}.sql`));
-    assert.ok(names.indexOf(`${MIGRATION}.sql`) > names.indexOf(prior));
+    const first = names.indexOf('20261017120000_record_game_asset.sql');
+    const second = names.indexOf(`${MIGRATION}.sql`);
+    assert.ok(first >= 0 && second > first, `ordering ${first} -> ${second}`);
   });
 });
 
@@ -341,8 +341,9 @@ describe('private.record_game_asset', () => {
     const lockHeld = new Promise<void>((resolve) => (signalLockHeld = resolve));
     const bDone = new Promise<void>((resolve) => (signalBDone = resolve));
     const rollback = new Error('roll back the lock-holding transaction');
+    let aTxn: Promise<string> | undefined;
     try {
-      const aTxn = a
+      aTxn = a
         .begin(async (tx) => {
           try {
             const res = await call(tx, gameId, `lk/${uniq}-a.png`);
@@ -413,9 +414,16 @@ describe('private.record_game_asset', () => {
       assert.equal(await aTxn, 'rolled back');
     } finally {
       signalBDone();
+      // A's own failure (the pg_locks probe inside its transaction) must win over whatever
+      // B threw: when A doesn't take the lock, B's probes fail too and would mask the real
+      // assertion — report A's outcome here, whatever path the body took. But clean up
+      // FIRST: if the assertion runs before the delete, a failing run leaks the rga- game
+      // row and both connections (QA #79 item 6).
+      const aOutcome = aTxn ? await aTxn : undefined;
       await a`delete from public.games where id = ${gameId}`.catch(() => {});
       await a.end({ timeout: 1 }).catch(() => {});
       await b.end({ timeout: 1 }).catch(() => {});
+      if (aOutcome !== undefined) assert.equal(aOutcome, 'rolled back');
     }
   });
 });

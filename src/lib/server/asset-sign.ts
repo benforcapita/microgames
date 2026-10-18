@@ -13,6 +13,7 @@
 import crypto from 'node:crypto';
 import { canonicalAssetPath, extensionOf } from './asset-scan.ts';
 import {
+  ASSET_UPLOAD_ID_TTL_MS,
   ASSET_UPLOAD_MESSAGES,
   GAME_VERSION_MAX_BYTES,
   MAX_ASSET_FILES,
@@ -60,37 +61,68 @@ export function parseAssetFinalizeBody(body: unknown): { path: string; uploadId:
 // never accept (only `\d{1,9}` parses) — and finalize copies the scanned bytes to the real path.
 //
 // The opaque `uploadId` binds a staged object to its sign call so finalize cannot be pointed at
-// another staged object: `<nonce>.<base64url hmac(game, version, path, nonce)>`. The secret is
-// injected so this module stays pure (the endpoint passes SUPABASE_SERVICE_KEY).
+// another staged object, and carries its own expiry: `<nonce>.<expiresAt epoch-s>.<base64url
+// hmac(game, version, path, nonce, expiresAt)>`. The deadline is inside the signature, so a client
+// cannot extend it; past it finalize refuses with 410 upload_expired and the sweep may collect
+// the staged object once it is also older than ASSET_STALE_AGE_MS. The secret is injected so this
+// module stays pure (the endpoint passes SUPABASE_SERVICE_KEY).
 
 const UPLOAD_ID_SCOPE = 'mg-asset-upload-v1';
 const NONCE_RE = /^[A-Za-z0-9_-]{16,32}$/;
-const UPLOAD_ID_RE = /^([A-Za-z0-9_-]{16,32})\.([A-Za-z0-9_-]{43})$/;
+const UPLOAD_ID_RE = /^([A-Za-z0-9_-]{16,32})\.(\d{6,13})\.([A-Za-z0-9_-]{43})$/;
 const GAME_ID_RE = /^[A-Za-z0-9_-]{6,16}$/;
 
-function uploadIdSignature(secret: string, gameId: string, version: number, path: string, nonce: string): string {
-  return crypto.createHmac('sha256', secret).update(`${UPLOAD_ID_SCOPE}:${gameId}:${version}:${path}:${nonce}`).digest('base64url');
+function uploadIdSignature(secret: string, gameId: string, version: number, path: string, nonce: string, expiresAt: number): string {
+  return crypto
+    .createHmac('sha256', secret)
+    .update(`${UPLOAD_ID_SCOPE}:${gameId}:${version}:${path}:${nonce}:${expiresAt}`)
+    .digest('base64url');
 }
 
-export function mintAssetUploadId(secret: string, gameId: string, version: number, path: string): { uploadId: string; nonce: string } {
+export function mintAssetUploadId(
+  secret: string,
+  gameId: string,
+  version: number,
+  path: string,
+  now: number = Date.now(),
+): { uploadId: string; nonce: string; expiresAt: number } {
   const nonce = crypto.randomBytes(12).toString('base64url');
-  return { uploadId: `${nonce}.${uploadIdSignature(secret, gameId, version, path, nonce)}`, nonce };
+  // expiresAt IS the signed deadline: exp is floored to seconds inside the signature, so
+  // reporting now+TTL verbatim could show a deadline up to ~1 s later than the real one.
+  const exp = Math.floor((now + ASSET_UPLOAD_ID_TTL_MS) / 1000);
+  return { uploadId: `${nonce}.${exp}.${uploadIdSignature(secret, gameId, version, path, nonce, exp)}`, nonce, expiresAt: exp * 1000 };
 }
+
+export type AssetUploadIdVerdict =
+  | { kind: 'ok'; stagedPath: string }
+  | { kind: 'expired'; stagedPath: string }
+  | { kind: 'invalid' };
 
 /**
- * The staged object key for a finalize call, or null when the uploadId is absent, malformed,
- * not bound to this game/version/path, or unsafe to join. A verified nonce is the only way in.
+ * The staged object key for a finalize call. 'invalid' when the uploadId is absent, malformed,
+ * not bound to this game/version/path, or unsafe to join; 'expired' when the signature is
+ * authentic but its signed deadline has passed. A verified id still names its staged object, so
+ * the expired verdict carries the path for cleanup.
  */
-export function stagedObjectPath(secret: string, gameId: string, version: number, path: string, uploadId: string): string | null {
-  if (!GAME_ID_RE.test(gameId) || !Number.isInteger(version) || version < 1) return null;
+export function verifyAssetUploadId(
+  secret: string,
+  gameId: string,
+  version: number,
+  path: string,
+  uploadId: string,
+  now: number = Date.now(),
+): AssetUploadIdVerdict {
+  if (!GAME_ID_RE.test(gameId) || !Number.isInteger(version) || version < 1) return { kind: 'invalid' };
   const m = UPLOAD_ID_RE.exec(uploadId);
-  if (!m) return null;
-  const [nonce, sig] = [m[1], m[2]];
-  if (!NONCE_RE.test(nonce)) return null;
-  const want = Buffer.from(uploadIdSignature(secret, gameId, version, path, nonce));
+  if (!m) return { kind: 'invalid' };
+  const [nonce, expText, sig] = [m[1], m[2], m[3]];
+  const exp = Number(expText);
+  if (!NONCE_RE.test(nonce) || !Number.isSafeInteger(exp)) return { kind: 'invalid' };
+  const want = Buffer.from(uploadIdSignature(secret, gameId, version, path, nonce, exp));
   const got = Buffer.from(sig);
-  if (want.length !== got.length || !crypto.timingSafeEqual(want, got)) return null;
-  return `${gameId}/_staging/${nonce}`;
+  if (want.length !== got.length || !crypto.timingSafeEqual(want, got)) return { kind: 'invalid' };
+  const stagedPath = `${gameId}/_staging/${nonce}`;
+  return now > exp * 1000 ? { kind: 'expired', stagedPath } : { kind: 'ok', stagedPath };
 }
 
 /**

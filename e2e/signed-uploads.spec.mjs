@@ -10,6 +10,8 @@ import { createClient } from '@supabase/supabase-js';
 import { localSupabaseEnv } from '../scripts/lib/local-supabase.mjs';
 import { GAME_VERSION_MAX_BYTES } from '../src/lib/asset-limits.ts';
 import { approveGame } from './approve-game.mjs';
+import { mintAssetUploadId } from '../src/lib/server/asset-sign.ts';
+import { ASSET_UPLOAD_ID_TTL_MS } from '../src/lib/server/asset-upload.ts';
 
 const WEB = `http://127.0.0.1:${process.env.E2E_WEB_PORT ?? 4721}`;
 const CDN = `http://127.0.0.1:${process.env.E2E_CDN_PORT ?? 4722}`;
@@ -493,4 +495,75 @@ test('an upload to an approved game is 404 for anon immediately, with no cache w
   expect(cache).not.toContain('immutable');
   expect(cache).not.toContain('31536000');
   await c.dispose();
+});
+
+test('UP-4 finalize rejects an expired uploadId with 410 upload_expired', async () => {
+  const c = await ctx();
+  await signup(c, 'expr');
+  const game = await uploadGame(c, `UP4 expired ${uniq()}`);
+
+  // Sign tells the client how long the uploadId stays finalizable.
+  const s = await sign(c, game.slug, { path: 'sfx/old.wav', size: SMALL_WAV.length, contentType: 'audio/wav' });
+  expect(s.status()).toBe(200);
+  const data = await s.json();
+  expect(Date.parse(data.expiresAt), 'sign returns an expiresAt timestamp').toBeGreaterThan(Date.now());
+
+  // An authentic uploadId whose signed expiry has already passed: minted here by the
+  // server's own recipe (same secret, same HMAC inputs) with the clock turned back past
+  // the TTL. The staged bytes exist — only the deadline is gone.
+  const stale = mintAssetUploadId(sb.SUPABASE_SECRET_KEY, game.id, 1, 'sfx/old.wav', Date.now() - 60 * 60_000);
+  const uploadPath = `${game.id}/_staging/${stale.nonce}`;
+  expect((await gamesBucket().upload(uploadPath, SMALL_WAV, { contentType: 'audio/wav' })).error).toBeNull();
+
+  const f = await finalize(c, game.slug, { path: 'sfx/old.wav', uploadId: stale.uploadId });
+  expect(f.status()).toBe(410);
+  const body = await f.json();
+  expect(body.error).toBe('upload_expired');
+  expect(await objectExists(uploadPath), 'the expired staged object is cleaned up').toBe(false);
+  const [row] = await sql`select status from public.game_assets where game_id = ${game.id} and path = 'sfx/old.wav'`;
+  expect(row, 'an expired upload never becomes an asset row').toBeUndefined();
+  await c.dispose();
+});
+
+test('UP-4 Files page: an expired upload keeps the path field and shows the error', async ({ browser }) => {
+  const c = await ctx();
+  await signup(c, 'p410');
+  const game = await uploadGame(c, `UP4 files ${uniq()}`);
+  const bctx = await browser.newContext({ storageState: await c.storageState() });
+  const page = await bctx.newPage();
+  let stagedPath;
+  try {
+    // The sign answer is real; only its uploadId is swapped for an authentic one minted
+    // with the clock shifted past the TTL (the server's own recipe), so the browser runs
+    // the real sign -> PUT -> 410 sequence — QA #79's reproduction.
+    await page.route('**/assets/sign', async (route) => {
+      const response = await route.fetch();
+      const body = await response.json();
+      if (body.uploadId) {
+        stagedPath = body.uploadPath;
+        body.uploadId = mintAssetUploadId(
+          sb.SUPABASE_SECRET_KEY,
+          game.id,
+          body.version,
+          body.path,
+          Date.now() - ASSET_UPLOAD_ID_TTL_MS - 5_000,
+        ).uploadId;
+      }
+      await route.fulfill({ response, json: body });
+    });
+    await page.goto(`/games/${game.slug}/assets`);
+    const add = page.locator('form.add');
+    await add.locator('input[name="path"]').fill('sprites/expired.png');
+    await add.locator('input[name="file"]').setInputFiles({ name: 'expired.png', mimeType: 'image/png', buffer: PNG });
+    await add.getByRole('button', { name: 'Add file' }).click();
+
+    await expect(page.getByText('That upload link expired. Upload the file again.')).toBeVisible({ timeout: 30_000 });
+    // The typed path survives the failure so the creator can retry without re-entering it.
+    await expect(add.locator('input[name="path"]')).toHaveValue('sprites/expired.png');
+  } finally {
+    await bctx.close();
+    // The real staged object was never consumed (finalize saw the swapped-in nonce).
+    if (stagedPath) await gamesBucket().remove([stagedPath]).catch(() => {});
+    await c.dispose();
+  }
 });

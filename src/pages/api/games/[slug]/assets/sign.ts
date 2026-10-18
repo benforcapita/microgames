@@ -65,7 +65,7 @@ export const POST: APIRoute = async ({ request, params, locals }) => {
   // path the CDN serves (whoever held it could overwrite vetted bytes and skip the scan), so it
   // authorizes exactly the staged key and nothing else. The opaque uploadId binds this staged
   // object to this game/version/path for finalize.
-  const { uploadId, nonce } = mintAssetUploadId(SUPABASE_SERVICE_KEY, game.id, version, decision.path);
+  const { uploadId, nonce, expiresAt } = mintAssetUploadId(SUPABASE_SERVICE_KEY, game.id, version, decision.path);
   const stagedPath = `${game.id}/_staging/${nonce}`;
   const signed = await bucket().createSignedUploadUrl(stagedPath, { upsert: false });
   if (signed.error || !signed.data) {
@@ -77,6 +77,7 @@ export const POST: APIRoute = async ({ request, params, locals }) => {
     uploadId,
     uploadPath: stagedPath,
     version,
+    expiresAt: new Date(expiresAt).toISOString(),
     url: signed.data.signedUrl,
     token: signed.data.token,
     upsert: false,
