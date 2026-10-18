@@ -20,6 +20,16 @@ export const MAX_ASSET_FILES = 200;
 export const ASSET_UPLOAD_MAX = 30;
 export const ASSET_UPLOAD_WINDOW_MS = 10 * 60_000;
 
+/** UP-4: a signed uploadId stays finalizable for this long. Signed into the uploadId itself. */
+export const ASSET_UPLOAD_ID_TTL_MS = 15 * 60_000;
+/**
+ * UP-4: how old a `_staging` object or an 'uploaded' row must be before maintenance touches
+ * it — the uploadId TTL plus a wide margin, so nothing a still-finalizable upload or an
+ * in-flight finalize could still claim is ever swept. One source for the staging sweep and
+ * the orphan cleanup's active-window guard.
+ */
+export const ASSET_STALE_AGE_MS = ASSET_UPLOAD_ID_TTL_MS + 105 * 60_000;
+
 export const ASSET_SIZE_WARNING = 'This asset is over 100 KB.';
 
 export const ASSET_UPLOAD_MESSAGES = {
@@ -34,6 +44,7 @@ export const ASSET_UPLOAD_MESSAGES = {
   encoding: 'That path is not encoded correctly.',
   control: 'That path contains a NUL or a control character.',
   'not-uploaded': 'Nothing was uploaded to that path.',
+  upload_expired: 'That upload link expired. Upload the file again.',
 } as const;
 
 /**
