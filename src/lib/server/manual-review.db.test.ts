@@ -295,7 +295,7 @@ describe('manual review (db)', () => {
       await sql`
         insert into public.games (id, slug, title, creator, owner_id, stage)
         values (${id}, ${id}, 'Proving', ${handle}, ${userId}, 'pending')`;
-      await sql`select stage from public.record_game_validation(${id}, ${sha('p1')}, 'passed', ${sql.json(passReport)})`;
+      await sql`select stage from public.record_game_validation(${id}, ${sha('b2')}, 'passed', ${sql.json(passReport)})`;
       await sql`update public.games set stage = 'proving' where id = ${id}`;
       const decision = assessAssetUpload({
         userId,
