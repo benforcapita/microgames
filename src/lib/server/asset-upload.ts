@@ -5,7 +5,6 @@
  * module stops exporting them. A missing-file warning is AS-4, not this upload.
  */
 import crypto from 'node:crypto';
-import { readManualReview } from './manual-review.ts';
 import { createLimiter } from './abuse.ts';
 import type { AssetDb } from './asset-manifest.ts';
 import { canonicalAssetPath, extensionOf, type ExpectedType } from './asset-scan.ts';
@@ -632,12 +631,20 @@ export type AssetSaveResult =
  * pending, which keeps unreviewed bytes off the public URL.
  * `enabled` defaults to the database setting. Callers pass the boolean they already read.
  */
+async function reviewIsOn(sql: AssetDb, enabled?: boolean): Promise<boolean> {
+  if (enabled !== undefined) return enabled;
+  // Loaded on call so importing this module (the maintenance script only needs the
+  // constants) does not pull in config.ts, which throws when DATABASE_URL is unset.
+  const { readManualReview } = await import('./manual-review.ts');
+  return readManualReview(sql);
+}
+
 export async function holdApprovedGameForReview(
   sql: AssetDb,
   gameId: string,
   enabled?: boolean,
 ): Promise<boolean> {
-  if (!(enabled ?? await readManualReview(sql))) return false;
+  if (!(await reviewIsOn(sql, enabled))) return false;
   const held = await sql<{ id: string }[]>`
     update public.games
     set stage = 'pending'
@@ -664,7 +671,7 @@ async function storeAsset(
 ): Promise<AssetSaveResult> {
   const objectPath = assetObjectPath(gameId, version, decision.path);
   if (!objectPath) return { ok: false, code: 'storage' };
-  const reviewOn = await readManualReview(sql);
+  const reviewOn = await reviewIsOn(sql);
   await holdApprovedGameForReview(sql, gameId, reviewOn);
   const recorded = await recordGameAsset(sql, {
     gameId,

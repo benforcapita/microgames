@@ -95,6 +95,7 @@ describe('game_assets schema', () => {
           ['reject_reason', 'text', 'YES'],
           ['created_at', 'timestamp with time zone', 'NO'],
           ['updated_at', 'timestamp with time zone', 'NO'],
+          ['content_at', 'timestamp with time zone', 'YES'],
         ],
       );
       const defaults = Object.fromEntries(columns.map((column) => [column.column_name, column.column_default ?? '']));
