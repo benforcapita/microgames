@@ -241,6 +241,8 @@ export async function readSubmission(opts: {
   userId: string | null;
   gameId: string;
   store: SubmissionStore;
+  /** In-memory tests pass this. Omitted means the database row. */
+  manualReview?: boolean;
 }): Promise<SubmissionAccess> {
   if (!opts.userId) return { status: 401, error: 'Log in to view this submission.' };
   if (!ID_RE.test(opts.gameId)) return { status: 404, error: 'Not found' };
@@ -249,13 +251,15 @@ export async function readSubmission(opts: {
   if (!game || game.ownerId !== opts.userId) return { status: 404, error: 'Not found' };
 
   const validation = await opts.store.latestValidation(game.id);
-  return { status: 200, view: buildSubmissionView(game, validation, await readManualReview()) };
+  const manualReview = opts.manualReview ?? await readManualReview();
+  return { status: 200, view: buildSubmissionView(game, validation, manualReview) };
 }
 
 export async function handleSubmissionStatus(opts: {
   userId: string | null;
   gameId: string;
   store: SubmissionStore;
+  manualReview?: boolean;
 }): Promise<Response> {
   const result = await readSubmission(opts);
   if (result.status !== 200) {

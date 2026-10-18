@@ -336,7 +336,7 @@ describe('queued validation rows', () => {
 describe('submission status endpoint', () => {
   it('returns check results to the owner and hides the game from everyone else', async () => {
     const store = memory(game(), validation());
-    const res = await handleSubmissionStatus({ userId: 'owner-1', gameId: 'game1234', store });
+    const res = await handleSubmissionStatus({ userId: 'owner-1', gameId: 'game1234', store, manualReview: true });
     assert.equal(res.status, 200);
     const body = await res.json();
     assert.equal(body.game.title, 'Sky Loop');
@@ -402,7 +402,7 @@ describe('submission status endpoint', () => {
 
   it('returns no validation row while the owner is still waiting', async () => {
     const store = memory(game(), null);
-    const res = await handleSubmissionStatus({ userId: 'owner-1', gameId: 'game1234', store });
+    const res = await handleSubmissionStatus({ userId: 'owner-1', gameId: 'game1234', store, manualReview: true });
     const body = await res.json();
     assert.equal(res.status, 200);
     assert.equal(body.validation, null);
