@@ -5,9 +5,9 @@ import GameCard from '../../components/GameCard.astro';
 import GameThumb from '../../components/GameThumb.astro';
 import { ratingLabel } from '../../lib/rating';
 import { getGame, getHealth, getUserRating, listGames, ownerReviewMarks } from '../../lib/server/games';
-import { CDN_ORIGIN, CDN_PREVIEW_SECRET, GRADUATION } from '../../lib/server/config';
-import { isListable, isPublicStage } from '../../lib/server/game-rules';
-import { mintPreviewToken } from '../../../cdn/preview-token.mjs';
+import { CDN_ORIGIN, GRADUATION } from '../../lib/server/config';
+import { isListable } from '../../lib/server/game-rules';
+import { ownerPreviewToken } from '../../lib/server/owner-preview';
 import { ago, compact, count, formatCheck, kb } from '../../lib/format';
 import { desktopOnlyNotice, forkParentLinked, playSurface } from '../../lib/server/device';
 
@@ -36,7 +36,7 @@ const isOwner = !!user && user.id === game.ownerId;
 const ownerMark = isOwner ? (await ownerReviewMarks([game.id])).get(game.id) : undefined;
 const awaitingReview = isOwner && game.stage === 'pending' && ownerMark?.latestStatus === 'passed';
 // SP-6: the CDN serves pending/rejected bundles only with a short-lived token, minted only for the owner here.
-const previewToken = isOwner && !isPublicStage(game.stage) ? mintPreviewToken(CDN_PREVIEW_SECRET, game.id) : null;
+const previewToken = ownerPreviewToken(game, user?.id);
 const ptQuery = previewToken ? `&pt=${encodeURIComponent(previewToken)}` : '';
 const remixable = game.license !== 'All rights reserved';
 const live = game.stage === 'live';

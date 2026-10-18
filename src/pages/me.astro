@@ -2,6 +2,7 @@
 import Layout from '../layouts/Layout.astro';
 import GameThumb from '../components/GameThumb.astro';
 import { listGames, ownerReviewMarks } from '../lib/server/games';
+import { ownerPreviewToken } from '../lib/server/owner-preview';
 import { compact, count, stars, ago } from '../lib/format';
 
 const { user, profile } = Astro.locals;
@@ -46,7 +47,7 @@ const deleted = Astro.url.searchParams.has('deleted');
         <ul class="list">
           {games.map((g) => (
             <li class="panel item">
-              <a href={g.stage === 'pending' || g.stage === 'rejected' ? `/submissions/${g.id}` : `/play/${g.slug}`} class="thumb"><GameThumb game={g} class="art" /></a>
+              <a href={g.stage === 'pending' || g.stage === 'rejected' ? `/submissions/${g.id}` : `/play/${g.slug}`} class="thumb"><GameThumb game={g} class="art" previewToken={ownerPreviewToken(g, user.id)} /></a>
               <div class="meta">
                 <a href={g.stage === 'pending' || g.stage === 'rejected' ? `/submissions/${g.id}` : `/play/${g.slug}`}><h3>{g.title}</h3></a>
                 <p class="muted mono">

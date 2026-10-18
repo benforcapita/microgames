@@ -15,9 +15,7 @@ const game = `<!doctype html><html><body style="margin:0"><canvas id="c" width="
 <script>const g=document.getElementById('c').getContext('2d');(function f(){g.fillStyle='#c4ff3d';g.fillRect(20,20,200,120);requestAnimationFrame(f);})();</script></body></html>`;
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
 
-test('owner sees the pending poster (200), anon gets 404, and "Awaiting review" shows once', async ({ page, browser }) => {
-  test.setTimeout(120_000);
-  const stamp = `mr2${Date.now().toString(36)}`;
+async function signUp(page, stamp) {
   await page.goto('/login?mode=signup&next=/upload');
   await page.locator('input[name="email"]').fill(`${stamp}@example.com`);
   await page.locator('input[name="password"]').fill('testpass1');
@@ -26,6 +24,13 @@ test('owner sees the pending poster (200), anon gets 404, and "Awaiting review" 
   await page.locator('input[name="handle"]').fill(stamp);
   await page.getByRole('button', { name: 'Claim handle' }).click();
   await page.waitForURL(/\/upload$/);
+}
+const PT = /[?&](?:amp;)?pt=/;
+
+test('owner sees the pending poster (200), anon gets 404, and "Awaiting review" shows once', async ({ page, browser }) => {
+  test.setTimeout(180_000);
+  const stamp = `mr2${Date.now().toString(36)}`;
+  await signUp(page, stamp);
 
   await page.locator('input[name="game"]').setInputFiles({ name: 'g.html', mimeType: 'text/html', buffer: Buffer.from(game) });
   await page.locator('input[name="title"]').fill(`MR2 ${stamp}`);
@@ -55,18 +60,67 @@ test('owner sees the pending poster (200), anon gets 404, and "Awaiting review" 
   const src = await poster.getAttribute('src');
   expect(new URL(src).searchParams.get('pt')).toBeTruthy();
   await expect.poll(() => poster.evaluate((img) => img.complete && img.naturalWidth)).toBeGreaterThan(0);
-  expect((await page.request.get(src)).status()).toBe(200);
+  // The tokened poster is the owner's alone: never storable by a shared cache, including the 304 revalidation.
+  const owned = await page.request.get(src);
+  expect(owned.status()).toBe(200);
+  expect(owned.headers()['cache-control']).toBe('private, no-store');
+  const revalidated = await page.request.get(src, {
+    headers: { 'If-None-Match': owned.headers()['etag'], 'If-Modified-Since': new Date().toUTCString() },
+  });
+  expect(revalidated.status()).toBe(304);
+  expect(revalidated.headers()['cache-control']).toBe('private, no-store');
   await page.locator('#stage').screenshot({ path: shotPath('mr-2-owner-poster.png') });
 
-  // Anon: the same poster without the token, and with no session, is 404.
+  // Anon: the same poster without the token is 404, and the pending play page is a 404 whose body carries no pt.
   const anon = await browser.newContext();
   const bare = new URL(src); bare.search = '';
   expect((await anon.request.get(bare.toString())).status()).toBe(404);
   const anonPage = await anon.newPage();
-  const anonPlay = await anonPage.goto(`/play/${row.slug}`);
-  const anonImgs = anonPlay && anonPlay.status() === 200
-    ? await anonPage.locator('img[src*="/g/"]').evaluateAll((els) => els.map((e) => e.getAttribute('src')))
-    : [];
-  for (const s of anonImgs) expect(new URL(s).searchParams.get('pt'), s).toBeNull();
+  const anonPending = await anonPage.goto(`/play/${row.slug}`);
+  expect(anonPending.status()).toBe(404);
+  expect(await anonPending.text()).not.toMatch(PT);
+
+  // /me (owner dashboard): the pending thumbnail carries the owner's token and loads (200), privately.
+  await page.goto('/me');
+  const meThumb = page.locator(`a[href="/submissions/${gameId}"] img.art`);
+  const meSrc = await meThumb.getAttribute('src');
+  expect(new URL(meSrc).searchParams.get('pt')).toBeTruthy();
+  await expect.poll(() => meThumb.evaluate((img) => img.complete && img.naturalWidth)).toBeGreaterThan(0);
+  const meRes = await page.request.get(meSrc);
+  expect(meRes.status()).toBe(200);
+  expect(meRes.headers()['cache-control']).toBe('private, no-store');
+  await page.screenshot({ path: shotPath('mr-2-me-thumb.png'), fullPage: true });
+
+  // Public stages: no viewer (anon, another user, the owner) gets a pt in the play page HTML,
+  // and the poster keeps its public cache header.
+  const other = await browser.newContext();
+  const otherPage = await other.newPage();
+  await signUp(otherPage, `${stamp}o`);
+  // Another user's /me never lists this game and carries no token; anon /me is the login redirect.
+  const otherMe = await otherPage.goto('/me');
+  const otherMeHtml = await otherMe.text();
+  expect(otherMeHtml).not.toContain(gameId);
+  expect(otherMeHtml).not.toMatch(PT);
+  await anonPage.goto('/me');
+  expect(new URL(anonPage.url()).pathname).toBe('/login');
+  const viewers = { anon: anonPage, other: otherPage, owner: page };
+  for (const stage of ['proving', 'live']) {
+    await sql`update public.games set stage = ${stage} where id = ${gameId}`;
+    for (const [who, p] of Object.entries(viewers)) {
+      const res = await p.goto(`/play/${row.slug}`);
+      expect(res.status(), `${stage}/${who}`).toBe(200);
+      expect(await res.text(), `${stage}/${who} HTML`).not.toMatch(PT);
+      const publicSrc = await p.locator('#stage img.preview-art').getAttribute('src');
+      expect(new URL(publicSrc).searchParams.get('pt'), `${stage}/${who}`).toBeNull();
+      // The CDN caches a game's stage for up to 30 s, so the first public fetch can still see 'pending'.
+      await expect.poll(async () => (await p.request.get(publicSrc)).status(), { timeout: 45_000 }).toBe(200);
+      const cc = (await p.request.get(publicSrc)).headers()['cache-control'];
+      expect(cc, `${stage}/${who} poster`).toMatch(/^public, max-age=3600/);
+    }
+    // Owner dashboard on a public stage: plain thumbnail URL, no token.
+    const ownerMe = await page.goto('/me');
+    expect(await ownerMe.text(), `${stage} /me`).not.toMatch(PT);
+  }
+  await other.close();
   await anon.close();
 });
