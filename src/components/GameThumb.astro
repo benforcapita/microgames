@@ -7,15 +7,16 @@ interface Props {
   game: Game;
   class?: string;
   eager?: boolean;
+  previewToken?: string | null;
 }
-const { game, class: className, eager = false } = Astro.props;
+const { game, class: className, eager = false, previewToken } = Astro.props;
 ---
 
 {
   game.thumb ? (
     <img
       class={className}
-      src={`${CDN_ORIGIN}/g/${game.id}/${game.thumb}`}
+      src={`${CDN_ORIGIN}/g/${game.id}/${game.thumb}${previewToken ? `?pt=${encodeURIComponent(previewToken)}` : ''}`}
       alt=""
       aria-hidden="true"
       loading={eager ? 'eager' : 'lazy'}
