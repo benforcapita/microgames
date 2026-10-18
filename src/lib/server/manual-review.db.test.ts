@@ -3,7 +3,12 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { after, before, describe, it } from 'node:test';
 import postgres from 'postgres';
-import { servedBundleVersion } from '../../../cdn/served-version.mjs';
+import { createHandler } from '../../../cdn/handler.mjs';
+import {
+  assessAssetUpload,
+  saveFinalizedAsset,
+  type AssetStorage,
+} from './asset-upload.ts';
 
 const url = process.env.DATABASE_URL ?? 'postgresql://postgres:postgres@127.0.0.1:54322/postgres';
 
@@ -53,6 +58,7 @@ const handle = `mr${userId.replace(/-/g, '').slice(0, 12)}`;
 const pendingId = `mrpend${userId.replace(/-/g, '').slice(0, 8)}`;
 const versionId = `mrver${userId.replace(/-/g, '').slice(0, 8)}`;
 const legacyId = `mrleg${userId.replace(/-/g, '').slice(0, 8)}`;
+const assetId = `mrast${userId.replace(/-/g, '').slice(0, 8)}`;
 const sha = (n: string) => n.repeat(32);
 const passReport = { status: 'pass', checks: [] as [] };
 
@@ -81,7 +87,7 @@ describe('manual review (db)', () => {
   after(async () => {
     if (!sql) return;
     try {
-      await sql`delete from public.games where id in (${pendingId}, ${versionId}, ${legacyId})`;
+      await sql`delete from public.games where id in (${pendingId}, ${versionId}, ${`${versionId}p`}, ${legacyId}, ${assetId})`;
       await sql`delete from public.profiles where id in (${userId}, ${otherId})`;
       await sql`delete from auth.users where id in (${userId}, ${otherId})`;
     } finally {
@@ -126,6 +132,9 @@ describe('manual review (db)', () => {
     const [recorded] = await sql<{ stage: string }[]>`
       select stage from public.record_game_validation(${pendingId}, ${sha('ab')}, 'passed', ${sql.json(passReport)})`;
     assert.equal(recorded?.stage, 'pending');
+    const [unstamped] = await sql<{ reviewed_at: Date | null }[]>`
+      select reviewed_at from public.games where id = ${pendingId}`;
+    assert.equal(unstamped?.reviewed_at, null);
 
     const [queued] = await sql<{ preview_link: string; handle: string }[]>`
       select handle, preview_link from public.games_awaiting_review where id = ${pendingId}`;
@@ -153,31 +162,110 @@ describe('manual review (db)', () => {
     assert.equal(hidden.status, 404);
   });
 
-  it('a new passed version does not replace the approved one until stage is set to proving again', async (t) => {
+  it('setting stage to the same public stage advances reviewed_at and does not demote the game', async (t) => {
     if (skip(t)) return;
+    for (const stage of ['proving', 'live'] as const) {
+      const id = stage === 'live' ? versionId : `${versionId}p`;
+      await sql`
+        insert into public.games (id, slug, title, creator, owner_id, stage)
+        values (${id}, ${id}, 'Reviewed', ${handle}, ${userId}, ${stage})`;
+      await sql`update public.games set reviewed_at = '2000-01-01T00:00:00Z' where id = ${id}`;
+      await sql`update public.games set stage = ${stage} where id = ${id}`;
+      const [row] = await sql<{ stage: string; reviewed_at: Date }[]>`
+        select stage, reviewed_at from public.games where id = ${id}`;
+      assert.ok(row);
+      assert.equal(row.stage, stage);
+      assert.ok(row.reviewed_at > new Date('2000-01-01T00:00:00Z'));
+      if (stage !== 'live') await sql`delete from public.games where id = ${id}`;
+    }
+  });
+
+  it('a failed validation does not stamp reviewed_at', async (t) => {
+    if (skip(t)) return;
+    const id = `mrfail${userId.replace(/-/g, '').slice(0, 8)}`;
+    try {
+      await sql`
+        insert into public.games (id, slug, title, creator, stage)
+        values (${id}, ${id}, 'Failed', 'legacy', 'pending')`;
+      const [row] = await sql<{ stage: string }[]>`
+        select stage from public.record_game_validation(${id}, ${sha('ff')}, 'failed', ${sql.json({ status: 'fail', checks: [] })})`;
+      assert.equal(row?.stage, 'rejected');
+      const [game] = await sql<{ reviewed_at: Date | null }[]>`select reviewed_at from public.games where id = ${id}`;
+      assert.equal(game?.reviewed_at, null);
+      const queued = await sql`select id from public.games_awaiting_review where id = ${id}`;
+      assert.equal(queued.length, 0);
+    } finally {
+      await sql`delete from public.games where id = ${id}`;
+    }
+  });
+
+  it('an asset upload on a public game is hidden until a reviewer publishes it again', async (t) => {
+    if (skip(t)) return;
+    const bytes = new TextEncoder().encode('const extra = 1;\n');
     await sql`
       insert into public.games (id, slug, title, creator, owner_id, stage)
-      values (${versionId}, ${versionId}, 'Versioned', ${handle}, ${userId}, 'pending')`;
-    await sql`select stage from public.record_game_validation(${versionId}, ${sha('11')}, 'passed', ${sql.json(passReport)})`;
-    await sql`update public.games set stage = 'proving' where id = ${versionId}`;
+      values (${assetId}, ${assetId}, 'Assets', ${handle}, ${userId}, 'pending')`;
+    await sql`select stage from public.record_game_validation(${assetId}, ${sha('aa')}, 'passed', ${sql.json(passReport)})`;
+    await sql`update public.games set stage = 'live' where id = ${assetId}`;
+    const [approved] = await sql<{ reviewed_at: Date }[]>`select reviewed_at from public.games where id = ${assetId}`;
+    assert.ok(approved);
+    assert.equal((await getGame(assetId))?.stage, 'live');
 
-    const before = await approvedVersion(versionId);
-    assert.equal(before, 1);
-    assert.equal((await getGame(versionId))?.stage, 'proving');
+    const decision = assessAssetUpload({
+      userId: userId,
+      ownerId: userId,
+      rawPath: 'sprites/extra.js',
+      adding: true,
+      bytes,
+      existing: null,
+      codeBytes: 100,
+      uploadedBytes: 0,
+      fileCount: 0,
+      rateAllowed: true,
+    });
+    assert.equal(decision.kind, 'store');
+    if (decision.kind !== 'store') return;
+    const storage: AssetStorage = {
+      async upload() { return { error: null }; },
+      async remove() { return { error: null }; },
+    };
+    const saved = await saveFinalizedAsset(sql, storage, assetId, 1, decision, bytes);
+    assert.deepEqual(saved, { ok: true });
 
-    const [second] = await sql<{ stage: string; version: number }[]>`
-      select stage, version from public.record_game_validation(${versionId}, ${sha('22')}, 'passed', ${sql.json(passReport)})`;
-    assert.equal(second?.stage, 'proving');
-    assert.equal(second?.version, 2);
-    assert.equal(await approvedVersion(versionId), 1, 'public version stays on the approved bundle');
-    const waiting = await sql<{ id: string }[]>`select id from public.games_awaiting_review where id = ${versionId}`;
-    assert.equal(waiting.length, 1);
+    const [held] = await sql<{ stage: string; reviewed_at: Date }[]>`
+      select stage, reviewed_at from public.games where id = ${assetId}`;
+    assert.ok(held);
+    assert.equal(held.stage, 'pending');
+    assert.equal(held.reviewed_at.getTime(), approved.reviewed_at.getTime());
+    assert.equal(await getGame(assetId), null);
+    assert.equal(await getGame(assetId, { viewerId: otherId }), null);
+    const [queued] = await sql<{ id: string }[]>`select id from public.games_awaiting_review where id = ${assetId}`;
+    assert.equal(queued?.id, assetId);
+    const [asset] = await sql<{ status: string }[]>`
+      select status from public.game_assets where game_id = ${assetId} and path = 'sprites/extra.js'`;
+    assert.equal(asset?.status, 'uploaded');
 
-    await sql`update public.games set stage = 'proving' where id = ${versionId}`;
-    assert.equal(await approvedVersion(versionId), 2);
-    const done = await sql`select id from public.games_awaiting_review where id = ${versionId}`;
-    assert.equal(done.length, 0);
-    assert.equal((await getGame(versionId))?.stage, 'proving');
+    const hidden = await cdnGet(assetId, '/g/' + assetId + '/1/sprites/extra.js', bytes);
+    assert.equal(hidden.status, 404);
+    assert.equal((await cdnGet(assetId, '/g/' + assetId + '/1/index.html', bytes)).status, 404);
+
+    await sql`update public.games set reviewed_at = '2000-01-01T00:00:00Z' where id = ${assetId}`;
+    await sql`update public.games set stage = 'live' where id = ${assetId}`;
+    const [republished] = await sql<{ stage: string; reviewed_at: Date }[]>`
+      select stage, reviewed_at from public.games where id = ${assetId}`;
+    assert.ok(republished);
+    assert.equal(republished.stage, 'live');
+    assert.ok(republished.reviewed_at > new Date('2000-01-01T00:00:00Z'));
+    assert.equal((await sql`select id from public.games_awaiting_review where id = ${assetId}`).length, 0);
+    assert.equal((await getGame(assetId))?.stage, 'live');
+
+    const shown = await cdnGet(assetId, '/g/' + assetId + '/1/sprites/extra.js', bytes);
+    assert.equal(shown.status, 200);
+    assert.match(shown.body, /const extra/);
+    const doc = await cdnGet(assetId, '/g/' + assetId + '/index.html', bytes);
+    assert.equal(doc.status, 302);
+    assert.match(doc.headers.location ?? '', new RegExp(`/g/${assetId}/1/index\\.html$`));
+    assert.equal((await cdnGet(assetId, '/g/' + assetId + '/1/index.html', bytes)).status, 200);
   });
 
   it('an already-proving game keeps its stage and is not backfilled into the queue', async (t) => {
@@ -204,27 +292,51 @@ describe('manual review (db)', () => {
         select stage from public.record_game_validation(${id}, ${sha('33')}, 'passed', ${sql.json(passReport)}, false)`;
       assert.equal(row?.stage, 'proving');
       const [game] = await sql<{ reviewed_at: Date | null }[]>`select reviewed_at from public.games where id = ${id}`;
-      assert.ok(game?.reviewed_at);
+      assert.equal(game?.reviewed_at, null);
     } finally {
       await sql`delete from public.games where id = ${id}`;
     }
   });
 });
 
-async function approvedVersion(gameId: string): Promise<number> {
-  const [game] = await sql<{ reviewed_at: Date | null }[]>`
-    select reviewed_at from public.games where id = ${gameId}`;
-  const versions = await sql<{ version: number; status: string; finished_at: Date | null }[]>`
-    select version::int as version, status, finished_at
-    from public.game_validations
-    where game_id = ${gameId}`;
-  return servedBundleVersion({
-    preview: false,
-    reviewedAt: game?.reviewed_at ? game.reviewed_at.toISOString() : null,
-    rows: versions.map((row) => ({
-      version: row.version,
-      status: row.status,
-      finished_at: row.finished_at ? row.finished_at.toISOString() : null,
-    })),
+async function cdnGet(gameId: string, path: string, bytes: Uint8Array): Promise<{ status: number; body: string; headers: Record<string, string> }> {
+  const fakeFetch = async (url: string) => {
+    const u = new URL(url);
+    if (u.pathname === '/rest/v1/games') {
+      const [row] = await sql<{ stage: string }[]>`select stage from public.games where id = ${gameId}`;
+      return Response.json(row ? [{ stage: row.stage }] : []);
+    }
+    if (u.pathname === '/rest/v1/game_validations') return Response.json([{ version: 1 }]);
+    if (u.pathname === '/rest/v1/game_assets') {
+      const assetPath = decodeURIComponent((u.searchParams.get('path') ?? '').replace(/^eq\./, ''));
+      const [row] = await sql<{ status: string }[]>`
+        select status from public.game_assets
+        where game_id = ${gameId} and version = 1 and path = ${assetPath}`;
+      return Response.json(row ? [{ status: row.status }] : []);
+    }
+    if (u.pathname.includes('/storage/')) {
+      const html = '<!doctype html><canvas id="c"></canvas>';
+      return new Response(u.pathname.endsWith('/index.html') ? html : bytes);
+    }
+    return new Response('no', { status: 404 });
+  };
+  const handle = createHandler({
+    supabaseUrl: 'http://sb.local',
+    secret: 'sb_secret_x',
+    webOrigins: 'http://127.0.0.1:4321',
+    fetch: fakeFetch as typeof fetch,
+    ttlMs: 0,
   });
+  let status = 0;
+  let body = '';
+  const headers: Record<string, string> = {};
+  const res = {
+    writeHead(s: number, h: Record<string, string>) {
+      status = s;
+      for (const [k, v] of Object.entries(h)) headers[k.toLowerCase()] = String(v);
+    },
+    end(b?: unknown) { body = b === undefined ? '' : String(b); },
+  };
+  await handle({ method: 'GET', url: path, headers: {} } as never, res as never);
+  return { status, body, headers };
 }

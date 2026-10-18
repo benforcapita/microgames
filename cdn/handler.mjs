@@ -6,14 +6,14 @@
 // cached ~30s). 'pending'/'rejected' (and unknown ids) are 404 unless the request carries `pt=<token>`
 // minted by the portal for the owner (cdn/preview-token.mjs, secret CDN_PREVIEW_SECRET). The CDN stays
 // cookieless: it never reads or sets cookies; the token travels in the query string.
-// A reviewed game serves the bundle version approved at games.reviewed_at, not a later upload.
+// The document URL version is the latest validation version (default 1). There is one stored
+// bundle; reviewed_at is not a version selector, and a review must not 404 an existing /1/ link.
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { promisify } from 'node:util';
 import zlib from 'node:zlib';
 import { frameAncestors, matchEmbedder, parseOriginList } from './frame-ancestors.mjs';
 import { verifyPreviewToken } from './preview-token.mjs';
-import { servedBundleVersion } from './served-version.mjs';
 import { gameCsp, ownAssetSource } from './csp.mjs';
 import { injectHead } from './inject.mjs';
 
@@ -215,28 +215,28 @@ export function createHandler(cfg) {
   }
 
   const loadStage = coalesce(async (id) => {
-    const res = await doFetch(`${SUPABASE_URL}/rest/v1/games?select=stage,reviewed_at&id=eq.${encodeURIComponent(id)}`, { headers });
+    const res = await doFetch(`${SUPABASE_URL}/rest/v1/games?select=stage&id=eq.${encodeURIComponent(id)}`, { headers });
     if (!res.ok) throw new Error(`stage lookup failed: HTTP ${res.status}`);
     const rows = await res.json();
-    const row = Array.isArray(rows) ? rows[0] : null;
-    return stages.set(id, {
-      stage: row?.stage ? String(row.stage) : null,
-      reviewedAt: row?.reviewed_at ? String(row.reviewed_at) : null,
-    }).value;
+    return stages.set(id, Array.isArray(rows) && rows[0]?.stage ? String(rows[0].stage) : null).value;
   });
-  /** Stage plus reviewed_at, or a null stage when the game does not exist. Throws on lookup errors. */
-  async function gameMeta(id) {
+  /** The game's stage, or null if it doesn't exist. Throws on lookup errors (not cached, fail closed). */
+  async function gameStage(id) {
     const hit = stages.get(id);
     return hit ? hit.value : loadStage(id);
   }
 
   const loadVersion = coalesce(async (id) => {
-    const res = await doFetch(`${SUPABASE_URL}/rest/v1/game_validations?select=version,status,finished_at&game_id=eq.${encodeURIComponent(id)}&order=version.desc&limit=50`, { headers });
+    const res = await doFetch(`${SUPABASE_URL}/rest/v1/game_validations?select=version&game_id=eq.${encodeURIComponent(id)}&order=version.desc&limit=1`, { headers });
     if (!res.ok) throw new Error(`version lookup failed: HTTP ${res.status}`);
     const rows = await res.json();
-    return versions.set(id, Array.isArray(rows) ? rows : []).value;
+    // Same definition the portal uses for the bundle version (asset-manifest.ts gameBundleVersion):
+    // the latest validation's version, defaulting to 1 for a game that was never validated.
+    const version = Array.isArray(rows) ? Number(rows[0]?.version) : NaN;
+    return versions.set(id, Number.isSafeInteger(version) && version >= 1 ? version : 1).value;
   });
-  async function gameVersions(id) {
+  /** The game's current bundle version. Throws on lookup errors (not cached, fail closed). */
+  async function gameVersion(id) {
     const hit = versions.get(id);
     return hit ? hit.value : loadVersion(id);
   }
@@ -279,16 +279,10 @@ export function createHandler(cfg) {
       const asset = rest.length ? parseAssetPath([file, ...rest]) : null;
       if (!asset && (!FILE_RE.test(file ?? '') || rest.length)) return send(res, 404, 'Not found');
 
-      const meta = await gameMeta(id);
-      const stage = meta?.stage ?? null;
+      const stage = await gameStage(id);
       const preview = !PUBLIC_STAGES.has(stage ?? '') && stage !== null && verifyPreviewToken(PREVIEW_SECRET, id, url.searchParams.get('pt'));
       if (!stage || (!PUBLIC_STAGES.has(stage) && !preview)) return send(res, 404, 'Not found');
       const privateCache = preview ? { 'Cache-Control': 'private, no-store' } : null;
-      const servedVersion = async () => servedBundleVersion({
-        preview: !!preview,
-        reviewedAt: meta?.reviewedAt ?? null,
-        rows: await gameVersions(id),
-      });
 
       // The game document lives at its versioned URL so relative paths resolve inside
       // /g/<id>/<version>/ — where the asset files actually are — and so the CSP can name exactly
@@ -297,14 +291,14 @@ export function createHandler(cfg) {
       // game's current one does not exist, so it is a 404.
       if (!asset) {
         if (file === 'index.html') {
-          const version = await servedVersion();
+          const version = await gameVersion(id);
           return send(res, 302, undefined, {
             Location: `/g/${id}/${version}/index.html${url.search}`,
             'Cache-Control': 'no-cache',
             ...privateCache,
           });
         }
-      } else if (asset.path === 'index.html' && asset.version !== (await servedVersion())) {
+      } else if (asset.path === 'index.html' && asset.version !== (await gameVersion(id))) {
         return send(res, 404, 'Not found');
       }
 

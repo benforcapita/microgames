@@ -5,6 +5,7 @@
  * module stops exporting them. A missing-file warning is AS-4, not this upload.
  */
 import crypto from 'node:crypto';
+import { manualReviewEnabled } from '../manual-review';
 import { createLimiter } from './abuse.ts';
 import type { AssetDb } from './asset-manifest.ts';
 import { canonicalAssetPath, extensionOf, type ExpectedType } from './asset-scan.ts';
@@ -611,6 +612,28 @@ export type AssetSaveResult =
   | { ok: false; code: 'too-big'; totalBytes: number };
 
 /**
+ * With manual review on, a public game goes back to pending before new asset bytes are
+ * recorded. The CDN stage gate then hides the file until a reviewer sets a public stage
+ * again. A rejected upload does not call this. A failed copy can leave the game pending,
+ * which keeps unreviewed bytes off the public URL.
+ */
+export async function holdApprovedGameForReview(
+  sql: AssetDb,
+  gameId: string,
+  enabled = manualReviewEnabled(),
+): Promise<boolean> {
+  if (!enabled) return false;
+  const held = await sql<{ id: string }[]>`
+    update public.games
+    set stage = 'pending'
+    where id = ${gameId}
+      and stage in ('proving', 'live')
+    returning id
+  `;
+  return held.length > 0;
+}
+
+/**
  * Reserve the row, then copy the bytes to the served object path. The DB function is
  * authoritative on the caps, so a cap loser never writes the object — there is nothing to
  * un-copy, and a replaced asset never serves new bytes under its old row. When the copy
@@ -626,6 +649,7 @@ async function storeAsset(
 ): Promise<AssetSaveResult> {
   const objectPath = assetObjectPath(gameId, version, decision.path);
   if (!objectPath) return { ok: false, code: 'storage' };
+  await holdApprovedGameForReview(sql, gameId);
   const recorded = await recordGameAsset(sql, {
     gameId,
     version,

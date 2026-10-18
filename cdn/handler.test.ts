@@ -226,50 +226,61 @@ describe('CDN delivery performance', () => {
   });
 });
 
-describe('MR-1 reviewed bundle version', () => {
-  function reviewHarness(reviewedAt: string) {
+describe('public assets follow the stage gate', () => {
+  it('serves /1/ and an uploaded script while public, and neither while pending', async () => {
+    const stages: Record<string, string> = { hold0001: 'live' };
+    const script = 'const extra = 1;\n';
     const fakeFetch = async (url: string) => {
       const u = new URL(url);
       if (u.pathname === '/rest/v1/games') {
-        return Response.json([{ stage: 'proving', reviewed_at: reviewedAt }]);
+        const id = (u.searchParams.get('id') ?? '').replace(/^eq\./, '');
+        // reviewed_at is ignored. A review must not change which /1/ URL is served.
+        return Response.json(stages[id] ? [{ stage: stages[id], reviewed_at: '2026-10-18T00:00:00.000Z' }] : []);
       }
-      if (u.pathname === '/rest/v1/game_validations') {
-        return Response.json([
-          { version: 2, status: 'passed', finished_at: '2026-10-18T01:00:00.000Z' },
-          { version: 1, status: 'passed', finished_at: '2026-10-17T00:00:00.000Z' },
-        ]);
+      if (u.pathname === '/rest/v1/game_validations') return Response.json([{ version: 1 }]);
+      if (u.pathname === '/rest/v1/game_assets') return Response.json([{ status: 'uploaded' }]);
+      if (u.pathname.includes('/storage/')) {
+        return new Response(u.pathname.endsWith('/index.html') ? '<!doctype html><canvas id="c"></canvas>' : script);
       }
-      if (u.pathname.includes('/storage/')) return new Response('<!doctype html><canvas id="c"></canvas>');
       return new Response('no', { status: 404 });
     };
-    const handle = createHandler({ supabaseUrl: 'http://sb.local', secret: 'sb_secret_x', webOrigins: PORTAL, previewSecret: SECRET, fetch: fakeFetch as typeof fetch });
+    const handle = createHandler({
+      supabaseUrl: 'http://sb.local',
+      secret: 'sb_secret_x',
+      webOrigins: PORTAL,
+      previewSecret: SECRET,
+      fetch: fakeFetch as typeof fetch,
+      ttlMs: 0,
+    });
     const get = async (path: string) => {
       let status = 0;
+      let body = '';
       const out: Record<string, string> = {};
       const res = {
         writeHead(s: number, h: Record<string, string>) { status = s; for (const [k, v] of Object.entries(h)) out[k.toLowerCase()] = String(v); },
-        end() {},
+        end(b?: unknown) { body = b === undefined ? '' : String(b); },
       };
       await handle({ method: 'GET', url: path, headers: {} } as never, res as never);
-      return { status, headers: out };
+      return { status, body, headers: out };
     };
-    return { get };
-  }
 
-  it('serves the approved version and 404s a newer pass until reviewed_at moves past it', async () => {
-    const held = reviewHarness('2026-10-18T00:00:00.000Z');
-    const redir = await held.get('/g/revhold1/index.html');
-    assert.equal(redir.status, 302);
-    assert.match(redir.headers.location ?? '', /\/g\/revhold1\/1\/index\.html$/);
-    assert.equal((await held.get('/g/revhold1/2/index.html')).status, 404);
-    assert.equal((await held.get('/g/revhold1/1/index.html')).status, 200);
-    const withToken = await held.get(`/g/revhold1/index.html?pt=${tok('revhold1')}`);
-    assert.match(withToken.headers.location ?? '', /\/g\/revhold1\/1\/index\.html/);
+    const liveDoc = await get('/g/hold0001/index.html');
+    assert.equal(liveDoc.status, 302);
+    assert.match(liveDoc.headers.location ?? '', /\/g\/hold0001\/1\/index\.html$/);
+    assert.equal((await get('/g/hold0001/1/index.html')).status, 200);
+    const liveScript = await get('/g/hold0001/1/sprites/extra.js');
+    assert.equal(liveScript.status, 200);
+    assert.match(liveScript.body, /const extra/);
 
-    const published = reviewHarness('2026-10-18T02:00:00.000Z');
-    const next = await published.get('/g/revhold1/index.html');
-    assert.match(next.headers.location ?? '', /\/g\/revhold1\/2\/index\.html$/);
-    assert.equal((await published.get('/g/revhold1/2/index.html')).status, 200);
+    stages.hold0001 = 'pending';
+    assert.equal((await get('/g/hold0001/1/index.html')).status, 404);
+    assert.equal((await get('/g/hold0001/1/sprites/extra.js')).status, 404);
+
+    stages.hold0001 = 'live';
+    assert.equal((await get('/g/hold0001/1/index.html')).status, 200);
+    assert.equal((await get('/g/hold0001/1/sprites/extra.js')).status, 200);
+    const again = await get('/g/hold0001/index.html');
+    assert.match(again.headers.location ?? '', /\/g\/hold0001\/1\/index\.html$/);
   });
 });
 

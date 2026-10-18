@@ -1,6 +1,7 @@
 ---
 import Layout from '../layouts/Layout.astro';
-import { GRADUATION } from '../lib/server/config';
+import { creatorsLiveStep } from '../lib/manual-review';
+import { GRADUATION, MANUAL_REVIEW } from '../lib/server/config';
 
 const pct = (n: number) => `${Math.round(n * 100)}%`;
 const gates = [
@@ -12,6 +13,7 @@ const gates = [
   ['Median session', `≥ ${GRADUATION.minMedianSessionSec}s`],
   ['Community rating', `≥ ${GRADUATION.minAvgRating}★ once there are ${GRADUATION.minRatingsForRatingGate}+ votes`],
 ];
+const liveStep = creatorsLiveStep(MANUAL_REVIEW);
 const snippet = `// at game over
 window.parent.postMessage({ type: 'GAME_OVER', score }, '*');
 
@@ -38,7 +40,7 @@ window.addEventListener('message', (e) => {
 
     <h2>How a game goes live</h2>
     <ol class="flow">
-      <li><b>Upload → review → the Proving Grounds.</b> A passed game waits for review, then opens for players to scout, play, and rate.</li>
+      <li><b>{liveStep.title}</b> {liveStep.body}</li>
       <li><b>Telemetry, not gatekeepers.</b> Our runtime measures every play automatically: load time, crashes, whether players actually start, whether they finish a loop, and how long they stay.</li>
       <li><b>Graduation.</b> When every check below passes, the game moves to the main arcade and other creators can fork it.</li>
     </ol>

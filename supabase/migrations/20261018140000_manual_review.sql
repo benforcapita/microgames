@@ -3,15 +3,15 @@
 -- does not update games.stage. Do not apply this file to hosted Supabase from an agent.
 
 alter table public.games
-  add column review_note text,
-  add column reviewed_at timestamptz;
+  add column if not exists review_note text,
+  add column if not exists reviewed_at timestamptz;
 
 -- Latest body is 20261015160000, plus an optional p_manual_review flag (default on).
 -- Passed + hold stays pending. Passed + flag off moves to proving. Failed still rejects.
 -- A game that is already proving or live is not demoted.
 drop function if exists public.record_game_validation(text, text, text, jsonb);
 
-create function public.record_game_validation(
+create or replace function public.record_game_validation(
   p_game_id text,
   p_sha256 text,
   p_status text,
@@ -79,6 +79,8 @@ begin
               when cur = 'pending' and p_status = 'passed' then 'proving'
               when cur = 'pending' and p_status = 'failed' then 'rejected'
               else cur end;
+  -- Automatic stage moves are not a human review, so they must not stamp reviewed_at.
+  perform set_config('meshground.skip_review_stamp', '1', true);
   if nxt <> cur then update public.games set stage = nxt where public.games.id = p_game_id; end if;
 
   if p_report->'inputSupport'->>'class' in ('mobile', 'desktop', 'both', 'unknown') then
@@ -94,7 +96,7 @@ grant execute on function public.record_game_validation(text, text, text, jsonb,
 
 drop function if exists public.apply_stored_validation(text, text);
 
-create function public.apply_stored_validation(p_game_id text, p_sha256 text, p_manual_review boolean default null)
+create or replace function public.apply_stored_validation(p_game_id text, p_sha256 text, p_manual_review boolean default null)
 returns table (stage text)
 language plpgsql
 security definer
@@ -118,6 +120,7 @@ begin
               when cur = 'pending' and st = 'passed' then 'proving'
               when cur = 'pending' and st = 'failed' then 'rejected'
               else cur end;
+  perform set_config('meshground.skip_review_stamp', '1', true);
   if nxt <> cur then update public.games set stage = nxt where public.games.id = p_game_id; end if;
   return query select nxt;
 end;
@@ -126,9 +129,10 @@ $$;
 revoke all on function public.apply_stored_validation(text, text, boolean) from public, anon, authenticated;
 grant execute on function public.apply_stored_validation(text, text, boolean) to service_role;
 
--- Setting stage to proving or rejected is the review action (table editor).
--- Re-setting proving also publishes a newer passed version: reviewed_at moves forward,
--- and the CDN serves only versions finished at or before that time.
+-- A human stage write is the review. Table-editor updates of stage to a public stage
+-- (proving or live), including setting the same stage again, stamp reviewed_at.
+-- So does a human rejection. record_game_validation sets meshground.skip_review_stamp
+-- so an automatic pass or fail does not.
 create or replace function public.touch_game_review()
 returns trigger
 language plpgsql
@@ -136,17 +140,10 @@ security definer
 set search_path = ''
 as $$
 begin
-  if new.stage = 'rejected' and old.stage is distinct from 'rejected' then
-    new.reviewed_at := now();
-  elsif new.stage = 'proving' and (
-    old.stage is distinct from 'proving'
-    or exists (
-      select 1 from public.game_validations v
-      where v.game_id = new.id
-        and v.status = 'passed'
-        and v.finished_at > coalesce(old.reviewed_at, '-infinity'::timestamptz)
-    )
-  ) then
+  if current_setting('meshground.skip_review_stamp', true) = '1' then
+    return new;
+  end if;
+  if new.stage in ('proving', 'live') or (new.stage = 'rejected' and old.stage is distinct from 'rejected') then
     new.reviewed_at := now();
   end if;
   return new;
@@ -162,7 +159,9 @@ create trigger games_touch_review
 
 -- Queue for the table editor. security_invoker so a caller cannot bypass RLS on games.
 -- Studio connects as postgres and can read it. anon, authenticated, and public cannot.
-create view public.games_awaiting_review
+-- Pending only: a passed game waiting for its first review, or a reviewed game sent back
+-- to pending (an asset change). A still-public game is not queued. Bundles are not pinned.
+create or replace view public.games_awaiting_review
 with (security_invoker = true) as
 select
   g.id,
@@ -172,21 +171,13 @@ select
   g.created_at,
   ('/play/' || g.slug) as preview_link
 from public.games g
-where (
-  g.stage = 'pending'
-  and exists (
-    select 1 from public.game_validations v
-    where v.game_id = g.id and v.status = 'passed'
-  )
-) or (
-  g.stage in ('proving', 'live')
-  and g.reviewed_at is not null
-  and exists (
-    select 1 from public.game_validations v
-    where v.game_id = g.id
-      and v.status = 'passed'
-      and v.finished_at > g.reviewed_at
-  )
-);
+where g.stage = 'pending'
+  and (
+    g.reviewed_at is not null
+    or exists (
+      select 1 from public.game_validations v
+      where v.game_id = g.id and v.status = 'passed'
+    )
+  );
 
 revoke all on table public.games_awaiting_review from public, anon, authenticated;

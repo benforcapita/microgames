@@ -11,6 +11,8 @@
  * shown inline in #asset-error. A 401 sends the owner to /login like the old endpoint did.
  */
 
+import { confirmPublicAssetChange } from '../lib/manual-review';
+
 const asRecord = (value: unknown): Record<string, unknown> | null =>
   value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
 
@@ -88,6 +90,7 @@ export function wireAssetUploads(root: HTMLElement): void {
     const rawPath = (pathInput?.value ?? '').trim();
     const btn = form.querySelector<HTMLButtonElement>('button[type="submit"]');
     if (!btn || !file) return;
+    if (!confirmPublicAssetChange(root.dataset.reviewHold === '1', (message) => window.confirm(message))) return;
 
     const label = btn.textContent ?? '';
     const say = (text: string) => (btn.textContent = text);

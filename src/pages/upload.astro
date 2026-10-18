@@ -2,7 +2,8 @@
 import Layout from '../layouts/Layout.astro';
 import CreatorPrompts from '../components/CreatorPrompts.astro';
 import { getGame } from '../lib/server/games';
-import { GAME_SIZE_LIMIT, UPLOAD } from '../lib/server/config';
+import { uploadOutcome } from '../lib/manual-review';
+import { GAME_SIZE_LIMIT, MANUAL_REVIEW, UPLOAD } from '../lib/server/config';
 
 const { profile } = Astro.locals;
 if (!profile) return Astro.redirect(`/login?mode=signup&next=${encodeURIComponent(Astro.url.pathname + Astro.url.search)}`);
@@ -18,7 +19,7 @@ const forkable = fork && fork.license !== 'All rights reserved' ? fork : null;
       <h1>{forkable ? `Fork ${forkable.title}` : 'Upload a game'}</h1>
       <p class="muted">
         One self-contained <code>.html</code> file — {GAME_SIZE_LIMIT}. Load Three.js from a CDN
-        such as jsDelivr, unpkg or esm.sh. The game stays private while validation runs. A pass waits for review, then opens in the Proving Grounds.
+        such as jsDelivr, unpkg or esm.sh. {uploadOutcome(MANUAL_REVIEW)}
       </p>
       {
         forkable && (

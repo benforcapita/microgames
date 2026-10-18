@@ -11,6 +11,7 @@
  * EF-2 trigger enqueues validate-game, and EF-1 writes the one verdict row.
  * A missing relation or a rejected insert is a real error.
  */
+import { passPublishLine } from '../manual-review';
 import { isThumbnailUploadError } from './bundle-store';
 import { normalizeTags, type Stage } from './game-rules';
 import { validateGameUpload, type ForkParent } from './upload';
@@ -105,8 +106,6 @@ export type SubmissionAccess =
 const STATUSES = new Set<ValidationStatus>(['queued', 'running', 'passed', 'failed', 'error']);
 const LEVELS = new Set<CheckLevel>(['pass', 'fail', 'warn']);
 const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
-const AUTO_PUBLISH = 'A pass waits for a reviewer before it is published.';
-
 /** Badge text. A passed game that is still pending is waiting for a person, not for the validator. */
 export function submissionStageLabel(stage: Stage, validationStatus: ValidationStatus | null): string {
   if (stage === 'pending' && validationStatus === 'passed') return 'Awaiting review';
@@ -276,8 +275,9 @@ export function buildSubmissionView(game: SubmissionGame, validation: Validation
   const checks = validation ? [...checksFrom(staticReport, 'static'), ...checksFrom(validation.runReport, 'run')] : [];
   const run = reportObject(validation?.runReport);
 
+  const publishLine = passPublishLine();
   let headline = 'Waiting';
-  let detail = `Your game is saved as pending. ${AUTO_PUBLISH}`;
+  let detail = `Your game is saved as pending. ${publishLine}`;
   if (game.stage === 'rejected') {
     headline = 'Rejected';
     detail = note || (phase === 'failed'
@@ -285,10 +285,10 @@ export function buildSubmissionView(game: SubmissionGame, validation: Validation
       : 'This game was not published.');
   } else if (phase === 'queued') {
     headline = 'Queued';
-    detail = `Validation is queued. This page updates until the run finishes. ${AUTO_PUBLISH}`;
+    detail = `Validation is queued. This page updates until the run finishes. ${publishLine}`;
   } else if (phase === 'running') {
     headline = 'Running';
-    detail = `Validation is running. ${AUTO_PUBLISH}`;
+    detail = `Validation is running. ${publishLine}`;
   } else if (phase === 'passed' && !published) {
     headline = 'Awaiting review';
     detail = 'Validation passed. A reviewer will publish this game. Only you can preview it until then.';
