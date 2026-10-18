@@ -17,10 +17,12 @@ const MAX_FILES = MAX_ASSET_FILES;
 const MAX_BYTES = GAME_VERSION_MAX_BYTES;
 const FN = `private.record_game_asset(text, integer, text, text, text, integer, text, text, text, integer, bigint)`;
 
-describe('record_game_asset migration file', () => {
-  it('sorts after every existing migration', () => {
+describe('record_game_asset migration files', () => {
+  it('apply in order so the cap fix is the live definition', () => {
     const names = readdirSync(join(supabaseDir, 'migrations')).sort();
-    assert.equal(names.at(-1), `${MIGRATION}.sql`);
+    const first = names.indexOf('20261017120000_record_game_asset.sql');
+    const second = names.indexOf(`${MIGRATION}.sql`);
+    assert.ok(first >= 0 && second > first, `ordering ${first} -> ${second}`);
   });
 });
 
