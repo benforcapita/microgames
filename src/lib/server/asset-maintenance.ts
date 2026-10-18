@@ -30,6 +30,26 @@ export interface MaintenanceStorage {
   remove(paths: string[]): Promise<{ error: { message: string } | null }>;
 }
 
+/** The bucket methods the real adapter uses — structurally compatible with StorageFileApi. */
+interface MaintenanceBucket {
+  exists(path: string): Promise<{ data: boolean; error: unknown }>;
+  remove(paths: string[]): Promise<{ data: unknown; error: { message: string } | null }>;
+}
+
+/**
+ * The one real adapter over the Supabase Storage bucket — used by scripts/asset-maintenance.mjs
+ * and the db tests so the fail-closed rule has a single implementation.
+ */
+export function maintenanceStorage(bucket: MaintenanceBucket): MaintenanceStorage {
+  return {
+    exists: async (path) => (await bucket.exists(path)).data === true,
+    remove: async (paths) => {
+      const res = await bucket.remove(paths);
+      return { error: res.error ? { message: res.error.message } : null };
+    },
+  };
+}
+
 export interface MaintenanceReport {
   stagingCandidates: number;
   stagingRemoved: number;

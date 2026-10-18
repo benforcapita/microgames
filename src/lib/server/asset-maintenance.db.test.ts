@@ -16,6 +16,7 @@ import { localSupabaseEnv } from '../../../scripts/lib/local-supabase.mjs';
 import { ASSET_STALE_AGE_MS, GAME_VERSION_MAX_BYTES, MAX_ASSET_FILES } from './asset-upload.ts';
 import {
   cleanOrphanedAssetRows,
+  maintenanceStorage,
   runAssetMaintenance,
   staleStagingObjectNames,
   sweepStaleStagingObjects,
@@ -71,7 +72,10 @@ async function connect(t: { skip: (message?: string) => void }, max = 2): Promis
   const games = createClient(env.PUBLIC_SUPABASE_URL, env.SUPABASE_SECRET_KEY, {
     auth: { persistSession: false },
   }).storage.from('games');
-  const exists = async (path: string) => (await games.exists(path)).data === true;
+  const exists = async (path: string) => {
+    const res = await games.info(path);
+    return res.data !== null;
+  };
   return {
     sql,
     exists,
@@ -79,13 +83,8 @@ async function connect(t: { skip: (message?: string) => void }, max = 2): Promis
       const res = await games.upload(path, PNG, { contentType: 'image/png' });
       assert.equal(res.error, null, `fixture upload ${path}: ${res.error?.message}`);
     },
-    storage: {
-      exists,
-      remove: async (paths) => {
-        const res = await games.remove(paths);
-        return { error: res.error ? { message: res.error.message } : null };
-      },
-    },
+    // The tests drive the same adapter the script runs — one source of truth.
+    storage: maintenanceStorage(games),
   };
 }
 
@@ -194,6 +193,18 @@ describe('private.clean_orphan_game_asset', () => {
       const fresh = { sha: SHA('c'), size: 10, updatedAt: (await uaEpoch(sql, gameId, 'fresh.png')) ?? '' };
       assert.equal(await clean(sql, gameId, 'fresh.png', fresh, olderThan), 'skipped');
       assert.equal((await rowOf(sql, gameId, 'fresh.png'))?.status, 'uploaded');
+
+      // A same-sha re-finalize bumps updated_at in record_game_asset, so the judged marker
+      // no longer matches — the CAS pin rejects the cleanup even for identical content.
+      await addAssetRow(sql, gameId, 'samesha.png', { sha: SHA('d'), sizeBytes: 10, ageHours: 3 });
+      const before = { sha: SHA('d'), size: 10, updatedAt: (await uaEpoch(sql, gameId, 'samesha.png')) ?? '' };
+      await sql`
+        select result from private.record_game_asset(
+          ${gameId}, 1, 'samesha.png', 'image', 'uploaded',
+          10, ${SHA('d')}, 'creator', null, ${MAX_ASSET_FILES}, ${GAME_VERSION_MAX_BYTES})
+      `;
+      assert.equal(await clean(sql, gameId, 'samesha.png', before, olderThan), 'skipped');
+      assert.equal((await rowOf(sql, gameId, 'samesha.png'))?.status, 'uploaded');
 
       // A deleted game's rows cascade away first — the function only reports it.
       assert.equal(await clean(sql, 'no-such-game', 'x.png', gone, olderThan), 'not-found');
@@ -365,6 +376,53 @@ describe('cleanOrphanedAssetRows', () => {
       assert.deepEqual(again.errors, []);
     } finally {
       await c.storage.remove([`${gameId}/1/live.png`]).catch(() => {});
+      await sql`delete from public.games where id = ${gameId}`.catch(() => {});
+      await sql.end({ timeout: 1 }).catch(() => {});
+    }
+  });
+
+  it('fails closed: a Storage error keeps the row and reports the error', async (t) => {
+    // The adapter must answer "missing" only on a definite not-found. A bad key returns a
+    // bare 400 from exists() — the same shape as a missing object — and a 5xx throws; in
+    // both cases the row must be KEPT and the failure land in report.errors.
+    const c = await connect(t);
+    if (!c) return;
+    const { sql } = c;
+    const gameId = await makeGame(sql);
+    const olderThan = new Date(Date.now() - ASSET_STALE_AGE_MS);
+    const url = process.env.PUBLIC_SUPABASE_URL ?? '';
+    const key = process.env.SUPABASE_SECRET_KEY ?? '';
+    try {
+      // Control: the real adapter on healthy storage deletes the genuinely missing object.
+      await addAssetRow(sql, gameId, 'gone.png', { sha: SHA('a'), sizeBytes: 10, ageHours: 3 });
+      const ok = await cleanOrphanedAssetRows(sql, c.storage, olderThan);
+      assert.ok(ok.deleted >= 1, 'control: a missing object is still collectible');
+      assert.equal(await rowOf(sql, gameId, 'gone.png'), undefined);
+
+      // Bad credentials: exists() answers data:false here — treated as "missing" by the
+      // naive adapter, this row would be deleted. Fail-closed keeps it.
+      await addAssetRow(sql, gameId, 'auth.png', { sha: SHA('b'), sizeBytes: 10, ageHours: 3 });
+      const badKey = maintenanceStorage(
+        createClient(url, 'sb_secret_definitely_wrong', { auth: { persistSession: false } }).storage.from('games'),
+      );
+      const auth = await cleanOrphanedAssetRows(sql, badKey, olderThan);
+      assert.ok(auth.errors.length > 0, 'an auth failure must be reported');
+      assert.equal((await rowOf(sql, gameId, 'auth.png'))?.status, 'uploaded', 'row kept on storage auth failure');
+
+      // Injected 5xx through the real adapter's fetch — same fail-closed path.
+      await addAssetRow(sql, gameId, 'fivehundo.png', { sha: SHA('c'), sizeBytes: 10, ageHours: 3 });
+      const failing = maintenanceStorage(
+        createClient(url, key, {
+          auth: { persistSession: false },
+          global: {
+            fetch: async () => new Response(JSON.stringify({ statusCode: '500', error: 'upstream', message: 'boom' }), { status: 500 }),
+          },
+        }).storage.from('games'),
+      );
+      const five = await cleanOrphanedAssetRows(sql, failing, olderThan);
+      assert.ok(five.errors.length > 0, 'a 5xx must be reported');
+      assert.equal((await rowOf(sql, gameId, 'fivehundo.png'))?.status, 'uploaded', 'row kept on storage 5xx');
+    } finally {
       await sql`delete from public.games where id = ${gameId}`.catch(() => {});
       await sql.end({ timeout: 1 }).catch(() => {});
     }
