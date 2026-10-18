@@ -385,6 +385,138 @@ describe('private.clean_orphan_game_asset', () => {
       await b.sql.end({ timeout: 1 }).catch(() => {});
     }
   });
+
+  it('checks the object after taking the games-row lock: one committed while it queued is seen', async (t) => {
+    // QA #79 BL-1/S4: the storage.objects existence check is part of the DELETE statement,
+    // which runs after the FOR NO KEY UPDATE wait — so it reads a fresh snapshot taken once
+    // the lock is held. If it were evaluated before the lock, an object uploaded while the
+    // cleanup queued on a live finalize's lock would be missed and the live row deleted.
+    // Two rounds, no sleeps: the object appears while B queues, then a control where
+    // nothing ever appears and the same call must delete.
+    const a = await connect(t);
+    if (!a) return;
+    const b = await connect(t);
+    if (!b) {
+      await a.sql.end({ timeout: 1 }).catch(() => {});
+      return;
+    }
+    const gameId = await makeGame(a.sql);
+    const olderThan = new Date(Date.now() - ASSET_STALE_AGE_MS);
+    try {
+      for (const { path, withObject, want } of [
+        { path: 'queued.png', withObject: true, want: 'skipped' },
+        { path: 'control.png', withObject: false, want: 'deleted' },
+      ] as const) {
+        const pin = await seededRow(a.sql, gameId, path);
+        const A = await a.sql.reserve();
+        const B = await b.sql.reserve();
+        let bCall: Promise<string | undefined> | undefined;
+        let aInTxn = false;
+        try {
+          const [{ pid: aPid }] = await A<{ pid: number }[]>`select pg_backend_pid() as pid`;
+          const [{ pid: bPid }] = await B<{ pid: number }[]>`select pg_backend_pid() as pid`;
+          // A holds the exact lock a live finalize takes on the games row.
+          await A`begin`;
+          aInTxn = true;
+          await A`select id from public.games where id = ${gameId} for no key update`;
+          bCall = clean(B, gameId, path, pin, olderThan);
+          // B must really be queued on A's lock before the object appears: poll
+          // pg_stat_activity / pg_blocking_pids for the real wait, never a sleep.
+          const deadline = Date.now() + 10_000;
+          for (;;) {
+            const [s] = await a.sql<{ wet: string | null; blockers: number[] }[]>`
+              select wait_event_type as wet, pg_blocking_pids(pid) as blockers
+              from pg_stat_activity where pid = ${bPid}
+            `;
+            if (s?.wet === 'Lock' && s.blockers?.includes(aPid)) break;
+            assert.ok(Date.now() < deadline, `clean_orphan_game_asset never queued on the games-row lock: ${JSON.stringify(s)}`);
+            await new Promise((r) => setTimeout(r, 25));
+          }
+          // Committed while B waits, independently of A and B: the delete's own snapshot,
+          // taken once B acquires the lock, must see it.
+          if (withObject) await a.upload(`${gameId}/1/${path}`);
+          await A`commit`;
+          aInTxn = false;
+          assert.equal(await bCall, want, `result with${withObject ? '' : 'out'} the object committed while queued`);
+          assert.equal(
+            (await rowOf(a.sql, gameId, path))?.status,
+            withObject ? 'uploaded' : undefined,
+            withObject ? 'the row whose object landed mid-queue must survive' : 'the control orphan must be deleted',
+          );
+        } finally {
+          if (aInTxn) await A`rollback`.catch(() => {});
+          A.release();
+          B.release();
+          await a.storage.remove([`${gameId}/1/${path}`]).catch(() => {});
+        }
+        // Settle B's promise inside the try so a failure still cleans up above.
+        await bCall.catch(() => {});
+      }
+    } finally {
+      await a.sql`delete from public.games where id = ${gameId}`.catch(() => {});
+      await a.sql.end({ timeout: 1 }).catch(() => {});
+      await b.sql.end({ timeout: 1 }).catch(() => {});
+    }
+  });
+
+  it('deletes a row when only look-alike objects exist; only the exact object name keeps it', async (t) => {
+    // QA #79 BL-3: the storage.objects check is an exact, case-sensitive match on
+    // <game>/<version>/<path> in bucket 'games' — never LIKE, never lower(). Every row
+    // whose only object is a look-alike must be DELETED (a real orphan), and only the
+    // exact-name object may keep its row.
+    const c = await connect(t);
+    if (!c) return;
+    const { sql, env } = c;
+    const siteMedia = createClient(env.PUBLIC_SUPABASE_URL, env.SUPABASE_SECRET_KEY, {
+      auth: { persistSession: false },
+    }).storage.from('site-media');
+    const gameId = await makeGame(sql);
+    const otherGameId = await makeGame(sql);
+    const olderThan = new Date(Date.now() - ASSET_STALE_AGE_MS);
+    const cases: { path: string; object: string; siteMediaObject?: boolean; want: 'skipped' | 'deleted' }[] = [
+      // Controls: the exact object — including a nested path — keeps the row.
+      { path: 'exact.png', object: `${gameId}/1/exact.png`, want: 'skipped' },
+      { path: 'dir/nested.png', object: `${gameId}/1/dir/nested.png`, want: 'skipped' },
+      // LIKE metacharacters in the stored path: only a literal match counts.
+      { path: 'a_b.png', object: `${gameId}/1/aXb.png`, want: 'deleted' },
+      { path: 'p%.png', object: `${gameId}/1/pZZ.png`, want: 'deleted' },
+      // Case, prefix+extension, deeper-in-tree, other version, staging-only, other
+      // bucket, other game: all look-alikes, all orphans.
+      { path: 'sprite.png', object: `${gameId}/1/Sprite.png`, want: 'deleted' },
+      { path: 'pre.png', object: `${gameId}/1/pre.png.bak`, want: 'deleted' },
+      { path: 'deep.png', object: `${gameId}/1/sub/deep.png`, want: 'deleted' },
+      { path: 'ver.png', object: `${gameId}/2/ver.png`, want: 'deleted' },
+      { path: 'stg.png', object: `${gameId}/_staging/stg.png`, want: 'deleted' },
+      { path: 'ob.png', object: `${gameId}/1/ob.png`, siteMediaObject: true, want: 'deleted' },
+      { path: 'og.png', object: `${otherGameId}/1/og.png`, want: 'deleted' },
+    ];
+    const uploaded = cases.map((x) => x.object);
+    try {
+      const pins = new Map<string, Awaited<ReturnType<typeof seededRow>>>();
+      for (const x of cases) {
+        pins.set(x.path, await seededRow(sql, gameId, x.path));
+        const res: { error: { message: string } | null } = x.siteMediaObject
+          ? await siteMedia.upload(x.object, PNG, { contentType: 'image/png' })
+          : await c.storage.upload(x.object, PNG, 'image/png');
+        assert.equal(res.error, null, `fixture upload ${x.object}: ${res.error?.message}`);
+      }
+      for (const x of cases) {
+        const pin = pins.get(x.path);
+        assert.ok(pin);
+        assert.equal(await clean(sql, gameId, x.path, pin, olderThan), x.want, `${x.path} (object ${x.object})`);
+        assert.equal(
+          (await rowOf(sql, gameId, x.path))?.status,
+          x.want === 'skipped' ? 'uploaded' : undefined,
+          `${x.path}: row must ${x.want === 'skipped' ? 'survive' : 'be deleted'}`,
+        );
+      }
+    } finally {
+      await c.storage.remove(uploaded.filter((_, i) => !cases[i]?.siteMediaObject)).catch(() => {});
+      await siteMedia.remove(uploaded.filter((_, i) => cases[i]?.siteMediaObject)).catch(() => {});
+      await sql`delete from public.games where id in (${gameId}, ${otherGameId})`.catch(() => {});
+      await sql.end({ timeout: 1 }).catch(() => {});
+    }
+  });
 });
 
 describe('sweepStaleStagingObjects', () => {

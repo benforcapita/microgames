@@ -425,4 +425,149 @@ describe('scripts/asset-maintenance.mjs', () => {
       await f.cleanup();
     }
   });
+
+  it('the orphan cap is exact: 20 run clean, 21 refuse and change nothing; --max-orphans moves the line', async (t) => {
+    // QA #79 BL-2: the boundary itself is the contract — a cap one higher silently lets
+    // 21 through, one lower refuses 20, and `>=` refuses the cap. A scratch database keeps
+    // the candidate universe to this test alone (a concurrent fixture elsewhere in the
+    // suite cannot shift the count) AND lets the rows really be deleted: it carries a
+    // copy of private.clean_orphan_game_asset.
+    const env = stackEnv(t);
+    if (!env) return;
+    const scratch = await scratchMaintenanceDb(env);
+    const realSql = postgres(env.DATABASE_URL, { connect_timeout: 3, max: 1 });
+    const bucket = createClient(env.PUBLIC_SUPABASE_URL, env.SUPABASE_SECRET_KEY, {
+      auth: { persistSession: false },
+    }).storage.from('games');
+    const canaryObject = `cap-canary-${randomBytes(6).toString('hex')}.png`;
+    const orphanRows = async () =>
+      (await scratch.sql<{ n: number }[]>`select count(*)::int as n from public.game_assets`)[0]?.n ?? -1;
+    const seedOrphans = async (n: number) => {
+      await scratch.sql`
+        insert into public.game_assets (game_id, version, path, status, size_bytes, content_sha256, updated_at)
+        select 'g1', 1, 'o-' || g || '.png', 'uploaded', 10, ${SHA}, now() - interval '3 hours'
+        from generate_series(1, ${n}) g`;
+    };
+    const envFor = () => ({ ...env, DATABASE_URL: scratch.url });
+    try {
+      await scratch.sql`insert into public.games (id) values ('g1')`;
+      // The canary needs one object the database lists AND the credential can see — a
+      // real object row in the real bucket (no file needed; info() sees the row).
+      await scratch.sql`insert into storage.objects (bucket_id, name) values ('games', ${canaryObject})`;
+      await realSql`insert into storage.objects (bucket_id, name) values ('games', ${canaryObject})`;
+
+      // Exactly at the cap: all 20 orphaned rows are really deleted.
+      await seedOrphans(20);
+      const atCap = await runMaintenance([], envFor());
+      assert.equal(atCap.code, 0, `stdout=${atCap.stdout} stderr=${atCap.stderr}`);
+      assert.match(atCap.stdout, /"orphanCandidates":20/, atCap.stdout);
+      assert.match(atCap.stdout, /"orphansDeleted":20/, atCap.stdout);
+      assert.equal(await orphanRows(), 0, 'exactly-at-cap orphans are all deleted');
+
+      // One over: refused — and nothing, row or object, changes.
+      await seedOrphans(21);
+      const objectsBefore = (await scratch.sql<{ n: number }[]>`select count(*)::int as n from storage.objects`)[0]?.n;
+      const refused = await runMaintenance([], envFor());
+      assert.equal(refused.code, 1, `one over the cap must refuse: stdout=${refused.stdout} stderr=${refused.stderr}`);
+      assert.match(refused.stderr, /21 orphan asset rows exceed the per-run cap of 20/i, refused.stderr);
+      assert.equal(await orphanRows(), 21, 'a refused run deletes no rows');
+      assert.equal(
+        (await scratch.sql<{ n: number }[]>`select count(*)::int as n from storage.objects`)[0]?.n,
+        objectsBefore,
+        'a refused run removes no objects',
+      );
+
+      // --max-orphans moves the line: the same 21 run clean when the cap is 21.
+      const raised = await runMaintenance(['--max-orphans', '21'], envFor());
+      assert.equal(raised.code, 0, `stdout=${raised.stdout} stderr=${raised.stderr}`);
+      assert.match(raised.stdout, /"orphansDeleted":21/, raised.stdout);
+      assert.equal(await orphanRows(), 0);
+
+      // And lowered: 6 candidates with --max-orphans 5 refuse, with 6 they run.
+      await seedOrphans(6);
+      const lowered = await runMaintenance(['--max-orphans', '5'], envFor());
+      assert.equal(lowered.code, 1, `stdout=${lowered.stdout} stderr=${lowered.stderr}`);
+      assert.match(lowered.stderr, /6 orphan asset rows exceed the per-run cap of 5/i, lowered.stderr);
+      assert.equal(await orphanRows(), 6, 'a lowered cap still refuses everything');
+      const six = await runMaintenance(['--max-orphans', '6'], envFor());
+      assert.equal(six.code, 0, `stdout=${six.stdout} stderr=${six.stderr}`);
+      assert.equal(await orphanRows(), 0);
+    } finally {
+      await bucket.remove([canaryObject]).catch(() => {});
+      await realSql.end({ timeout: 1 }).catch(() => {});
+      await scratch.drop();
+    }
+  });
+
+  it('the staging cap is exact: 200 are removed, 201 refuse and change nothing; --max-staging moves the line', async (t) => {
+    // QA #79 BL-2, staging half. The candidate listing comes from the scratch database
+    // (exact count, immune to other tests' fixtures) while the objects the pass removes
+    // are real rows in the real storage.objects — inserted fresh (created_at = now()) so
+    // they are never stale candidates in another test's global scan, but genuinely
+    // deleted through the Storage API when the run proceeds.
+    const env = stackEnv(t);
+    if (!env) return;
+    const scratch = await scratchMaintenanceDb(env);
+    const realSql = postgres(env.DATABASE_URL, { connect_timeout: 3, max: 1 });
+    const bucket = createClient(env.PUBLIC_SUPABASE_URL, env.SUPABASE_SECRET_KEY, {
+      auth: { persistSession: false },
+    }).storage.from('games');
+    const prefix = `sb${randomBytes(6).toString('hex')}`;
+    const names = (n: number) => Array.from({ length: n }, (_, i) => `${prefix}/_staging/s-${i}`);
+    const realCount = async (ns: string[]) =>
+      (await realSql<{ n: number }[]>`select count(*)::int as n from storage.objects where bucket_id = 'games' and name = any(${ns})`)[0]
+        ?.n ?? -1;
+    const seedStaging = async (n: number) => {
+      const ns = names(n);
+      // The scratch rows are the candidate universe and are never touched by the API —
+      // reset them so each sub-case's count is exact.
+      await scratch.sql`delete from storage.objects`;
+      await realSql`insert into storage.objects (bucket_id, name, created_at) select 'games', n, now() from unnest(${ns}::text[]) n`;
+      await scratch.sql`insert into storage.objects (bucket_id, name, created_at) select 'games', n, now() - interval '3 hours' from unnest(${ns}::text[]) n`;
+      return ns;
+    };
+    const envFor = () => ({ ...env, DATABASE_URL: scratch.url });
+    try {
+      // Exactly at the cap: all 200 objects are removed through the Storage API.
+      const n200 = await seedStaging(200);
+      const atCap = await runMaintenance([], envFor());
+      assert.equal(atCap.code, 0, `stdout=${atCap.stdout} stderr=${atCap.stderr}`);
+      assert.match(atCap.stdout, /"stagingCandidates":200/, atCap.stdout);
+      assert.match(atCap.stdout, /"stagingRemoved":200/, atCap.stdout);
+      assert.equal(await realCount(n200), 0, 'every at-cap staging object is removed');
+
+      // One over: refused — and nothing, row or object, changes.
+      const n201 = await seedStaging(201);
+      const refused = await runMaintenance([], envFor());
+      assert.equal(refused.code, 1, `one over the cap must refuse: stdout=${refused.stdout} stderr=${refused.stderr}`);
+      assert.match(refused.stderr, /201 stale staging objects exceed the per-run cap of 200/i, refused.stderr);
+      assert.equal(await realCount(n201), 201, 'a refused run removes no objects');
+      assert.equal(
+        (await scratch.sql<{ n: number }[]>`select count(*)::int as n from storage.objects`)[0]?.n,
+        201,
+        'a refused run touches no object rows',
+      );
+
+      // --max-staging moves the line: the same 201 are removed when the cap is 201.
+      const raised = await runMaintenance(['--max-staging', '201'], envFor());
+      assert.equal(raised.code, 0, `stdout=${raised.stdout} stderr=${raised.stderr}`);
+      assert.match(raised.stdout, /"stagingRemoved":201/, raised.stdout);
+      assert.equal(await realCount(n201), 0);
+
+      // And lowered: 6 candidates with --max-staging 5 refuse, with 6 they run.
+      const n6 = await seedStaging(6);
+      const lowered = await runMaintenance(['--max-staging', '5'], envFor());
+      assert.equal(lowered.code, 1, `stdout=${lowered.stdout} stderr=${lowered.stderr}`);
+      assert.match(lowered.stderr, /6 stale staging objects exceed the per-run cap of 5/i, lowered.stderr);
+      assert.equal(await realCount(n6), 6, 'a lowered cap still refuses everything');
+      const six = await runMaintenance(['--max-staging', '6'], envFor());
+      assert.equal(six.code, 0, `stdout=${six.stdout} stderr=${six.stderr}`);
+      assert.equal(await realCount(n6), 0);
+    } finally {
+      // names(201) is the superset of every seeded name; API-remove whatever is left.
+      await bucket.remove(names(201)).catch(() => {});
+      await realSql.end({ timeout: 1 }).catch(() => {});
+      await scratch.drop();
+    }
+  });
 });
