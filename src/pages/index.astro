@@ -2,12 +2,15 @@
 import Layout from '../layouts/Layout.astro';
 import GameCard from '../components/GameCard.astro';
 import GameThumb from '../components/GameThumb.astro';
+import { homeCreatorSentence } from '../lib/manual-review';
+import { readManualReview } from '../lib/server/manual-review';
 import { listGames, platformStats } from '../lib/server/games';
 import { compact } from '../lib/format';
 import { getContent, getFeatured } from '../lib/server/content';
 
 // PV-1: only listable games (isListable in game-rules.ts) appear here; proving games are share-by-link only.
 const device = Astro.locals.device;
+const manualReview = await readManualReview();
 const [live, stats, copy, banner, featured] = await Promise.all([
   listGames({ stage: 'live', sort: 'top', limit: 8, device }),
   platformStats(device),
@@ -117,7 +120,7 @@ const loggedIn = !!Astro.locals.user;
         <span class="eyebrow">For creators</span>
         <h2>Built it with Claude, Cursor or by hand? Ship it here.</h2>
         <p class="muted">
-          Upload one HTML file and it goes live right away. Pass the Proving Grounds and your game graduates to the main arcade.
+          {homeCreatorSentence(manualReview)}
         </p>
         <div class="row">
           <a class="btn" href="/upload">Upload a game</a>

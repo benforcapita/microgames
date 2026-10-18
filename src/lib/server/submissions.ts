@@ -2,7 +2,7 @@
  * SP-5 submission flow. Upload saves a game as `pending` and the owner watches
  * `/submissions/[id]`, which polls `game_validations` until the run finishes.
  *
- * Passing validation auto-publishes on the server (EF-1/EF-2). This module never
+ * A pass stays pending while manual review is on (the default). This module never
  * offers a publish action; the page only reflects `games.stage`.
  *
  * `games.stage` accepts `pending` and `game_validations` is on main (SP-3). Reads
@@ -11,6 +11,8 @@
  * EF-2 trigger enqueues validate-game, and EF-1 writes the one verdict row.
  * A missing relation or a rejected insert is a real error.
  */
+import { passPublishLine } from '../manual-review';
+import { readManualReview } from './manual-review';
 import { isThumbnailUploadError } from './bundle-store';
 import { normalizeTags, type Stage } from './game-rules';
 import { validateGameUpload, type ForkParent } from './upload';
@@ -33,6 +35,7 @@ export interface SubmissionGame {
   title: string;
   ownerId: string | null;
   stage: Stage;
+  reviewNote?: string | null;
 }
 
 /** Row shape shared by the spec and the SP-3 draft (no `gh_run_id`, no `bundle_sha256`). */
@@ -68,7 +71,7 @@ export interface PendingGameInput {
 }
 
 export interface SubmissionView {
-  game: { id: string; slug: string; title: string; stage: Stage };
+  game: { id: string; slug: string; title: string; stage: Stage; reviewNote: string | null };
   validation: {
     id: string;
     version: number;
@@ -104,7 +107,14 @@ export type SubmissionAccess =
 const STATUSES = new Set<ValidationStatus>(['queued', 'running', 'passed', 'failed', 'error']);
 const LEVELS = new Set<CheckLevel>(['pass', 'fail', 'warn']);
 const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
-const AUTO_PUBLISH = 'A pass is published to the Proving Grounds automatically.';
+/** Badge text. A passed game that is still pending is waiting for a person, not for the validator. */
+export function submissionStageLabel(stage: Stage, validationStatus: ValidationStatus | null): string {
+  if (stage === 'pending' && validationStatus === 'passed') return 'Awaiting review';
+  if (stage === 'pending') return 'Pending';
+  if (stage === 'proving') return 'Proving Grounds';
+  if (stage === 'live') return 'Live';
+  return 'Rejected';
+}
 /** Verdicts that must never sit on a row whose status is still `queued`. */
 const FAKE_QUEUED_VERDICTS = new Set(['pass', 'fail', 'passed', 'failed', 'warn']);
 
@@ -231,6 +241,8 @@ export async function readSubmission(opts: {
   userId: string | null;
   gameId: string;
   store: SubmissionStore;
+  /** In-memory tests pass this. Omitted means the database row. */
+  manualReview?: boolean;
 }): Promise<SubmissionAccess> {
   if (!opts.userId) return { status: 401, error: 'Log in to view this submission.' };
   if (!ID_RE.test(opts.gameId)) return { status: 404, error: 'Not found' };
@@ -239,13 +251,15 @@ export async function readSubmission(opts: {
   if (!game || game.ownerId !== opts.userId) return { status: 404, error: 'Not found' };
 
   const validation = await opts.store.latestValidation(game.id);
-  return { status: 200, view: buildSubmissionView(game, validation) };
+  const manualReview = opts.manualReview ?? await readManualReview();
+  return { status: 200, view: buildSubmissionView(game, validation, manualReview) };
 }
 
 export async function handleSubmissionStatus(opts: {
   userId: string | null;
   gameId: string;
   store: SubmissionStore;
+  manualReview?: boolean;
 }): Promise<Response> {
   const result = await readSubmission(opts);
   if (result.status !== 200) {
@@ -254,28 +268,39 @@ export async function handleSubmissionStatus(opts: {
   return Response.json(result.view, { headers: { 'Cache-Control': 'no-store' } });
 }
 
-export function buildSubmissionView(game: SubmissionGame, validation: ValidationRow | null): SubmissionView {
+export function buildSubmissionView(
+  game: SubmissionGame,
+  validation: ValidationRow | null,
+  manualReview = true,
+): SubmissionView {
   const published = game.stage === 'proving' || game.stage === 'live';
   const status = validation?.status ?? null;
   const phase: SubmissionView['phase'] = status ?? 'waiting';
-  const terminal = status === 'failed' || status === 'error' || (status === 'passed' && game.stage !== 'pending');
+  const terminal = game.stage === 'rejected' || status === 'failed' || status === 'error' || (status === 'passed' && game.stage !== 'pending');
+  const note = game.reviewNote?.trim() ?? '';
   const staticReport = validation?.status === 'queued'
     ? coerceQueuedStaticReport(validation.staticReport)
     : validation?.staticReport;
   const checks = validation ? [...checksFrom(staticReport, 'static'), ...checksFrom(validation.runReport, 'run')] : [];
   const run = reportObject(validation?.runReport);
 
+  const publishLine = passPublishLine(manualReview);
   let headline = 'Waiting';
-  let detail = `Your game is saved as pending. ${AUTO_PUBLISH}`;
-  if (phase === 'queued') {
+  let detail = `Your game is saved as pending. ${publishLine}`;
+  if (game.stage === 'rejected') {
+    headline = 'Rejected';
+    detail = note || (phase === 'failed'
+      ? 'Fix the failed checks and submit again. Nothing was published.'
+      : 'This game was not published.');
+  } else if (phase === 'queued') {
     headline = 'Queued';
-    detail = `Validation is queued. This page updates until the run finishes. ${AUTO_PUBLISH}`;
+    detail = `Validation is queued. This page updates until the run finishes. ${publishLine}`;
   } else if (phase === 'running') {
     headline = 'Running';
-    detail = `Validation is running. ${AUTO_PUBLISH}`;
+    detail = `Validation is running. ${publishLine}`;
   } else if (phase === 'passed' && !published) {
-    headline = 'Passed';
-    detail = 'Every required check passed. Publishing to the Proving Grounds now.';
+    headline = 'Awaiting review';
+    detail = 'Validation passed. A reviewer will publish this game. Only you can preview it until then.';
   } else if (phase === 'passed' && published) {
     headline = 'Published';
     detail = game.stage === 'live'
@@ -290,7 +315,7 @@ export function buildSubmissionView(game: SubmissionGame, validation: Validation
   }
 
   const view: SubmissionView = {
-    game: { id: game.id, slug: game.slug, title: game.title, stage: game.stage },
+    game: { id: game.id, slug: game.slug, title: game.title, stage: game.stage, reviewNote: note || null },
     validation: validation
       ? {
           id: validation.id,

@@ -102,6 +102,8 @@ interface Fixture {
   gameId: string;
   stale: string[];
   cleanup: () => Promise<void>;
+  freshen: () => Promise<void>;
+  reage: () => Promise<void>;
   rowCount: () => Promise<number>;
   rowStatus: (path: string) => Promise<string | undefined>;
   objectListed: (name: string) => Promise<boolean>;
@@ -160,6 +162,21 @@ async function seed(env: Env, opts: { orphans?: number; live?: number; staging?:
         ?.status,
     objectListed: async (name) =>
       (await sql`select 1 as x from storage.objects where bucket_id = 'games' and name = ${name}`).length > 0,
+    // The DB maintenance tests sweep every stale orphan and staging object on this
+    // database. A dry run has to observe rows that are not candidates yet, then age
+    // them for the real run, or a parallel sweep deletes them first.
+    freshen: async () => {
+      await sql`update public.game_assets set updated_at = now() where game_id = ${gameId}`;
+      await sql`update storage.objects set created_at = now() where bucket_id = 'games' and name like ${`${gameId}/%`}`;
+    },
+    reage: async () => {
+      await sql`
+        update public.game_assets set updated_at = now() - interval '3 hours'
+        where game_id = ${gameId} and path like 'orphan-%'`;
+      for (const name of stale) {
+        await sql`update storage.objects set created_at = now() - interval '3 hours' where bucket_id = 'games' and name = ${name}`;
+      }
+    },
     cleanup: async () => {
       await bucket.remove(objectNames).catch(() => {});
       await sql`delete from public.games where id = ${gameId}`.catch(() => {});
@@ -225,6 +242,7 @@ describe('scripts/asset-maintenance.mjs', () => {
     if (!env) return;
     const f = await seed(env, { orphans: 1, live: 1, staging: 1 });
     try {
+      await f.freshen();
       const dry = await runMaintenance(['--dry-run'], env, { npm: true, timeoutMs: 90_000 });
       assert.equal(dry.code, 0, `stdout=${dry.stdout} stderr=${dry.stderr}`);
       assert.match(dry.stdout, /dryRun|dry run/i);
@@ -233,6 +251,7 @@ describe('scripts/asset-maintenance.mjs', () => {
       assert.equal(await f.objectListed(f.stale[0] ?? ''), true, 'dry run must remove no staging objects');
 
       // The paired real run still does its job, so the dry run is proving the flag, not a dead script.
+      await f.reage();
       const real = await runMaintenance([], env);
       assert.equal(real.code, 0, `stderr=${real.stderr}`);
       assert.equal(await f.rowCount(), 1, 'the orphan row is deleted, the live row kept');

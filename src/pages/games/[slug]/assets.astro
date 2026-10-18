@@ -1,5 +1,6 @@
 ---
 import Layout from '../../../layouts/Layout.astro';
+import { ASSET_REVIEW_HOLD } from '../../../lib/manual-review';
 import { gameBundleVersion } from '../../../lib/server/asset-manifest';
 import {
   GAME_VERSION_MAX_BYTES,
@@ -9,7 +10,9 @@ import {
   formatBytes,
   listGameAssets,
 } from '../../../lib/server/asset-upload';
+import { readManualReview } from '../../../lib/server/manual-review';
 import { sql } from '../../../lib/server/db';
+import { isPublicStage } from '../../../lib/server/game-rules';
 import { getGame } from '../../../lib/server/games';
 
 const NO_STORE = 'private, no-store';
@@ -31,10 +34,11 @@ const usage = await assetUsage(sql, game.id, version);
 const flash = assetFlashMessage(Astro.url.searchParams, rows.map((row) => row.path));
 const total = usage.codeBytes + usage.uploadedBytes;
 const action = `/api/games/${encodeURIComponent(slug)}/assets`;
+const reviewHold = (await readManualReview()) && isPublicStage(game.stage);
 ---
 
 <Layout title={`${game.title} files`} noindex>
-  <section class="section wrap assets" data-assets-api={action} data-assets-page={page}>
+  <section class="section wrap assets" data-assets-api={action} data-assets-page={page} data-review-hold={reviewHold ? '1' : undefined}>
     <span class="eyebrow">Game files</span>
     <h1>{game.title}</h1>
     <p class="muted">
@@ -42,6 +46,7 @@ const action = `/api/games/${encodeURIComponent(slug)}/assets`;
       Whole game, code plus assets, under 4 MB; assets over 100 KB get a warning.
     </p>
     <p><a href="/me">Back to your games</a></p>
+    {reviewHold && <p class="panel flash warn" role="status">{ASSET_REVIEW_HOLD}</p>}
 
     {flash.error && <p class="panel flash bad" role="alert">{flash.error}</p>}
     {flash.notice && <p class:list={['panel', 'flash', 'ok', Astro.url.searchParams.get('warn') === '1' && 'warn']} role="status">{flash.notice}</p>}

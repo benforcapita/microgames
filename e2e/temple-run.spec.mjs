@@ -2,8 +2,8 @@
 // person does it — sign in, post the real /upload form, watch validation finish, then play the published
 // game in the shared player and use its fullscreen button.
 //
-// Validation transport: `pending -> proving` is normally done by the `validate-game` Edge Function, which
-// pg_net calls. The local stack starts without edge-runtime and without `private.settings.validate_game_url`
+// Validation transport: a pass stays `pending` until `approveGame` sets stage to proving (the table-editor
+// action). The `validate-game` Edge Function normally does the check via pg_net. The local stack starts without edge-runtime and without `private.settings.validate_game_url`
 // (see .cursor/skills/verify-meshgrounds/features/upload-submission.md), so nothing would ever pick the job
 // up here. This spec therefore runs the Edge Function's own module (supabase/functions/validate-game) in
 // process against the real Storage bundle and the real `record_game_validation` RPC: the verdict and the
@@ -18,6 +18,7 @@ import { shotPath, SHOT_DIR } from './shots.mjs';
 import { localSupabaseEnv } from '../scripts/lib/local-supabase.mjs';
 import { validateGame } from '../supabase/functions/validate-game/validate.ts';
 import { createRestStore } from '../supabase/functions/validate-game/rest-store.ts';
+import { approveGame } from './approve-game.mjs';
 
 const FIXTURE = path.join(import.meta.dirname, 'fixtures', 'temple-run');
 const CDN = `http://127.0.0.1:${process.env.E2E_CDN_PORT ?? 4722}`;
@@ -126,7 +127,8 @@ test('Temple Dash: upload form -> validation passes -> plays on the CDN -> fulls
     expect(result.httpStatus, JSON.stringify(result.body)).toBe(200);
     expect(result.body.status).toBe('passed');
     expect(result.body.failed).toEqual([]);
-    expect(result.body.stage).toBe('proving');
+    expect(result.body.stage).toBe('pending');
+    await approveGame(gameId);
 
     // The page polls on its own; no reload from the test.
     await expect(page.locator('#submission .badge.phase')).toHaveText(/Passed|Published/, { timeout: 60_000 });

@@ -336,7 +336,7 @@ describe('queued validation rows', () => {
 describe('submission status endpoint', () => {
   it('returns check results to the owner and hides the game from everyone else', async () => {
     const store = memory(game(), validation());
-    const res = await handleSubmissionStatus({ userId: 'owner-1', gameId: 'game1234', store });
+    const res = await handleSubmissionStatus({ userId: 'owner-1', gameId: 'game1234', store, manualReview: true });
     assert.equal(res.status, 200);
     const body = await res.json();
     assert.equal(body.game.title, 'Sky Loop');
@@ -372,9 +372,14 @@ describe('submission status endpoint', () => {
     const pending = buildSubmissionView(game(), validation({ status: 'passed', finishedAt: '2026-10-15T09:05:00.000Z' }));
     assert.equal(pending.terminal, false);
     assert.equal(pending.published, false);
-    assert.equal(pending.headline, 'Passed');
-    assert.match(pending.detail, /Publishing to the Proving Grounds/);
+    assert.equal(pending.headline, 'Awaiting review');
+    assert.match(pending.detail, /reviewer/);
+    assert.equal(pending.game.reviewNote, null);
     assert.equal('publish' in pending, false);
+
+    const queued = buildSubmissionView(game(), validation({ status: 'queued' }), false);
+    assert.match(queued.detail, /automatically/);
+    assert.doesNotMatch(queued.detail, /reviewer/);
 
     const live = buildSubmissionView(game({ stage: 'proving' }), validation({ status: 'passed' }));
     assert.equal(live.terminal, true);
@@ -384,11 +389,20 @@ describe('submission status endpoint', () => {
     assert.equal(failed.terminal, true);
     assert.equal(failed.published, false);
     assert.match(failed.detail, /Nothing was published/);
+
+    const noted = buildSubmissionView(
+      game({ stage: 'rejected', reviewNote: 'The pause button never shows up.' }),
+      validation({ status: 'passed' }),
+    );
+    assert.equal(noted.terminal, true);
+    assert.equal(noted.headline, 'Rejected');
+    assert.equal(noted.detail, 'The pause button never shows up.');
+    assert.equal(noted.game.reviewNote, 'The pause button never shows up.');
   });
 
   it('returns no validation row while the owner is still waiting', async () => {
     const store = memory(game(), null);
-    const res = await handleSubmissionStatus({ userId: 'owner-1', gameId: 'game1234', store });
+    const res = await handleSubmissionStatus({ userId: 'owner-1', gameId: 'game1234', store, manualReview: true });
     const body = await res.json();
     assert.equal(res.status, 200);
     assert.equal(body.validation, null);

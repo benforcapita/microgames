@@ -22,6 +22,7 @@ import { shotPath, SHOT_DIR } from './shots.mjs';
 import { localSupabaseEnv } from '../scripts/lib/local-supabase.mjs';
 import { validateGame } from '../supabase/functions/validate-game/validate.ts';
 import { createRestStore } from '../supabase/functions/validate-game/rest-store.ts';
+import { approveGame } from './approve-game.mjs';
 
 const FIXTURE = path.join(import.meta.dirname, 'fixtures', 'temple-run-multi');
 const WEB = `http://127.0.0.1:${process.env.E2E_WEB_PORT ?? 4721}`;
@@ -187,7 +188,8 @@ test('Temple Dash multi-file: upload, add files on the Files page, every asset l
     expect(result.httpStatus, JSON.stringify(result.body)).toBe(200);
     expect(result.body.status).toBe('passed');
     expect(result.body.failed).toEqual([]);
-    expect(result.body.stage).toBe('proving');
+    expect(result.body.stage).toBe('pending');
+    await approveGame(gameId);
   });
 
   // Only what happens from here on is judged: the play page, the game frame and its asset requests.

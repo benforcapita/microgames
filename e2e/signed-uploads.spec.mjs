@@ -9,6 +9,7 @@ import postgres from 'postgres';
 import { createClient } from '@supabase/supabase-js';
 import { localSupabaseEnv } from '../scripts/lib/local-supabase.mjs';
 import { GAME_VERSION_MAX_BYTES } from '../src/lib/asset-limits.ts';
+import { approveGame } from './approve-game.mjs';
 import { mintAssetUploadId } from '../src/lib/server/asset-sign.ts';
 import { ASSET_UPLOAD_ID_TTL_MS } from '../src/lib/server/asset-upload.ts';
 
@@ -288,6 +289,9 @@ test('UP-2a happy path: sign -> PUT -> finalize -> row -> CDN 200', async () => 
   expect(row?.size_bytes).toBe(SMALL_WAV.length);
   expect(await objectExists(uploadPath), 'staged object is consumed').toBe(false);
 
+  // The upload demoted the proving game. Approve after the row exists so reviewed_at
+  // is not older than the asset.
+  await approveGame(game.id, sql);
   const res = await fetch(assetUrl(game.id, 'sfx/jump.wav'));
   expect(res.status).toBe(200);
   expect(res.headers.get('content-type')).toBe('audio/wav');
@@ -307,6 +311,7 @@ test('UP-2a signed URL cannot replace a finalized asset without finalize', async
   const one = await s1.json();
   expect((await putSigned(one.url, v1, 'audio/wav')).status).toBe(200);
   expect((await finalize(c, game.slug, { path: 'sfx/beep.wav', uploadId: one.uploadId })).status()).toBe(200);
+  await approveGame(game.id, sql);
   const first = await fetch(assetUrl(game.id, 'sfx/beep.wav'));
   expect(Buffer.from(await first.arrayBuffer()).equals(v1)).toBe(true);
 
@@ -464,6 +469,31 @@ test('UP-2a finalize re-checks the whole-version 4 MB cap', async () => {
   }
   const [count] = await sql`select count(*)::int as n from public.game_assets where game_id = ${game.id} and version = 1 and status = 'uploaded'`;
   expect(count.n, 'only the two admitted files count toward the version').toBe(2);
+  await c.dispose();
+});
+
+test('an upload to an approved game is 404 for anon immediately, with no cache window', async () => {
+  const c = await ctx();
+  await signup(c, 'leak');
+  const game = await uploadGame(c, `UP2a leak ${uniq()}`);
+  await approveGame(game.id, sql);
+
+  const warm = await fetch(`${CDN}/g/${game.id}/index.html`, { redirect: 'manual' });
+  expect([200, 302]).toContain(warm.status);
+  await warm.arrayBuffer().catch(() => {});
+
+  const body = Buffer.from('const extra = 1;\n');
+  const s = await sign(c, game.slug, { path: 'sprites/extra.js', size: body.length, contentType: 'text/javascript' });
+  expect(s.status()).toBe(200);
+  const signed = await s.json();
+  expect((await putSigned(signed.url, body, 'text/javascript')).status).toBe(200);
+  expect((await finalize(c, game.slug, { path: 'sprites/extra.js', uploadId: signed.uploadId })).status()).toBe(200);
+
+  const hidden = await fetch(assetUrl(game.id, 'sprites/extra.js'));
+  expect(hidden.status).toBe(404);
+  const cache = hidden.headers.get('cache-control') ?? '';
+  expect(cache).not.toContain('immutable');
+  expect(cache).not.toContain('31536000');
   await c.dispose();
 });
 

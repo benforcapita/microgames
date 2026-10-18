@@ -118,7 +118,7 @@ describe('one game_validations row per attempt', () => {
         `;
         assert.equal(first?.status, 'passed');
         assert.equal(first?.version, 1);
-        assert.equal(first?.stage, 'proving');
+        assert.equal(first?.stage, 'pending');
 
         const again = await tx`
           select id from public.record_game_validation(${id}, ${shaA}, 'passed', ${tx.json({ status: 'pass', checks: [] })})
@@ -208,7 +208,7 @@ describe('one game_validations row per attempt', () => {
         assert.equal(row?.id, queued?.id);
         assert.equal(row?.status, 'passed');
         assert.equal(row?.version, 1);
-        assert.equal(row?.stage, 'proving');
+        assert.equal(row?.stage, 'pending');
 
         const left = await tx<{ id: string; status: string; version: number; bundle_sha256: string | null }[]>`
           select id, status, version, bundle_sha256
@@ -225,7 +225,7 @@ describe('one game_validations row per attempt', () => {
           select input_support, stage from public.games where id = ${id}
         `;
         assert.equal(game?.input_support, 'mobile');
-        assert.equal(game?.stage, 'proving');
+        assert.equal(game?.stage, 'pending');
       });
     } finally {
       await sql.end({ timeout: 1 });

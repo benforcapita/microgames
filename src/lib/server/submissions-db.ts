@@ -18,6 +18,7 @@ interface GameHit {
   title: string;
   owner_id: string | null;
   stage: Stage;
+  review_note: string | null;
 }
 
 interface ValidationHit {
@@ -35,9 +36,9 @@ interface ValidationHit {
 export const sqlSubmissionStore: SubmissionStore = {
   async getGame(id) {
     const [row] = await sql<GameHit[]>`
-      select id, slug, title, owner_id, stage from games where id = ${id}`;
+      select id, slug, title, owner_id, stage, review_note from games where id = ${id}`;
     if (!row) return null;
-    return { id: row.id, slug: row.slug, title: row.title, ownerId: row.owner_id, stage: row.stage };
+    return { id: row.id, slug: row.slug, title: row.title, ownerId: row.owner_id, stage: row.stage, reviewNote: row.review_note };
   },
   async latestValidation(gameId) {
     const rows = await sql<ValidationHit[]>`

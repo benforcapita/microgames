@@ -6,6 +6,13 @@
 // cached ~30s). 'pending'/'rejected' (and unknown ids) are 404 unless the request carries `pt=<token>`
 // minted by the portal for the owner (cdn/preview-token.mjs, secret CDN_PREVIEW_SECRET). The CDN stays
 // cookieless: it never reads or sets cookies; the token travels in the query string.
+// The document URL version is the latest validation version (default 1). There is one stored
+// bundle; reviewed_at is not a version selector, and a review must not 404 an existing /1/ link.
+// A non-document asset does not trust the stage cache. Each request re-reads the asset row
+// joined to games.stage and games.reviewed_at, and serves it only when that stage is public
+// and content_at <= reviewed_at. content_at is set after the Storage copy, so an approval
+// that lands during the copy does not cover the new bytes. A valid owner token (pt) is
+// never publicly cached.
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { promisify } from 'node:util';
@@ -39,8 +46,8 @@ export const ASSET_MIME = {
   txt: 'text/plain; charset=utf-8',
 };
 const COMPRESSIBLE = new Set(['html', 'svg', 'json', 'txt', 'ttf', 'otf', 'wav', 'ico', 'js', 'mjs', 'css', 'wasm']);
-export const IMMUTABLE = 'public, max-age=31536000, immutable';
-// Proving games can still be rejected/replaced, so their assets must not be pinned in shared caches for a year.
+// Owner-replaceable assets must not be pinned. A short revalidating cache is the longest
+// a shared cache may keep bytes that an upload can replace.
 export const SHORT_CACHE = 'public, max-age=60, must-revalidate';
 const HOST_RE = /^[A-Za-z0-9.-]+(:\d{1,5})?$/;
 // game_assets.version is an int column: only a plain decimal version is a real path. Anything else
@@ -99,6 +106,46 @@ export function pickEncoding(acceptEncoding) {
 
 /** ETag match per RFC 9110 (weak comparison, `*` matches anything). */
 const etagMatches = (header, etag) => !!header && header.split(',').some((t) => { t = t.trim(); return t === '*' || t.replace(/^W\//, '') === etag; });
+
+function embeddedGame(row) {
+  const games = row?.games;
+  if (Array.isArray(games)) return games[0] ?? null;
+  if (games && typeof games === 'object') return games;
+  return null;
+}
+
+/**
+ * Microseconds since epoch. Date.parse keeps only milliseconds, which would treat a
+ * content_at a few hundred microseconds after reviewed_at as already approved.
+ */
+function instantUs(value) {
+  if (value == null || value === '') return NaN;
+  const s = String(value).trim();
+  const m = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})(?:\.(\d+))?((?:Z|[+-]\d{2}(?::?\d{2})?))?$/.exec(s);
+  if (!m) {
+    const ms = Date.parse(s);
+    return Number.isFinite(ms) ? ms * 1000 : NaN;
+  }
+  const digits = m[3] ?? '';
+  const tz = m[4] || 'Z';
+  const zone = tz === 'Z' ? 'Z' : /^([+-])(\d{2})(?::?(\d{2}))?$/.test(tz)
+    ? tz.replace(/^([+-])(\d{2}):?(\d{2})?$/, (_, sign, hh, mm) => `${sign}${hh}:${mm ?? '00'}`)
+    : 'Z';
+  const ms = Date.parse(`${m[1]}T${m[2]}.${digits.slice(0, 3).padEnd(3, '0')}${zone}`);
+  if (!Number.isFinite(ms)) return NaN;
+  const extra = digits.length > 3 ? Number(digits.slice(3, 6).padEnd(3, '0')) : 0;
+  return ms * 1000 + extra;
+}
+
+/** Public bytes: uploaded, joined stage proving or live, and content_at <= reviewed_at. Nulls fail closed. */
+function assetIsPublic(row) {
+  if (!row || row.status !== 'uploaded') return false;
+  const game = embeddedGame(row);
+  if (!game || !PUBLIC_STAGES.has(String(game.stage ?? ''))) return false;
+  const contentAt = instantUs(row.content_at);
+  const reviewed = instantUs(game.reviewed_at);
+  return Number.isFinite(contentAt) && Number.isFinite(reviewed) && contentAt <= reviewed;
+}
 
 const base = {
   'X-Content-Type-Options': 'nosniff',
@@ -180,9 +227,9 @@ export function createHandler(cfg) {
   };
   const doFetch = cfg.fetch ?? fetch;
   const now = cfg.now ?? Date.now;
-  // TTL caches so popular games don't hit Storage/PostgREST on every play. The stage TTL is the access-control
-  // window (keep it short). Bundle objects are write-once per game id, so they can live longer; the stage gate
-  // still runs on every request, so a deleted or rejected game stops being served within TTL_MS.
+  // TTL caches so popular games don't hit Storage/PostgREST on every play. The stage TTL is the
+  // document gate (keep it short). Non-document assets re-check the joined stage on every request,
+  // so a demotion hides them without waiting for this cache. Bundle objects can live longer.
   const TTL_MS = cfg.ttlMs ?? 30_000;
   const stages = lruCache({ now, ttlMs: TTL_MS, maxBytes: 300 * 64 });
   const versions = lruCache({ now, ttlMs: TTL_MS, maxBytes: 300 * 64 });
@@ -191,14 +238,22 @@ export function createHandler(cfg) {
   if (SECRET.startsWith('eyJ')) headers.Authorization = `Bearer ${SECRET}`;
 
   const loadObject = coalesce(async (key) => {
-    const res = await doFetch(`${SUPABASE_URL}/storage/v1/object/authenticated/games/${key}`, { headers });
+    const storageKey = key.includes('\n') ? key.slice(0, key.indexOf('\n')) : key;
+    const res = await doFetch(`${SUPABASE_URL}/storage/v1/object/authenticated/games/${storageKey}`, { headers });
     if (!res.ok) return objects.set(key, null);
     const body = Buffer.from(await res.arrayBuffer());
     const etag = `"${crypto.createHash('sha1').update(body).digest('base64url').slice(0, 16)}"`;
     return objects.set(key, { body, etag, variants: new Map() }, body.length);
   });
-  /** Cache entry for a bundle object; `entry.value` is null when Storage has no such object. */
-  const fetchObject = async (key) => objects.get(key) ?? loadObject(key);
+  /**
+   * Cache entry for a bundle object; `entry.value` is null when Storage has no such object.
+   * Asset entries are keyed by content_at so a later copy cannot be served from an entry
+   * that was approved for the previous bytes. The Storage URL stays the object path.
+   */
+  const fetchObject = async (storageKey, contentAt) => {
+    const key = contentAt == null ? storageKey : `${storageKey}\n${contentAt}`;
+    return objects.get(key) ?? loadObject(key);
+  };
 
   /** A derived body (injected HTML, compressed bytes) memoized on the object's cache entry. */
   function variant(entry, name, make) {
@@ -239,10 +294,13 @@ export function createHandler(cfg) {
     return hit ? hit.value : loadVersion(id);
   }
 
-  /** Row status for one versioned asset, or null when the manifest has no row. Throws on lookup errors. */
-  async function assetRowStatus(id, version, assetPath) {
+  /**
+   * One versioned asset plus the game it belongs to, or null when the manifest has no row.
+   * Throws on lookup errors (fail closed, not cached).
+   */
+  async function assetRow(id, version, assetPath) {
     const params = new URLSearchParams({
-      select: 'status',
+      select: 'status,content_at,games(stage,reviewed_at)',
       game_id: `eq.${id}`,
       version: `eq.${version}`,
       path: `eq.${assetPath}`,
@@ -250,7 +308,7 @@ export function createHandler(cfg) {
     const res = await doFetch(`${SUPABASE_URL}/rest/v1/game_assets?${params}`, { headers });
     if (!res.ok) throw new Error(`asset status lookup failed: HTTP ${res.status}`);
     const rows = await res.json();
-    return Array.isArray(rows) && rows[0]?.status ? String(rows[0].status) : null;
+    return Array.isArray(rows) && rows[0] ? rows[0] : null;
   }
 
   /** 304 if the client already has `etag`, else 200 with the (possibly compressed) body. */
@@ -278,9 +336,12 @@ export function createHandler(cfg) {
       if (!asset && (!FILE_RE.test(file ?? '') || rest.length)) return send(res, 404, 'Not found');
 
       const stage = await gameStage(id);
-      const preview = !PUBLIC_STAGES.has(stage ?? '') && stage !== null && verifyPreviewToken(PREVIEW_SECRET, id, url.searchParams.get('pt'));
+      const tokenOk = stage !== null && verifyPreviewToken(PREVIEW_SECRET, id, url.searchParams.get('pt'));
+      const preview = !PUBLIC_STAGES.has(stage ?? '') && tokenOk;
       if (!stage || (!PUBLIC_STAGES.has(stage) && !preview)) return send(res, 404, 'Not found');
-      const privateCache = preview ? { 'Cache-Control': 'private, no-store' } : null;
+      // A valid owner token must not be stored by a shared cache, including when the
+      // cached stage is already public. An invalid token leaves the public cache alone.
+      const privateCache = tokenOk ? { 'Cache-Control': 'private, no-store' } : null;
 
       // The game document lives at its versioned URL so relative paths resolve inside
       // /g/<id>/<version>/ — where the asset files actually are — and so the CSP can name exactly
@@ -301,14 +362,25 @@ export function createHandler(cfg) {
       }
 
       const isDoc = asset?.path === 'index.html';
+      // Set when an owner token is the only reason a non-public asset is leaving the CDN.
+      let ownerOnly = null;
+      let contentAt = null;
       if (asset && !isDoc) {
         // Only a finalized upload may be served: the manifest row must say 'uploaded'. That blocks
         // rejected files and UP-2a orphans (bytes PUT to a signed URL but never finalized), which
         // have no row at all. index.html is the game document, not a manifest asset — exempt.
-        if ((await assetRowStatus(id, asset.version, asset.path)) !== 'uploaded') return send(res, 404, 'Not found');
+        // The joined stage is read here, not from the stage LRU, and content_at must not be newer
+        // than reviewed_at. Otherwise anon gets 404 on this request, before Storage is fetched.
+        const row = await assetRow(id, asset.version, asset.path);
+        if (!row || row.status !== 'uploaded') return send(res, 404, 'Not found');
+        if (!assetIsPublic(row)) {
+          if (!tokenOk) return send(res, 404, 'Not found');
+          ownerOnly = { 'Cache-Control': 'private, no-store' };
+        }
+        contentAt = row.content_at == null ? '' : String(row.content_at);
       }
 
-      const entry = await fetchObject(`${id}/${asset ? (isDoc ? 'index.html' : asset.key) : file}`);
+      const entry = await fetchObject(`${id}/${asset ? (isDoc ? 'index.html' : asset.key) : file}`, contentAt);
       if (!entry.value) return send(res, 404, 'Not found');
       const { body, etag } = entry.value;
 
@@ -331,7 +403,8 @@ export function createHandler(cfg) {
       if (asset) {
         // HTML documents get the runtime (and the embedder-dependent CSP, so they still revalidate).
         if (asset.ext === 'html' && !url.searchParams.has('source')) return gameHtml('no-cache');
-        // Assets are served byte-for-byte (never injected). Live versions are immutable; proving ones stay short.
+        // Assets are served byte-for-byte (never injected). They stay on a short revalidating
+        // cache: an owner can replace them, so a year-long immutable cache would pin the old bytes.
         const allowed = matchEmbedder(req.headers.origin, portalOrigins);
         // The game document runs in an opaque-origin sandbox, so its CORS-mode loads (fetch, wasm, module
         // scripts) send `Origin: null`. Grant exactly that, only on this game's version assets; which game may
@@ -343,11 +416,12 @@ export function createHandler(cfg) {
           headers: {
             'Content-Type': asset.ext === 'html' ? 'text/plain; charset=utf-8' : ASSET_MIME[asset.ext],
             'Content-Security-Policy': asset.ext === 'html' ? "sandbox; default-src 'none'" : "default-src 'none'",
-            'Cache-Control': stage === 'live' ? IMMUTABLE : SHORT_CACHE,
+            'Cache-Control': SHORT_CACHE,
             ...sandboxCors,
             ...(asset.ext === 'html' ? { ...(allowed ? { 'Access-Control-Allow-Origin': allowed } : {}) } : {}),
             Vary: 'Origin',
             ...privateCache,
+            ...ownerOnly,
           },
         });
       }

@@ -226,6 +226,215 @@ describe('CDN delivery performance', () => {
   });
 });
 
+describe('public assets follow the stage gate', () => {
+  it('serves /1/ and an uploaded script while public, and neither while pending', async () => {
+    const stages: Record<string, string> = { hold0001: 'live' };
+    const script = 'const extra = 1;\n';
+    const fakeFetch = async (url: string) => {
+      const u = new URL(url);
+      if (u.pathname === '/rest/v1/games') {
+        const id = (u.searchParams.get('id') ?? '').replace(/^eq\./, '');
+        // reviewed_at is ignored. A review must not change which /1/ URL is served.
+        return Response.json(stages[id] ? [{ stage: stages[id], reviewed_at: '2026-10-18T00:00:00.000Z' }] : []);
+      }
+      if (u.pathname === '/rest/v1/game_validations') return Response.json([{ version: 1 }]);
+      if (u.pathname === '/rest/v1/game_assets') {
+        const id = (u.searchParams.get('game_id') ?? '').replace(/^eq\./, '');
+        const stage = stages[id];
+        if (!stage) return Response.json([]);
+        const pub = stage === 'live' || stage === 'proving';
+        return Response.json([{
+          status: 'uploaded',
+          content_at: '2026-10-18T00:00:00.000Z',
+          games: { stage, reviewed_at: pub ? '2026-10-18T01:00:00.000Z' : null },
+        }]);
+      }
+      if (u.pathname.includes('/storage/')) {
+        return new Response(u.pathname.endsWith('/index.html') ? '<!doctype html><canvas id="c"></canvas>' : script);
+      }
+      return new Response('no', { status: 404 });
+    };
+    const handle = createHandler({
+      supabaseUrl: 'http://sb.local',
+      secret: 'sb_secret_x',
+      webOrigins: PORTAL,
+      previewSecret: SECRET,
+      fetch: fakeFetch as typeof fetch,
+      ttlMs: 0,
+    });
+    const get = async (path: string) => {
+      let status = 0;
+      let body = '';
+      const out: Record<string, string> = {};
+      const res = {
+        writeHead(s: number, h: Record<string, string>) { status = s; for (const [k, v] of Object.entries(h)) out[k.toLowerCase()] = String(v); },
+        end(b?: unknown) { body = b === undefined ? '' : String(b); },
+      };
+      await handle({ method: 'GET', url: path, headers: {} } as never, res as never);
+      return { status, body, headers: out };
+    };
+
+    const liveDoc = await get('/g/hold0001/index.html');
+    assert.equal(liveDoc.status, 302);
+    assert.match(liveDoc.headers.location ?? '', /\/g\/hold0001\/1\/index\.html$/);
+    assert.equal((await get('/g/hold0001/1/index.html')).status, 200);
+    const liveScript = await get('/g/hold0001/1/sprites/extra.js');
+    assert.equal(liveScript.status, 200);
+    assert.match(liveScript.body, /const extra/);
+
+    stages.hold0001 = 'pending';
+    assert.equal((await get('/g/hold0001/1/index.html')).status, 404);
+    assert.equal((await get('/g/hold0001/1/sprites/extra.js')).status, 404);
+
+    stages.hold0001 = 'live';
+    assert.equal((await get('/g/hold0001/1/index.html')).status, 200);
+    assert.equal((await get('/g/hold0001/1/sprites/extra.js')).status, 200);
+    const again = await get('/g/hold0001/index.html');
+    assert.match(again.headers.location ?? '', /\/g\/hold0001\/1\/index\.html$/);
+  });
+
+  it('hides a new asset immediately while the stage cache still says live', async () => {
+    let assetStage = 'live';
+    let contentAt = '2026-10-18T00:00:00.000Z';
+    let reviewedAt: string | null = '2026-10-18T01:00:00.000Z';
+    let gamesShape: 'object' | 'array' = 'object';
+    const calls: string[] = [];
+    const script = 'const extra = 1;\n';
+    const fakeFetch = async (url: string) => {
+      calls.push(url);
+      const u = new URL(url);
+      if (u.pathname === '/rest/v1/games') return Response.json([{ stage: 'live' }]);
+      if (u.pathname === '/rest/v1/game_validations') return Response.json([{ version: 1 }]);
+      if (u.pathname === '/rest/v1/game_assets') {
+        const game = { stage: assetStage, reviewed_at: reviewedAt };
+        return Response.json([{
+          status: 'uploaded',
+          content_at: contentAt,
+          games: gamesShape === 'array' ? [game] : game,
+        }]);
+      }
+      if (u.pathname.includes('/storage/')) return new Response(script);
+      return new Response('no', { status: 404 });
+    };
+    const handle = createHandler({
+      supabaseUrl: 'http://sb.local',
+      secret: 'sb_secret_x',
+      webOrigins: PORTAL,
+      previewSecret: SECRET,
+      fetch: fakeFetch as typeof fetch,
+    });
+    const get = async (path: string) => {
+      let status = 0;
+      let body = '';
+      const out: Record<string, string> = {};
+      const res = {
+        writeHead(s: number, h: Record<string, string>) { status = s; for (const [k, v] of Object.entries(h)) out[k.toLowerCase()] = String(v); },
+        end(b?: unknown) { body = b === undefined ? '' : String(b); },
+      };
+      await handle({ method: 'GET', url: path, headers: {} } as never, res as never);
+      return { status, body, headers: out };
+    };
+
+    const warm = await get('/g/hold0001/1/sprites/extra.js');
+    assert.equal(warm.status, 200);
+    assert.match(warm.body, /const extra/);
+    assert.equal(warm.headers['cache-control'], 'public, max-age=60, must-revalidate');
+    assert.doesNotMatch(warm.headers['cache-control'], /immutable|31536000/);
+    assert.ok(calls.some((c) => c.includes('/rest/v1/game_assets') && c.includes('content_at') && c.includes('games')));
+
+    assetStage = 'pending';
+    const hidden = await get('/g/hold0001/1/sprites/other.js');
+    assert.equal(hidden.status, 404);
+    assert.doesNotMatch(hidden.headers['cache-control'] ?? '', /immutable|31536000/);
+
+    assetStage = 'live';
+    contentAt = '2026-10-18T02:00:00.000Z';
+    assert.equal((await get('/g/hold0001/1/sprites/other.js')).status, 404);
+
+    contentAt = reviewedAt;
+    assert.equal((await get('/g/hold0001/1/sprites/other.js')).status, 200);
+
+    reviewedAt = null;
+    assert.equal((await get('/g/hold0001/1/sprites/other.js')).status, 404);
+
+    reviewedAt = '2026-10-18T01:00:00.000Z';
+    contentAt = '2026-10-18T00:00:00.000Z';
+    gamesShape = 'array';
+    assert.equal((await get('/g/hold0001/1/sprites/other.js')).status, 200);
+
+    gamesShape = 'object';
+    reviewedAt = '2026-10-18T00:00:00.100100Z';
+    contentAt = '2026-10-18T00:00:00.100200Z';
+    assert.equal((await get('/g/hold0001/1/sprites/other.js')).status, 404);
+    contentAt = '2026-10-18T00:00:00.100100Z';
+    assert.equal((await get('/g/hold0001/1/sprites/other.js')).status, 200);
+  });
+
+  it('does not serve or cache bytes newer than reviewed_at', async () => {
+    let storageBody = 'V1';
+    let contentAt = '2026-10-18T00:00:00.000Z';
+    let reviewedAt = '2026-10-18T01:00:00.000Z';
+    const storageCalls: string[] = [];
+    const fakeFetch = async (url: string) => {
+      const u = new URL(url);
+      if (u.pathname === '/rest/v1/games') return Response.json([{ stage: 'live' }]);
+      if (u.pathname === '/rest/v1/game_validations') return Response.json([{ version: 1 }]);
+      if (u.pathname === '/rest/v1/game_assets') {
+        return Response.json([{
+          status: 'uploaded',
+          content_at: contentAt,
+          games: { stage: 'live', reviewed_at: reviewedAt },
+        }]);
+      }
+      if (u.pathname.includes('/storage/')) {
+        storageCalls.push(u.pathname);
+        return new Response(storageBody);
+      }
+      return new Response('no', { status: 404 });
+    };
+    const handle = createHandler({
+      supabaseUrl: 'http://sb.local',
+      secret: 'sb_secret_x',
+      webOrigins: PORTAL,
+      previewSecret: SECRET,
+      fetch: fakeFetch as typeof fetch,
+    });
+    const get = async (path: string) => {
+      let status = 0;
+      let body = '';
+      const out: Record<string, string> = {};
+      const res = {
+        writeHead(s: number, h: Record<string, string>) { status = s; for (const [k, v] of Object.entries(h)) out[k.toLowerCase()] = String(v); },
+        end(b?: unknown) { body = b === undefined ? '' : String(b); },
+      };
+      await handle({ method: 'GET', url: path, headers: {} } as never, res as never);
+      return { status, body, headers: out };
+    };
+
+    const warm = await get('/g/hold0001/1/sprites/extra.js');
+    assert.equal(warm.status, 200);
+    assert.equal(warm.body, 'V1');
+    const fetched = storageCalls.length;
+
+    storageBody = 'V2-unreviewed';
+    const cached = await get('/g/hold0001/1/sprites/extra.js');
+    assert.equal(cached.status, 200);
+    assert.equal(cached.body, 'V1');
+    assert.equal(storageCalls.length, fetched);
+
+    contentAt = '2026-10-18T02:00:00.000Z';
+    const hidden = await get('/g/hold0001/1/sprites/extra.js');
+    assert.equal(hidden.status, 404);
+    assert.equal(storageCalls.length, fetched);
+
+    reviewedAt = '2026-10-18T03:00:00.000Z';
+    const published = await get('/g/hold0001/1/sprites/extra.js');
+    assert.equal(published.status, 200);
+    assert.equal(published.body, 'V2-unreviewed');
+    assert.ok(storageCalls.length > fetched);
+  });
+});
+
 describe('preview tokens', () => {
   it('expiry is capped at 10 minutes', () => {
     const nowS = 1_000_000;

@@ -19,21 +19,21 @@ function memStore(games: Record<string, { stage: Stage; bundle: Uint8Array | nul
       games[gameId].stage = nextStage(games[gameId].stage);
       return { row, stage: games[gameId].stage };
     },
-    applyStoredVerdict: async (gameId, sha256) => {
+    applyStoredVerdict: async (gameId, sha256, manualReview) => {
       const row = rows.filter((r) => r.game_id === gameId && r.bundle_sha256 === sha256).at(-1);
       if (!games[gameId] || !row) return null;
-      games[gameId].stage = stageAfterValidation(games[gameId].stage, row.status);
+      games[gameId].stage = stageAfterValidation(games[gameId].stage, row.status, manualReview);
       return games[gameId].stage;
     },
   };
   return { store, rows, games };
 }
 
-Deno.test('every fixture: pass/warn -> proving, fail -> rejected, from pending', async () => {
+Deno.test('every fixture: pass/warn stays pending under manual review, fail -> rejected', async () => {
   for (const entry of [...Deno.readDirSync(FIX)].sort((a, b) => a.name.localeCompare(b.name))) {
     const { store } = memStore({ g1: { stage: 'pending', bundle: await fixture(entry.name) } });
     const r = await validateGame(store, 'g1');
-    const expected = entry.name.startsWith('bad-') ? 'rejected' : 'proving';
+    const expected = entry.name.startsWith('bad-') ? 'rejected' : 'pending';
     assertEquals([entry.name, r.body.stage], [entry.name, expected]);
   }
 });
@@ -49,9 +49,11 @@ Deno.test('idempotent: re-running the same bundle adds no row and never flips th
   assertEquals(m.games.g1.stage, 'live');
 });
 
-Deno.test('a new bundle gets a new versioned row; non-pending games keep their stage', async () => {
+Deno.test('a new bundle gets a new versioned row; an approved game keeps its stage', async () => {
   const m = memStore({ g1: { stage: 'pending', bundle: await fixture('good-minimal-canvas.html') } });
   await validateGame(m.store, 'g1');
+  assertEquals(m.games.g1.stage, 'pending');
+  m.games.g1.stage = 'proving'; // reviewer published version 1
   m.games.g1.bundle = await fixture('bad-remote-script.html');
   const r = await validateGame(m.store, 'g1');
   assertEquals([m.rows.length, r.body.version, r.body.status, m.games.g1.stage], [2, 2, 'failed', 'proving']);
@@ -72,17 +74,25 @@ Deno.test('errors: bad id 400, unknown game 404, missing bundle 422 (no row)', a
   assertEquals([m.rows.length, m.games.g1.stage], [0, 'pending']);
 });
 
-Deno.test('stuck case: same bundle re-set to pending still moves (reused verdict, no new row)', async () => {
+Deno.test('manual review off: same bundle re-set to pending still moves (reused verdict, no new row)', async () => {
   for (const [fx, expected] of [['good-minimal-canvas.html', 'proving'], ['bad-remote-script.html', 'rejected']] as const) {
     const m = memStore({ g1: { stage: 'pending', bundle: await fixture(fx) } });
-    const first = await validateGame(m.store, 'g1');
+    const first = await validateGame(m.store, 'g1', { manualReview: false });
     assertEquals(first.body.stage, expected);
     m.games.g1.stage = 'pending'; // re-set to pending with the same bundle
-    const again = await validateGame(m.store, 'g1');
+    const again = await validateGame(m.store, 'g1', { manualReview: false });
     assertEquals([again.body.reused, again.body.stage, again.body.previousStage, again.body.moved], [true, expected, 'pending', true]);
     assertEquals([m.rows.length, m.games.g1.stage], [1, expected]);
     assertEquals(again.body.validationId, first.body.validationId);
   }
+});
+
+Deno.test('manual review on: a reused pass stays pending', async () => {
+  const m = memStore({ g1: { stage: 'pending', bundle: await fixture('good-minimal-canvas.html') } });
+  const first = await validateGame(m.store, 'g1');
+  assertEquals(first.body.stage, 'pending');
+  const again = await validateGame(m.store, 'g1');
+  assertEquals([again.body.reused, again.body.stage, again.body.moved, m.games.g1.stage], [true, 'pending', undefined, 'pending']);
 });
 
 Deno.test('reused verdict on a non-pending game still never flips the stage', async () => {
@@ -97,7 +107,7 @@ for (const id of ['pe-nd_01', 'ab-cd-ef', 'ab_cd_ef']) {
   Deno.test(`base64url id ${id} is accepted and validated`, async () => {
     const m = memStore({ [id]: { stage: 'pending', bundle: await fixture('good-minimal-canvas.html') } });
     const r = await validateGame(m.store, id);
-    assertEquals([r.httpStatus, r.body.stage, r.body.gameId], [200, 'proving', id]);
+    assertEquals([r.httpStatus, r.body.stage, r.body.gameId], [200, 'pending', id]);
   });
 }
 
@@ -124,6 +134,6 @@ Deno.test('IS-2: the recorded report carries inputSupport (seed games) and the r
     const rec = store.recordValidation;
     store.recordValidation = (input) => { reported = input.report.inputSupport?.class; return rec(input); };
     const r = await validateGame(store, 'g1');
-    assertEquals([file, reported, r.body.inputSupport, r.body.stage], [file, want, want, 'proving']);
+    assertEquals([file, reported, r.body.inputSupport, r.body.stage], [file, want, want, 'pending']);
   }
 });
