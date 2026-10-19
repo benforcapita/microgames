@@ -89,6 +89,7 @@ begin
       worker_role := 'postgres';
     end if;
 
+    -- Kept on purpose: these keep-set grants may be load-bearing on hosted, even though locally postgres also gets them through its base USAGE grant and pg_read_all_data.
     grant usage on schema net to postgres, service_role;
     execute format('grant usage on schema net to %I', worker_role);
     if to_regclass('net.http_request_queue') is not null then
