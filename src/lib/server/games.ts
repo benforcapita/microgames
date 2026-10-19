@@ -9,6 +9,7 @@ import { filterForDevice, readWithInputSupport, type DeviceKind } from './device
 import { insertSessionStart, postgresSchemaClient } from './schema-rollout';
 import { bucket } from './supabase';
 import { toInputSupport, type InputSupport } from '../input-support';
+import { replaceBlocker } from '../api-games';
 
 export type { Stage, InputSupport };
 
@@ -250,6 +251,42 @@ export async function createGame(input: NewGame, storage: BundleStorage = bundle
   });
   await recordScannedGameAssets(sql, id, input.html);
   return (await getGame(id, CREATED_GAME_LOOKUP))!;
+}
+
+export type ReplaceBundleResult = { ok: true; game: Game } | { ok: false; status: 404 | 409; error: string };
+
+/**
+ * MCP-1: replace an unpublished game's index.html (and optionally its thumbnail), then send it
+ * back through validation as `pending`. A game approved while the bytes were uploading is held
+ * as pending again, so new bytes never go public without a review.
+ */
+export async function replaceGameBundle(
+  input: { gameKey: string; ownerId: string; html: Uint8Array; thumb?: { bytes: Uint8Array; ext: string; type: string } },
+  storage: BundleStorage = bundleStorage(),
+): Promise<ReplaceBundleResult> {
+  const game = await getGame(input.gameKey, { includeUnpublished: true });
+  if (!game || game.ownerId !== input.ownerId) return { ok: false, status: 404, error: 'Game not found.' };
+  const [asset] = await sql`select 1 from game_assets where game_id = ${game.id} and status = 'uploaded' limit 1`;
+  const blocker = replaceBlocker(game.stage, Boolean(asset));
+  if (blocker) return { ok: false, status: 409, error: blocker };
+
+  const thumb = input.thumb ? `thumb.${input.thumb.ext}` : game.thumb;
+  const puts = await Promise.all([
+    storage.upload(`${game.id}/index.html`, input.html, 'text/html; charset=utf-8'),
+    ...(input.thumb ? [storage.upload(`${game.id}/${thumb}`, input.thumb.bytes, input.thumb.type)] : []),
+  ]);
+  const failed = puts.find((p) => p.error);
+  if (failed?.error) throw new Error(`Storage upload failed: ${failed.error.message}`);
+
+  await sql.begin(async (tx) => {
+    const [row] = await tx<{ stage: Stage }[]>`select stage from games where id = ${game.id} for update`;
+    await tx`delete from private.validation_dispatch where game_id = ${game.id}`;
+    await tx`update games set size_bytes = ${input.html.byteLength}, thumb = ${thumb}, stage = 'pending' where id = ${game.id}`;
+    // The enqueue trigger only fires on a stage change; an already-pending game is dispatched here.
+    if (row?.stage === 'pending') await tx`select private.dispatch_validate_game(${game.id}, 'bundle_replaced')`;
+  });
+  if (game.thumb && thumb !== game.thumb) await storage.remove([`${game.id}/${game.thumb}`]);
+  return { ok: true, game: (await getGame(game.id, { includeUnpublished: true }))! };
 }
 
 /** Deletes a game owned by `ownerId`, including its bundle in storage. Returns false if not found / not owned. */

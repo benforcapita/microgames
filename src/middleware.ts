@@ -19,6 +19,8 @@ const isAssetsPage = (pathname: string) => /^\/games\/[^/]+\/assets$/.test(pathn
 
 // Routes that don't need the visitor's identity (hot path: called every few seconds by every player).
 const ANONYMOUS = new Set(['/api/telemetry']);
+// MCP-1: the token API authenticates with a Bearer token only, never with the session cookie.
+const isTokenApi = (pathname: string) => pathname.startsWith('/api/v1/');
 // Routes a signed-in user without a handle may still visit.
 const ONBOARDING_OK = /^\/(onboarding|auth\/|api\/auth\/|api\/profile)/;
 
@@ -33,7 +35,7 @@ export const onRequest = defineMiddleware(async (ctx, next) => {
   if (isSubmissionPreviewPath(pathname)) {
     ctx.locals.user = { id: 'preview-owner', email: 'preview@meshground.local' };
     ctx.locals.profile = { id: 'preview-owner', handle: 'preview', role: 'user' };
-  } else if (!ANONYMOUS.has(pathname)) {
+  } else if (!ANONYMOUS.has(pathname) && !isTokenApi(pathname)) {
     const { data } = await ctx.locals.supabase.auth.getClaims();
     const claims = data?.claims;
     if (claims?.sub) {

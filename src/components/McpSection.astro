@@ -1,0 +1,196 @@
+---
+import type { ApiTokenSummary } from '../lib/server/api-tokens';
+import { MAX_API_TOKENS } from '../lib/api-token';
+import { MCP_CLIENTS, MCP_PATH_PLACEHOLDER, mcpSnippet } from '../client/mcp-setup';
+import { ago } from '../lib/format';
+
+interface Props {
+  tokens: ApiTokenSummary[];
+  revoked: boolean;
+}
+const { tokens, revoked } = Astro.props;
+---
+
+<section class="mcp" id="mcp">
+  <div class="intro">
+    <span class="eyebrow">Ship from chat</span>
+    <h2>Meshground MCP server</h2>
+    <p class="muted">
+      Let Claude, Cursor, Codex or Gemini CLI publish games for you. Ask your AI to build a game, and it uploads the
+      file, follows validation and fixes failures without leaving the chat. Games still go through the same checks and
+      review as the upload form.
+    </p>
+    <ul class="tools muted">
+      <li><code>get_sdk_guide</code> reads the Meshground SDK before writing a game</li>
+      <li><code>publish_game</code> uploads a single-file game; a thumbnail is generated if you don't have one</li>
+      <li><code>list_my_games</code> shows status and validation checks</li>
+      <li><code>update_game</code> replaces the file of a game that isn't published yet</li>
+    </ul>
+  </div>
+
+  <div class="panel setup">
+    <ol class="steps">
+      <li>
+        <b>Download the server</b>
+        <span class="muted">One file, no dependencies. Needs <a href="https://nodejs.org" rel="noopener">Node.js</a> 18 or newer.</span>
+        <div class="row">
+          <a class="btn sm" href="/downloads/meshground-mcp.mjs" download>Download meshground-mcp.mjs</a>
+        </div>
+        <label class="path">
+          Where you saved it (absolute path)
+          <input id="mcp-path" type="text" spellcheck="false" autocomplete="off" placeholder={MCP_PATH_PLACEHOLDER} />
+        </label>
+      </li>
+      <li>
+        <b>Create a token</b>
+        <span class="muted">The token lets the server upload as you. It's shown once, so copy it into your config.</span>
+        <form id="token-form" class="row" method="post" action="/api/tokens">
+          <input name="name" type="text" maxlength="60" placeholder="Token name, e.g. Claude Desktop" aria-label="Token name" />
+          <button class="btn sm" type="submit" disabled={tokens.length >= MAX_API_TOKENS}>Create token</button>
+        </form>
+        <p id="token-error" class="error" role="alert" hidden></p>
+        <div id="token-new" class="token-new" hidden>
+          <p class="warn">Copy this token now. It won't be shown again.</p>
+          <div class="copyable"><code id="token-value"></code><button class="btn ghost sm" type="button" data-copy="token-value">Copy</button></div>
+        </div>
+      </li>
+      <li>
+        <b>Add it to your AI tool</b>
+        <span class="muted">Pick your client, paste the snippet, then ask: “Build a small Three.js game and publish it to Meshground.”</span>
+        <div class="clients">
+          {MCP_CLIENTS.map((c, i) => (
+            <details open={i === 0}>
+              <summary>{c.label}</summary>
+              <p class="muted mono where">{c.where}</p>
+              <div class="copyable">
+                <pre id={`snippet-${c.id}`} data-client={c.id}>{mcpSnippet(c.id, '', '')}</pre>
+                <button class="btn ghost sm" type="button" data-copy={`snippet-${c.id}`}>Copy</button>
+              </div>
+            </details>
+          ))}
+        </div>
+      </li>
+    </ol>
+
+    <div class="tokens">
+      <h3>Your tokens</h3>
+      {revoked && <p class="notice">Token revoked.</p>}
+      <p id="tokens-empty" class="muted" hidden={tokens.length > 0}>No tokens yet.</p>
+      <ul id="token-list">
+        {tokens.map((t) => (
+          <li>
+            <span><b>{t.name}</b> <span class="muted mono">{t.prefix}…</span></span>
+            <span class="muted mono">created {ago(t.createdAt.getTime())} · {t.lastUsedAt ? `used ${ago(t.lastUsedAt.getTime())}` : 'never used'}</span>
+            <form method="post" action={`/api/tokens/${t.id}/delete`} data-confirm={`Revoke “${t.name}”? Tools using it stop working.`}>
+              <button class="btn ghost sm" type="submit">Revoke</button>
+            </form>
+          </li>
+        ))}
+      </ul>
+    </div>
+  </div>
+</section>
+
+<style>
+  .mcp { display: grid; grid-template-columns: 1fr 1.3fr; gap: 2.5rem; align-items: start; scroll-margin-top: 80px; }
+  .intro { display: grid; gap: 1rem; }
+  .intro p, .intro h2 { margin: 0; }
+  .tools { margin: 0; padding-left: 1.2rem; display: grid; gap: 0.4rem; font-size: 0.9rem; }
+  .setup { display: grid; gap: 1.75rem; padding: 1.75rem; }
+  .steps { list-style: none; counter-reset: s; margin: 0; padding: 0; display: grid; gap: 1.5rem; }
+  .steps li { counter-increment: s; display: grid; gap: 0.5rem; padding-left: 2.6rem; position: relative; }
+  .steps li::before { content: counter(s, decimal-leading-zero); position: absolute; left: 0; font: 700 1rem var(--mono); color: var(--accent); }
+  .steps .muted { font-size: 0.9rem; }
+  .row { display: flex; gap: 0.6rem; flex-wrap: wrap; align-items: center; }
+  .row input { flex: 1; min-width: 12rem; }
+  .path { display: grid; gap: 0.35rem; font-size: 0.85rem; }
+  .clients { display: grid; gap: 0.5rem; }
+  details { border: 1px solid var(--line); border-radius: 10px; padding: 0.6rem 0.9rem; }
+  summary { cursor: pointer; font-weight: 600; }
+  .where { font-size: 0.75rem; margin: 0.5rem 0; }
+  .copyable { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0.5rem; align-items: start; }
+  .copyable pre, .copyable code { margin: 0; padding: 0.7rem 0.8rem; background: #0006; border: 1px solid var(--line); border-radius: 8px; font: 0.78rem/1.5 var(--mono); overflow-x: auto; white-space: pre; }
+  .copyable code { white-space: nowrap; }
+  .token-new { display: grid; gap: 0.5rem; }
+  .token-new[hidden], .error[hidden] { display: none; }
+  .warn { margin: 0; color: var(--warn); font-size: 0.85rem; }
+  .error { margin: 0; color: var(--bad); font-size: 0.85rem; }
+  .notice { margin: 0 0 0.5rem; font-size: 0.85rem; }
+  .tokens { border-top: 1px solid var(--line); padding-top: 1.25rem; }
+  .tokens h3 { margin: 0 0 0.75rem; font-size: 1rem; }
+  .tokens ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.6rem; }
+  .tokens ul :global(li) { display: grid; grid-template-columns: 1fr auto auto; gap: 0.75rem; align-items: center; font-size: 0.85rem; }
+  .tokens p { margin: 0; }
+  .tokens p[hidden] { display: none; }
+  @media (max-width: 860px) {
+    .mcp { grid-template-columns: 1fr; }
+    .tokens ul :global(li) { grid-template-columns: 1fr auto; }
+  }
+</style>
+
+<script>
+  import { MCP_CLIENTS, mcpSnippet } from '../client/mcp-setup';
+
+  const pathInput = document.getElementById('mcp-path') as HTMLInputElement;
+  const tokenForm = document.getElementById('token-form') as HTMLFormElement;
+  const tokenError = document.getElementById('token-error')!;
+  const tokenNew = document.getElementById('token-new')!;
+  const tokenValue = document.getElementById('token-value')!;
+  let token = '';
+
+  const render = () => {
+    for (const c of MCP_CLIENTS) {
+      const pre = document.getElementById(`snippet-${c.id}`);
+      if (pre) pre.textContent = mcpSnippet(c.id, pathInput.value, token);
+    }
+  };
+  pathInput.addEventListener('input', render);
+
+  // Built with DOM nodes, so the elements carry no Astro scope attribute (styled via :global below).
+  const addTokenRow = (t: { id: string; name: string; prefix: string }) => {
+    const li = document.createElement('li');
+    const label = document.createElement('span');
+    label.append(Object.assign(document.createElement('b'), { textContent: t.name }), ' ', Object.assign(document.createElement('span'), { className: 'muted mono', textContent: `${t.prefix}…` }));
+    const meta = Object.assign(document.createElement('span'), { className: 'muted mono', textContent: 'created just now · never used' });
+    const form = Object.assign(document.createElement('form'), { method: 'post', action: `/api/tokens/${t.id}/delete` });
+    form.addEventListener('submit', (e) => {
+      if (!confirm(`Revoke “${t.name}”? Tools using it stop working.`)) e.preventDefault();
+    });
+    form.append(Object.assign(document.createElement('button'), { className: 'btn ghost sm', type: 'submit', textContent: 'Revoke' }));
+    li.append(label, meta, form);
+    document.getElementById('token-list')?.prepend(li);
+    document.getElementById('tokens-empty')!.hidden = true;
+  };
+
+  tokenForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    tokenError.hidden = true;
+    const btn = tokenForm.querySelector<HTMLButtonElement>('button')!;
+    btn.disabled = true;
+    try {
+      const res = await fetch(tokenForm.action, { method: 'POST', body: new FormData(tokenForm) });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || typeof data.token !== 'string') throw new Error(data.error || `Could not create a token (HTTP ${res.status}).`);
+      token = data.token;
+      tokenValue.textContent = token;
+      tokenNew.hidden = false;
+      tokenForm.reset();
+      render();
+      addTokenRow(data);
+    } catch (err) {
+      tokenError.textContent = err instanceof Error ? err.message : String(err);
+      tokenError.hidden = false;
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  document.querySelectorAll<HTMLButtonElement>('[data-copy]').forEach((btn) =>
+    btn.addEventListener('click', async () => {
+      const text = document.getElementById(btn.dataset.copy!)?.textContent ?? '';
+      await navigator.clipboard.writeText(text).catch(() => {});
+      btn.textContent = 'Copied';
+      setTimeout(() => (btn.textContent = 'Copy'), 1500);
+    }),
+  );
+</script>

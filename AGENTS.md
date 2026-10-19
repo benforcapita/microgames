@@ -24,9 +24,11 @@ Open exchange for single-file browser games (Three.js etc.). Astro 7 SSR (`@astr
 - Uploading, rating, and cloud saves require login; playing does not.
 - Upload form lives on `/me#upload` (`src/components/UploadSection.astro`); `/upload` is a redirect alias that also carries `?fork=`. `/me` therefore gets the blob `frame-src` CSP.
 - Admin (`profiles.role = 'admin'`, `isAdmin()` in `profiles.ts`): `/admin` (analytics + MR-1 review queue from `games_awaiting_review`), `/admin/games`, `POST /api/admin/games/:id/review` (`decision=approve|reject`, reject needs `note`). Transition rules are pure in `src/lib/admin-rules.ts`; admins can open pending games on `/play` and `/submissions` via `reviewerPreviewToken`.
+- MCP (MCP-1): `mcp/meshground-mcp.mjs` is a zero-dependency stdio MCP server (tools `get_sdk_guide`, `publish_game`, `list_my_games`, `update_game`; generates a PNG thumbnail when none is given). Served from `/downloads/meshground-mcp.mjs` with the site origin baked in (don't serve it under `/mcp/…`: Vite would serve the repo file there in dev). Creators mint personal tokens on `/me#mcp` (`McpSection.astro`, `POST /api/tokens`, revoke `POST /api/tokens/:id/delete`); only SHA-256 hashes live in `api_tokens`. The token API is `/api/v1/games` (GET list, POST publish JSON) and `/api/v1/games/:id` (GET status + checks, PUT replace HTML). It is Bearer-only: middleware skips cookie auth under `/api/v1/`. Publish reuses `validateGameUpload`/`planGameUpload`; `replaceGameBundle` only accepts pending/rejected games with no uploaded assets and re-queues validation.
 
 ## Verification
 - `npm run check` and `npm run build` must pass
 - Smoke test: curl pages return 200 (protected pages 302 to `/login`)
 - Auth flows can be scripted with curl + a cookie jar (send an `Origin` header on POSTs); magic links are readable via the Mailpit API (`/api/v1/search?query=to:<email>`)
+- MCP server: `mcp/meshground-mcp.test.ts` drives it against a fake API; for a live check, mint a token via `/api/tokens` (cookie session), download `/downloads/meshground-mcp.mjs`, run it with `MESHGROUND_TOKEN`, and send JSON-RPC lines on stdin
 - In-iframe behaviour: headless Chrome over CDP, launched with `--disable-site-isolation-trials` to evaluate inside the game frame

@@ -12,6 +12,7 @@ interface Props {
   manualReview: boolean;
 }
 const { profile, forkable, manualReview } = Astro.props;
+const hasMcp = Astro.slots.has('mcp');
 ---
 
 <section class="upload" id="upload">
@@ -22,6 +23,19 @@ const { profile, forkable, manualReview } = Astro.props;
       One self-contained <code>.html</code> file — {GAME_SIZE_LIMIT}. Load Three.js from a CDN
       such as jsDelivr, unpkg or esm.sh. {uploadOutcome(manualReview)}
     </p>
+    {
+      hasMcp && (
+        <div class="panel ai">
+          <span class="eyebrow">Or skip the form</span>
+          <h3>Publish straight from your AI</h3>
+          <p class="muted">
+            Add the Meshground MCP server to Claude, Cursor, Codex or Gemini CLI. Your AI uploads the game, reads the
+            validation checks and fixes failures from the chat.
+          </p>
+          <a class="btn sm" href="#mcp">Set up the MCP server</a>
+        </div>
+      )
+    }
     {
       forkable && (
         <div class="panel fork">
@@ -95,6 +109,7 @@ const { profile, forkable, manualReview } = Astro.props;
     <div id="asset-warnings" hidden></div>
     <button class="btn" type="submit">Submit for validation</button>
   </form>
+  {hasMcp && <div class="mcp-slot"><slot name="mcp" /></div>}
 </section>
 
 <style>
@@ -102,6 +117,12 @@ const { profile, forkable, manualReview } = Astro.props;
   .intro { position: sticky; top: 90px; display: grid; gap: 1rem; }
   .intro p { margin: 0; }
   .fork { border-color: #ff4fd855; }
+  .ai { display: grid; gap: 0.6rem; border-color: #c4ff3d55; }
+  .ai h3 { margin: 0; font-size: 1.25rem; }
+  .ai .eyebrow { margin-bottom: 0; }
+  .ai p { margin: 0; }
+  .ai .btn { justify-self: start; }
+  .mcp-slot { grid-column: 1 / -1; border-top: 1px solid var(--line); padding-top: 2.5rem; }
   .creators { display: grid; gap: 0.75rem; }
   .creators h3 { margin: 0; font-size: 1.25rem; }
   .creators .eyebrow { margin-bottom: 0; }
