@@ -195,6 +195,17 @@ test('config: a bad lock-3 key is reported after the MGA-2 keys', () => {
   );
 });
 
+test('boundary: a whitespace-only ADMIN_SUPABASE_ANON_KEY is a plain 503', async () => {
+  const env = testEnv({ ADMIN_SUPABASE_ANON_KEY: ' \t\n ' });
+  const { response, logs } = await runRequest(new Request(`http://localhost/${TEST_SECRET}`), env);
+  assert.equal(response.status, 503);
+  assert.equal(await response.text(), 'Service unavailable');
+  assert.equal(response.headers.get('content-type'), 'text/plain');
+  const errors = logs.filter((line) => line.error);
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0]?.error, 'invalid_config:ADMIN_SUPABASE_ANON_KEY');
+});
+
 test('boundary: each bad lock-3 key is a plain 503 and one log line naming the key', async () => {
   const cases: [string, Record<string, string | undefined>, string | undefined][] = [
     ['ADMIN_USER_ID', { ADMIN_USER_ID: undefined }, undefined],
