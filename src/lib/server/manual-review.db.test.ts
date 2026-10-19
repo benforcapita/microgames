@@ -50,11 +50,11 @@ let platformStats: typeof import('./games.ts').platformStats;
 let readSubmission: typeof import('./submissions.ts').readSubmission;
 let sqlSubmissionStore: typeof import('./submissions-db.ts').sqlSubmissionStore;
 let readManualReview: typeof import('./manual-review.ts').readManualReview;
-let evaluateGraduation: typeof import('./games.ts').evaluateGraduation;
+let getHealth: typeof import('./games.ts').getHealth;
 
 if (probeOk) {
   sql = (await import('./db.ts')).sql;
-  ({ getGame, listTags, platformStats, evaluateGraduation } = await import('./games.ts'));
+  ({ getGame, listTags, platformStats, getHealth } = await import('./games.ts'));
   readSubmission = (await import('./submissions.ts')).readSubmission;
   sqlSubmissionStore = (await import('./submissions-db.ts')).sqlSubmissionStore;
   readManualReview = (await import('./manual-review.ts')).readManualReview;
@@ -728,7 +728,7 @@ describe('manual review (db)', () => {
     }
   });
 
-  it('with review off, a new game serves its assets and can graduate', async (t) => {
+  it('with review off, a new game serves its assets and reports eligibility without graduating', async (t) => {
     if (skip(t)) return;
     const id = `bfoff${userId.replace(/-/g, '').slice(0, 6)}`;
     const bytes = new TextEncoder().encode('const auto = 1;\n');
@@ -774,9 +774,12 @@ describe('manual review (db)', () => {
           insert into public.sessions (id, game_id, first_frame_ms, started, completed, crashed, duration_ms)
           select gen_random_uuid(), ${id}, 100, true, true, false, 120000
           from generate_series(1, ${plays})`;
-        assert.equal(await evaluateGraduation(id, tx), true);
-        const [live] = await tx<{ stage: string }[]>`select stage from public.games where id = ${id}`;
-        assert.equal(live?.stage, 'live');
+        // MG-9: passing every check makes the game eligible; only a human stage write promotes it.
+        assert.equal((await getHealth(id, tx)).eligible, true);
+        const [eligible] = await tx<{ stage: string; graduated_at: Date | null }[]>`
+          select stage, graduated_at from public.games where id = ${id}`;
+        assert.equal(eligible?.stage, 'proving');
+        assert.equal(eligible?.graduated_at, null);
         assert.equal((await cdnGet(id, `/g/${id}/1/sprites/auto.js`, bytes, tx)).status, 200);
         throw rollback;
       });

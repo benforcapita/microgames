@@ -267,13 +267,11 @@ export async function rateGame(gameId: string, voter: string, stars: number) {
     values (${gameId}, ${voter}, ${ratingUserId(voter)}, ${stars})
     on conflict (game_id, voter) do update
       set stars = excluded.stars, user_id = excluded.user_id, updated_at = now()`;
-  await evaluateGraduation(gameId);
 }
 
 /** Removes a user's rating (no-op if they never rated). Returns true if a rating was deleted. */
 export async function unrateGame(gameId: string, voter: string): Promise<boolean> {
   const rows = await sql`delete from ratings where game_id = ${gameId} and voter = ${voter} returning game_id`;
-  if (rows.length) await evaluateGraduation(gameId);
   return rows.length > 0;
 }
 
@@ -321,7 +319,6 @@ export async function recordTelemetry(
       await sql`update sessions set duration_ms = greatest(duration_ms, ${clampDurationMs(value)}) ${where}`;
       break;
   }
-  await evaluateGraduation(gameId);
 }
 
 type GameDb = postgres.Sql | postgres.TransactionSql;
@@ -360,13 +357,4 @@ export async function getHealth(gameId: string, db: GameDb = sql): Promise<{ che
     avgRating: s.avg_rating,
     ratingCount: s.rating_count,
   }, G);
-}
-
-export async function evaluateGraduation(gameId: string, db: GameDb = sql): Promise<boolean> {
-  const [row] = await db<{ stage: Stage }[]>`select stage from games where id = ${gameId}`;
-  if (!row || row.stage === 'live' || !(await getHealth(gameId, db)).eligible) return false;
-  // The stage write stamps reviewed_at (games_touch_review). That is intentional:
-  // graduation is a publish, and the CDN serves an asset only while content_at <= reviewed_at.
-  await db`update games set stage = 'live', graduated_at = now() where id = ${gameId} and stage = 'proving'`;
-  return true;
 }

@@ -51,7 +51,7 @@ const uploaded = Astro.url.searchParams.has('uploaded');
     {
       uploaded && (
         <div class="notice panel">
-          <b>You're live in the Proving Grounds.</b> Share the link: real plays and ratings decide when the game graduates.
+          <b>You're live in the Proving Grounds.</b> Share the link: real plays and ratings decide when the game is eligible for the main arcade.
         </div>
       )
     }
@@ -140,7 +140,7 @@ const uploaded = Astro.url.searchParams.has('uploaded');
           {
             live
               ? `Graduated to the main arcade. Every check passed.`
-              : `Measured automatically from real plays. Once every check passes after ${GRADUATION.minPlays}+ plays, the game graduates to the main arcade.`
+              : `Measured automatically from real plays. Once every check passes after ${GRADUATION.minPlays}+ plays, the game is eligible — the Meshground team promotes it to the main arcade.`
           }
         </p>
         <ul>
