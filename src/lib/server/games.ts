@@ -305,7 +305,7 @@ export async function recordTelemetry(
    * pooled connection is held. Unset callers keep the old semantics: session_start
    * always writes, first_frame never creates a row.
    */
-  admitNewSession?: (db: GameDb) => Promise<boolean>,
+  admitNewSession?: (db: postgres.TransactionSql) => Promise<boolean>,
 ) {
   const where = sql`where id = ${sessionId} and game_id = ${gameId}`;
   switch (type) {
