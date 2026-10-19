@@ -53,10 +53,12 @@ Supabase stack with the MGA-1 migration applied.
 
 ## Lock 3
 
-Every page except the stylesheet and the auth routes (which have no pages
-yet) requires a Supabase session for `ADMIN_USER_ID` at AAL2 with a verified
-TOTP factor. Anything else, including an Auth error, is the same plain 404
-as a wrong path. `ADMIN_SUPABASE_URL` has to be https. Local Auth is
+Every page except the stylesheet and the auth routes requires a Supabase
+session for `ADMIN_USER_ID` at AAL2 with a verified TOTP factor. Anything
+else, including an Auth error, is the same plain 404 as a wrong path. The
+auth routes (sign-in, TOTP challenge, TOTP enroll, sign-out) stay behind
+locks 1 and 2 and the Origin + CSRF check. `ADMIN_SUPABASE_URL` has to be
+https. Local Auth is
 `http://127.0.0.1:54321`, and that URL is rejected at boot on purpose, so
 `npm run dev` will answer 503 if `.env` points at it.
 
@@ -94,6 +96,7 @@ bypass the locks and fingerprint the app.
 - `src/lib/csrf.ts` — `__Host-mga_csrf` cookie + HMAC field (HKDF key from
   `ADMIN_PATH_SECRET`, label `mga-csrf-v1`)
 - `src/lib/log.ts` — JSON-lines logger, allowlisted fields only
-- `src/pages/[p]/` — all routes under the dynamic prefix (placeholder +
-  SSR `admin.css`); `src/pages/robots.txt.ts`; `src/pages/[...any].ts` plain 404
+- `src/pages/[p]/` — routes under the dynamic prefix (placeholder, auth
+  pages, SSR `admin.css`); `src/pages/robots.txt.ts`; `src/pages/[...any].ts`
+  plain 404
 - `scripts/hash-password.mjs` — password → argon2id hash helper

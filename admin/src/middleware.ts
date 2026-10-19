@@ -13,7 +13,7 @@ import { connect, createLockoutStore } from './lib/db';
 import { CSRF_COOKIE, CSRF_COOKIE_OPTS, CSRF_FIELD, csrfField, mintCookieValue, verifyField } from './lib/csrf';
 import { log, type LogFields } from './lib/log';
 
-export type Locals = { csrfCookie?: string; csrfField?: string };
+export type Locals = { csrfCookie?: string; csrfField?: string; auth?: RequestAuth };
 export type Deps = {
   env?: Record<string, string | undefined>;
   log?: (fields: LogFields) => void;
@@ -29,7 +29,10 @@ const SECURITY_HEADERS: Record<string, string> = {
   'content-security-policy':
     "default-src 'none'; style-src 'self'; img-src 'self' data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; script-src 'none'",
   'x-robots-tag': 'noindex, nofollow',
-  'referrer-policy': 'no-referrer',
+  // same-origin, not no-referrer. Chrome sends Origin: null on a form POST
+  // under no-referrer, and the CSRF check rejects that opaque origin.
+  // same-origin still omits the referrer on every other site.
+  'referrer-policy': 'same-origin',
   'x-content-type-options': 'nosniff',
   'cache-control': 'no-store',
   'cross-origin-opener-policy': 'same-origin',
@@ -81,8 +84,8 @@ function lockoutStore(databaseUrl: string): LockoutStore {
   return defaultStore.store;
 }
 
-// Exact paths only. These still pass locks 1 and 2. PR A has no pages for
-// the auth routes, so they fall through to the catch-all 404.
+// Exact paths only. These still pass locks 1 and 2. The stylesheet is not
+// an auth route. Auth routes render their own pages and do not run lock 3.
 const LOCK3_EXEMPT = new Set([
   '/admin.css',
   '/auth/signin',
@@ -95,6 +98,11 @@ function lock3Exempt(pathname: string, segment: string): boolean {
   const prefix = `/${segment}`;
   if (!pathname.startsWith(`${prefix}/`)) return false;
   return LOCK3_EXEMPT.has(pathname.slice(prefix.length));
+}
+
+function isAuthRoute(pathname: string, segment: string): boolean {
+  if (!lock3Exempt(pathname, segment)) return false;
+  return pathname.slice(`/${segment}`.length).startsWith('/auth/');
 }
 
 function defaultAuth(request: Request, config: AdminConfig): RequestAuth {
@@ -221,20 +229,33 @@ async function route(
 
   // Lock 3: the session must be ADMIN_USER_ID at AAL2 with a verified TOTP
   // factor. Anything else is the same plain 404 as lock 1. Auth routes and
-  // the stylesheet are exempt; PR A still has no auth pages.
+  // the stylesheet are exempt. Auth routes still get a client so the page
+  // can sign in, enroll, verify, or sign out, and its Set-Cookie values
+  // ride on the response.
   let authCookies: string[] | undefined;
+  let session: RequestAuth | undefined;
+  if (isAuthRoute(pathname, segment)) {
+    session = (deps.auth ?? defaultAuth)(request, config);
+    locals.auth = session;
+  }
   if (!lock3Exempt(pathname, segment)) {
     const gate = await lock3(request, config, deps, fields);
     if (!gate.ok) return { response: gate.response, setCookies: gate.setCookies };
     authCookies = gate.setCookies;
   }
+  const cookies = () => session?.setCookies() ?? authCookies;
 
   if (method === 'POST') {
     if (!(await csrfOk(request, config))) {
       fields.error = 'csrf';
-      return { response: plain(403, 'Forbidden'), setCookies: authCookies };
+      return { response: plain(403, 'Forbidden'), setCookies: cookies() };
     }
-    return { response: await next(), setCookies: authCookies };
+    const csrfCookie = parseCookies(request.headers.get('cookie'))[CSRF_COOKIE];
+    if (csrfCookie) {
+      locals.csrfCookie = csrfCookie;
+      locals.csrfField = csrfField(config.pathSecret, csrfCookie);
+    }
+    return { response: await next(), setCookies: cookies() };
   }
 
   // GET past locks 1-2: ensure the CSRF cookie exists so pages can embed the
@@ -245,7 +266,7 @@ async function route(
   return {
     response: await next(),
     setCsrfCookie: existing ? undefined : locals.csrfCookie,
-    setCookies: authCookies,
+    setCookies: cookies(),
   };
 }
 
@@ -271,7 +292,8 @@ export async function handleRequest(
     response = plain(500, 'Internal server error');
   }
   for (const cookie of setCookies ?? []) response.headers.append('set-cookie', cookie);
-  if (setCsrfCookie) {
+  // A 404 is the lock-1 response: it does not mint a CSRF cookie.
+  if (setCsrfCookie && response.status !== 404) {
     response.headers.append('set-cookie', `${CSRF_COOKIE}=${setCsrfCookie}; ${CSRF_COOKIE_OPTS}`);
   }
   for (const [name, value] of Object.entries(SECURITY_HEADERS)) response.headers.set(name, value);

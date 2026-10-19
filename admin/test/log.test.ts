@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { log } from '../src/lib/log.ts';
-import { runRequest, testEnv, basicAuth, TEST_SECRET, TEST_PASSWORD } from './helpers.ts';
+import { deniedAuth, runRequest, testEnv, basicAuth, TEST_SECRET, TEST_PASSWORD } from './helpers.ts';
 
 test('log: emits a single JSON line with allowlisted fields only', () => {
   const lines: string[] = [];
@@ -76,6 +76,7 @@ test('log: a lock 3 failure does not emit email, token, user id, factor id, code
       testEnv(),
       {
         auth: () => ({
+          ...deniedAuth,
           classify: impl.classify,
           async signOut() {},
           setCookies: () => [],
