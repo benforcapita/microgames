@@ -74,11 +74,20 @@ test('config: ADMIN_DATABASE_URL must be postgres:// or postgresql://', () => {
   assert.equal(loadConfig(testEnv({ ADMIN_DATABASE_URL: 'postgresql://meshgrounds_admin@h/db' })).ok, true);
 });
 
-test('config: ADMIN_DATABASE_URL user must be exactly meshgrounds_admin', () => {
+test('config: ADMIN_DATABASE_URL user must be meshgrounds_admin or meshgrounds_admin.<ref>', () => {
+  // CTO decision: exactly `meshgrounds_admin`, or `meshgrounds_admin.<ref>`
+  // (the Supabase pooler form) where ref is ^[a-z0-9]{20}$. Fail closed on
+  // anything else.
   for (const bad of [
     'postgres://postgres@h/db',
+    'postgres://postgres.abcdefghij1234567890@h/db', // pooler user, wrong role
     'postgres://service_role@h/db',
-    'postgres://meshgrounds_admin.abcdefghij@h/db', // pooler user form: rejected per CTO
+    'postgres://meshgrounds_admin.abcdefghij123456789@h/db', // ref 19 chars
+    'postgres://meshgrounds_admin.abcdefghij12345678901@h/db', // ref 21 chars
+    'postgres://meshgrounds_admin.Abcdefghij1234567890@h/db', // ref uppercase
+    'postgres://meshgrounds_admin.abcdefghij-234567890@h/db', // ref with a dash
+    'postgres://meshgrounds_admin.@h/db', // empty ref
+    'postgres://meshgrounds_adminx@h/db',
     'postgres://admin@h/db',
     'postgres://@h/db',
   ]) {
@@ -87,6 +96,16 @@ test('config: ADMIN_DATABASE_URL user must be exactly meshgrounds_admin', () => 
       key: 'ADMIN_DATABASE_URL',
     });
   }
+  assert.equal(
+    loadConfig(testEnv({ ADMIN_DATABASE_URL: 'postgres://meshgrounds_admin@h/db' })).ok,
+    true,
+  );
+  assert.equal(
+    loadConfig(
+      testEnv({ ADMIN_DATABASE_URL: 'postgres://meshgrounds_admin.abcdefghij1234567890@h/db' }),
+    ).ok,
+    true,
+  );
 });
 
 test('config: failure reports the first bad key in a fixed order', () => {
