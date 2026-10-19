@@ -39,6 +39,14 @@ const PATTERNS: Pattern[] = [
     re: /\bset\s+(?:[\w.]+\s*=\s*[^,;=]+,\s*)*stage\s*=\s*'live'/i,
   },
   {
+    name: "SQL update … set (… stage …) = (… 'live' …)",
+    // Row-value assignment: a parenthesised column list containing stage whose value list
+    // contains 'live'. Position-insensitive on purpose — 'live' in any slot of a row-value
+    // write that touches stage is suspect. `set (stage, reviewed_at) = ('proving', now())`
+    // does not match.
+    re: /\bset\s*\(\s*[\w.,\s]*\bstage\b[\w.,\s]*\)\s*=\s*\((?:[^();]|\([^()]*\))*'live'/i,
+  },
+  {
     name: "insert into games … 'live'",
     // Any literal 'live' inside an insert into the games table (column-list or select form).
     re: /\binsert\s+into\s+(?:public\.)?games\b[^;]*'live'/i,
@@ -75,6 +83,8 @@ describe('MG-9 no-auto-live matchers', () => {
       "update games\n  set stage='live',\n      graduated_at = now()\n  where id = $1 and stage = 'proving'",
       "update public.games set reviewed_at = now(), stage = 'live' where id = 1",
       "on conflict (id) do update set stage = 'live'",
+      "update games set (stage, graduated_at) = ('live', now()) where id = $1",
+      "update public.games\n  set (graduated_at,\n       stage) = (now(),\n                'live')\n  where id = $1",
       "insert into games (id, slug, stage) values ('a','a','live')",
       "insert into public.games select *, 'live' from staging",
       ".update({ stage: 'live' }).eq('id', id)",
@@ -95,6 +105,8 @@ describe('MG-9 no-auto-live matchers', () => {
       "update games set stage = 'proving' where stage = 'live'",
       "update public.games set reviewed_at = now() where stage in ('proving', 'live')",
       "update public.games set stage = 'rejected' where id = $1 and stage = 'pending'",
+      "update games set (stage, reviewed_at) = ('proving', now()) where id = $1",
+      "update games set (reviewed_at, note) = (now(), 'lives here') where id = $1",
       "game.stage === 'live'",
       "const live = game.stage === 'live'",
       "and g.stage in ('proving', 'live')",
