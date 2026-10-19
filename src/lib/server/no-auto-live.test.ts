@@ -1,4 +1,4 @@
-// MG-9 static guard: no file under src/ or supabase/ may write games.stage = 'live'.
+// MG-11 static guard: no file under src/, supabase/ or admin/ may write games.stage = 'live'.
 // Going live is a human decision (the table editor today, a future admin action via
 // ALLOWLIST), so no request path, trigger, cron or SQL function may contain the write.
 // Static regex guard — its limits are documented at the bottom of this file.
@@ -76,7 +76,7 @@ function isScanned(rel: string): boolean {
 const allFiles = SCAN_DIRS.flatMap(walk);
 const scanned = allFiles.filter(isScanned);
 
-describe('MG-9 no-auto-live matchers', () => {
+describe('MG-11 no-auto-live matchers', () => {
   it('flags live-stage writes', () => {
     const positive = [
       "update games set stage = 'live' where id = $1",
@@ -90,6 +90,14 @@ describe('MG-9 no-auto-live matchers', () => {
       ".update({ stage: 'live' }).eq('id', id)",
       ".upsert({ id, stage: 'live' })",
       ".insert({ id, stage: 'live' })",
+      // plpgsql (migrations/trigger bodies): := is always an assignment, and NEW.<col> =
+      // inside a trigger body assigns too — there is no comparison context to preserve.
+      "new.stage := 'live'",
+      "NEW.\"stage\" := 'live'",
+      "new.stage = 'live'",
+      "begin\n  if old.stage = 'proving' then\n    new.stage := 'live';\n  end if;\nend",
+      "v_stage := 'live'",
+      'update games set "stage" = \'live\' where id = 1',
     ];
     for (const sample of positive) {
       assert.ok(
@@ -115,7 +123,11 @@ describe('MG-9 no-auto-live matchers', () => {
       "visibleStages({ stage, ownerId })",
       "insert into game_validations (status) values ('live')",
       "insert into games (id, slug, stage) values ($1, $2, 'proving')",
-      "new.stage := 'live'",
+      // plpgsql comparisons that cannot be assignments: OLD is never assigned, `in` is a
+      // test, and a non-'live' RHS is not a promotion.
+      "old.stage = 'live'",
+      "if new.stage in ('proving', 'live') then",
+      "v_stage := 'proving'",
       ".select('stage').eq('stage', 'live')",
       "await sql`select stage from games where id = ${id}`",
     ];
@@ -129,13 +141,17 @@ describe('MG-9 no-auto-live matchers', () => {
   });
 });
 
-describe('MG-9 no-auto-live guard', () => {
-  it('scans a non-empty tree that includes src/lib/server/games.ts', (t) => {
+describe('MG-11 no-auto-live guard', () => {
+  it('scans a non-empty tree that includes src/lib/server/games.ts and an admin source', (t) => {
     t.diagnostic(`scanned ${scanned.length} files, skipped ${allFiles.length - scanned.length}`);
     assert.ok(scanned.length > 0, 'empty scan means the glob is broken');
     assert.ok(
       scanned.includes('src/lib/server/games.ts'),
       'scan must include src/lib/server/games.ts',
+    );
+    assert.ok(
+      scanned.includes('admin/src/lib/db.ts'),
+      'scan must include admin/ sources (admin/src/lib/db.ts)',
     );
   });
 
@@ -153,6 +169,7 @@ describe('MG-9 no-auto-live guard', () => {
 
 // Known limits (deliberate): regex/static analysis only. It misses dynamic SQL,
 // parameterised stage values (`set stage = ${x}`, `set stage = nxt`), string concatenation,
-// and 'live' passed through variables or helpers. It only reads src/ and supabase/, so
+// and 'live' passed through variables or helpers. It reads src/, supabase/ and admin/, so
 // scripts/ (e.g. scripts/seed.mjs — local only), e2e/, cdn/, docs/ and launch/ are not
-// scanned, and DB state already on hosted Supabase is out of reach entirely.
+// scanned, and DB state already on hosted Supabase is out of reach entirely
+// (no-auto-live.db.test.ts checks the local catalog instead).
