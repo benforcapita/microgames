@@ -1,5 +1,6 @@
 // MG-10: first_frame_ms survives arriving before session_start, and session row creation
 // stays behind the same getGame + admitSessionStart admission. Local stack only.
+// MG-13: the same race for start, complete, crash and heartbeat.
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { after, before, describe, it, mock } from 'node:test';
@@ -77,10 +78,14 @@ interface SessionRow {
   game_id: string;
   first_frame_ms: number | null;
   user_id: string | null;
+  started: boolean;
+  completed: boolean;
+  crashed: boolean;
+  duration_ms: number;
 }
 
 const row = async (id: string) =>
-  (await sql<SessionRow[]>`select id, game_id, first_frame_ms, user_id from sessions where id = ${id}`)[0];
+  (await sql<SessionRow[]>`select id, game_id, first_frame_ms, user_id, started, completed, crashed, duration_ms from sessions where id = ${id}`)[0];
 
 /**
  * A real POST /api/telemetry call with the request surface the route reads
@@ -208,7 +213,7 @@ describe('session telemetry ordering (db)', () => {
       for (const r of res) assert.equal(r.status, 204);
     }
     const ids = [...expected.keys()];
-    const rows = await sql<SessionRow[]>`select id, game_id, first_frame_ms, user_id from sessions where id in ${sql(ids)}`;
+    const rows = await sql<SessionRow[]>`select id, game_id, first_frame_ms, user_id, started, completed, crashed, duration_ms from sessions where id in ${sql(ids)}`;
     assert.equal(rows.length, N);
     const lost = rows.filter((r) => r.first_frame_ms !== expected.get(r.id)).length;
     assert.equal(lost, 0, `${lost}/${N} sessions lost first_frame_ms`);
@@ -256,7 +261,7 @@ describe('session telemetry ordering (db)', () => {
     assert.equal((await post(uidA, nextIp(), { sessionId, gameId: GAME, type: 'session_start', value: 0 }, userId)).status, 204);
     assert.equal((await row(sessionId))?.user_id, userId);
     assert.equal((await post(uidB, nextIp(), { sessionId, gameId: GAME, type: 'session_start', value: 0 }, userIdB)).status, 204);
-    const rows = await sql<SessionRow[]>`select id, game_id, first_frame_ms, user_id from sessions where id = ${sessionId}`;
+    const rows = await sql<SessionRow[]>`select id, game_id, first_frame_ms, user_id, started, completed, crashed, duration_ms from sessions where id = ${sessionId}`;
     assert.equal(rows.length, 1);
     assert.equal(rows[0]?.user_id, userId, "another user's session_start must not overwrite user_id");
     // An anonymous start for the same session id cannot clear it either.
@@ -274,7 +279,7 @@ describe('session telemetry ordering (db)', () => {
     assert.equal((await post(uidA, nextIp(), { sessionId, gameId: GAME, type: 'session_start', value: 0 }, userId)).status, 204);
     assert.equal((await row(sessionId))?.user_id, userId);
     assert.equal((await post(uidB, nextIp(), { sessionId, gameId: GAME, type: 'session_start', value: 0 }, userIdB)).status, 204);
-    const rows = await sql<SessionRow[]>`select id, game_id, first_frame_ms, user_id from sessions where id = ${sessionId}`;
+    const rows = await sql<SessionRow[]>`select id, game_id, first_frame_ms, user_id, started, completed, crashed, duration_ms from sessions where id = ${sessionId}`;
     assert.equal(rows.length, 1);
     assert.equal(rows[0]?.user_id, userId, "another user's session_start must not overwrite user_id");
     assert.equal(rows[0]?.first_frame_ms, 640, "another user's session_start must not touch first_frame_ms");
@@ -307,6 +312,218 @@ describe('session telemetry ordering (db)', () => {
     assert.equal((await row(allowed))?.first_frame_ms, 300, 'same admitted call creates the row on a live game');
   });
 
+  // ---- MG-13: the same race for crash, complete, start and heartbeat ----
+
+  it('crash before session_start still records crashed=true and the later start fills user_id', async (t) => {
+    if (skip(t)) return;
+    const sessionId = nextSession();
+    const uid = randomUUID();
+    const ip = nextIp();
+    assert.equal((await post(uid, ip, { sessionId, gameId: GAME, type: 'crash', value: 0 })).status, 204);
+    assert.equal((await post(uid, ip, { sessionId, gameId: GAME, type: 'session_start', value: 0 }, userId)).status, 204);
+    const r = await row(sessionId);
+    assert.equal(r?.crashed, true);
+    assert.equal(r?.started, false, 'a crash alone must not mark the session started');
+    assert.equal(r?.user_id, userId);
+  });
+
+  it('concurrent session_start/crash: every session keeps crashed=true and exactly one row', async (t) => {
+    if (skip(t)) return;
+    const N = 200;
+    const ids: string[] = [];
+    for (let i = 0; i < N; i++) {
+      const sessionId = nextSession();
+      ids.push(sessionId);
+      const uid = randomUUID();
+      const ip = nextIp();
+      const crash = post(uid, ip, { sessionId, gameId: GAME, type: 'crash', value: 0 });
+      const ss = post(uid, ip, { sessionId, gameId: GAME, type: 'session_start', value: 0 });
+      const res = await (i % 2 ? Promise.all([ss, crash]) : Promise.all([crash, ss]));
+      for (const r of res) assert.equal(r.status, 204);
+    }
+    const rows = await sql<SessionRow[]>`select id, game_id, first_frame_ms, user_id, started, completed, crashed, duration_ms from sessions where id in ${sql(ids)}`;
+    assert.equal(rows.length, N);
+    const lost = rows.filter((r) => !r.crashed).length;
+    assert.equal(lost, 0, `${lost}/${N} sessions lost crashed=true`);
+  });
+
+  it('concurrent session_start/heartbeat/complete/crash: the final row has every merge applied', async (t) => {
+    if (skip(t)) return;
+    const N = 60;
+    const expected = new Map<string, number>();
+    for (let i = 0; i < N; i++) {
+      const sessionId = nextSession();
+      const ms = 30_000 + i;
+      expected.set(sessionId, ms);
+      const uid = randomUUID();
+      const ip = nextIp();
+      const posts = [
+        post(uid, ip, { sessionId, gameId: GAME, type: 'session_start', value: 0 }),
+        post(uid, ip, { sessionId, gameId: GAME, type: 'heartbeat', value: ms }),
+        post(uid, ip, { sessionId, gameId: GAME, type: 'complete', value: 0 }),
+        post(uid, ip, { sessionId, gameId: GAME, type: 'crash', value: 0 }),
+      ];
+      const res = await Promise.all([...posts.slice(i % 4), ...posts.slice(0, i % 4)]);
+      for (const r of res) assert.equal(r.status, 204);
+    }
+    const ids = [...expected.keys()];
+    const rows = await sql<SessionRow[]>`select id, game_id, first_frame_ms, user_id, started, completed, crashed, duration_ms from sessions where id in ${sql(ids)}`;
+    assert.equal(rows.length, N);
+    for (const r of rows) {
+      assert.equal(r.started, true, `session ${r.id} lost started`);
+      assert.equal(r.completed, true, `session ${r.id} lost completed`);
+      assert.equal(r.crashed, true, `session ${r.id} lost crashed`);
+      assert.equal(r.duration_ms, expected.get(r.id), `session ${r.id} lost duration_ms`);
+    }
+  });
+
+  it('later or duplicate events never clear crashed, completed or started; a smaller heartbeat never lowers duration_ms', async (t) => {
+    if (skip(t)) return;
+    const sessionId = nextSession();
+    const uid = randomUUID();
+    const ip = nextIp();
+    await post(uid, ip, { sessionId, gameId: GAME, type: 'crash', value: 0 });
+    await post(uid, ip, { sessionId, gameId: GAME, type: 'complete', value: 0 });
+    await post(uid, ip, { sessionId, gameId: GAME, type: 'heartbeat', value: 9000 });
+    await post(uid, ip, { sessionId, gameId: GAME, type: 'session_start', value: 0 });
+    await post(uid, ip, { sessionId, gameId: GAME, type: 'session_start', value: 0 });
+    await post(uid, ip, { sessionId, gameId: GAME, type: 'crash', value: 0 });
+    await post(uid, ip, { sessionId, gameId: GAME, type: 'start', value: 0 });
+    await post(uid, ip, { sessionId, gameId: GAME, type: 'complete', value: 0 });
+    await post(uid, ip, { sessionId, gameId: GAME, type: 'heartbeat', value: 3000 });
+    const r = await row(sessionId);
+    assert.equal(r?.crashed, true);
+    assert.equal(r?.completed, true);
+    assert.equal(r?.started, true);
+    assert.equal(r?.duration_ms, 9000, 'a smaller heartbeat must not lower duration_ms');
+    await post(uid, ip, { sessionId, gameId: GAME, type: 'heartbeat', value: 20000 });
+    assert.equal((await row(sessionId))?.duration_ms, 20000, 'a larger heartbeat must raise duration_ms');
+  });
+
+  it('crash for an unknown game creates no row and does not 500', async (t) => {
+    if (skip(t)) return;
+    const sessionId = nextSession();
+    const res = await post(randomUUID(), nextIp(), { sessionId, gameId: 'mg10-nosuch', type: 'crash', value: 0 });
+    assert.notEqual(res.status, 500);
+    assert.equal(await row(sessionId), undefined);
+  });
+
+  it('heartbeat for an unknown game creates no row and does not 500', async (t) => {
+    if (skip(t)) return;
+    const sessionId = nextSession();
+    const res = await post(randomUUID(), nextIp(), { sessionId, gameId: 'mg10-nosuch', type: 'heartbeat', value: 5000 });
+    assert.notEqual(res.status, 500);
+    assert.equal(await row(sessionId), undefined);
+  });
+
+  it('crash and heartbeat on an unpublished game create no session row even when admission allows', async (t) => {
+    if (skip(t)) return;
+    const rejected = nextGame();
+    await sql`insert into public.games (id, slug, creator, title, stage)
+              values (${rejected}, ${rejected}, 'mg10', 'MG13 Rejected', 'rejected')`;
+    // Reach the insert guard itself: admission always allows, so only the
+    // public-stage EXISTS in the event insert can stop the row. The route
+    // would 404 earlier on getGame; the DB must not depend on that.
+    const admit = async () => true;
+    const deniedCrash = nextSession();
+    await recordTelemetry(deniedCrash, rejected, 'crash', 0, null, admit);
+    assert.equal(await row(deniedCrash), undefined, 'crash created a session row for an unpublished game');
+    const deniedBeat = nextSession();
+    await recordTelemetry(deniedBeat, rejected, 'heartbeat', 5000, null, admit);
+    assert.equal(await row(deniedBeat), undefined, 'heartbeat created a session row for an unpublished game');
+    const allowed = nextSession();
+    await recordTelemetry(allowed, GAME, 'crash', 0, null, admit);
+    assert.equal((await row(allowed))?.crashed, true, 'same admitted call creates the row on a live game');
+  });
+
+  it('crash naming a different game cannot touch another game’s session row', async (t) => {
+    if (skip(t)) return;
+    const sessionId = nextSession();
+    const uid = randomUUID();
+    const ip = nextIp();
+    await post(uid, ip, { sessionId, gameId: GAME, type: 'session_start', value: 0 });
+    assert.equal((await post(uid, ip, { sessionId, gameId: GAME2, type: 'crash', value: 0 })).status, 204);
+    const r = await row(sessionId);
+    assert.equal(r?.game_id, GAME);
+    assert.equal(r?.crashed, false);
+  });
+
+  it('crash-created rows stay bound by session-start admission (one per uid+game)', async (t) => {
+    if (skip(t)) return;
+    const uid = randomUUID();
+    const ip = nextIp();
+    const a = nextSession();
+    const b = nextSession();
+    assert.equal((await post(uid, ip, { sessionId: a, gameId: GAME, type: 'crash', value: 0 })).status, 204);
+    assert.equal((await post(uid, ip, { sessionId: b, gameId: GAME, type: 'crash', value: 0 })).status, 204);
+    assert.equal((await row(a))?.crashed, true);
+    assert.equal(await row(b), undefined, 'second admitted attempt must not create a row');
+  });
+
+  it('a session_start from another signed-in user cannot take over a crash-created row once claimed', async (t) => {
+    if (skip(t)) return;
+    const sessionId = nextSession();
+    const uidA = randomUUID();
+    const uidB = randomUUID();
+    assert.equal((await post(uidA, nextIp(), { sessionId, gameId: GAME, type: 'crash', value: 0 })).status, 204);
+    // Paired allowed case: A's signed-in start claims the anonymous row.
+    assert.equal((await post(uidA, nextIp(), { sessionId, gameId: GAME, type: 'session_start', value: 0 }, userId)).status, 204);
+    assert.equal((await row(sessionId))?.user_id, userId);
+    assert.equal((await post(uidB, nextIp(), { sessionId, gameId: GAME, type: 'session_start', value: 0 }, userIdB)).status, 204);
+    const rows = await sql<SessionRow[]>`select id, game_id, first_frame_ms, user_id, started, completed, crashed, duration_ms from sessions where id = ${sessionId}`;
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]?.user_id, userId, "another user's session_start must not overwrite user_id");
+    assert.equal(rows[0]?.crashed, true, "another user's session_start must not clear crashed");
+  });
+
+  it('an anonymous crash-created row gains user_id when a later session_start is signed in', async (t) => {
+    if (skip(t)) return;
+    const sessionId = nextSession();
+    const uid = randomUUID();
+    assert.equal((await post(uid, nextIp(), { sessionId, gameId: GAME, type: 'crash', value: 0 })).status, 204);
+    assert.equal((await row(sessionId))?.user_id, null);
+    assert.equal((await post(uid, nextIp(), { sessionId, gameId: GAME, type: 'session_start', value: 0 }, userId)).status, 204);
+    const r = await row(sessionId);
+    assert.equal(r?.user_id, userId);
+    assert.equal(r?.crashed, true);
+  });
+
+  it('complete before session_start still records completed=true and started=true', async (t) => {
+    if (skip(t)) return;
+    const sessionId = nextSession();
+    const uid = randomUUID();
+    const ip = nextIp();
+    assert.equal((await post(uid, ip, { sessionId, gameId: GAME, type: 'complete', value: 0 })).status, 204);
+    assert.equal((await post(uid, ip, { sessionId, gameId: GAME, type: 'session_start', value: 0 })).status, 204);
+    const r = await row(sessionId);
+    assert.equal(r?.completed, true);
+    assert.equal(r?.started, true, 'complete implies started');
+  });
+
+  it('start before session_start still records started=true', async (t) => {
+    if (skip(t)) return;
+    const sessionId = nextSession();
+    const uid = randomUUID();
+    const ip = nextIp();
+    assert.equal((await post(uid, ip, { sessionId, gameId: GAME, type: 'start', value: 0 })).status, 204);
+    assert.equal((await post(uid, ip, { sessionId, gameId: GAME, type: 'session_start', value: 0 })).status, 204);
+    assert.equal((await row(sessionId))?.started, true);
+  });
+
+  it('heartbeat before session_start still records duration_ms, and it only moves forward', async (t) => {
+    if (skip(t)) return;
+    const sessionId = nextSession();
+    const uid = randomUUID();
+    const ip = nextIp();
+    assert.equal((await post(uid, ip, { sessionId, gameId: GAME, type: 'heartbeat', value: 12345 })).status, 204);
+    assert.equal((await post(uid, ip, { sessionId, gameId: GAME, type: 'session_start', value: 0 })).status, 204);
+    assert.equal((await row(sessionId))?.duration_ms, 12345);
+    await post(uid, ip, { sessionId, gameId: GAME, type: 'heartbeat', value: 4000 });
+    assert.equal((await row(sessionId))?.duration_ms, 12345, 'a smaller heartbeat must not lower duration_ms');
+    await post(uid, ip, { sessionId, gameId: GAME, type: 'heartbeat', value: 20000 });
+    assert.equal((await row(sessionId))?.duration_ms, 20000, 'a larger heartbeat must raise duration_ms');
+  });
+
   it('holds no advisory locks after a burst of locked events', async (t) => {
     if (skip(t)) return;
     const peek = postgres(url, { max: 1, prepare: false, connect_timeout: 3 });
@@ -320,7 +537,7 @@ describe('session telemetry ordering (db)', () => {
           post(randomUUID(), nextIp(), {
             sessionId: nextSession(),
             gameId: GAME,
-            type: i % 2 ? 'first_frame' : 'session_start',
+            type: ['session_start', 'first_frame', 'crash', 'heartbeat'][i % 4],
             value: 100 + i,
           })),
       );
@@ -359,7 +576,7 @@ describe('session telemetry ordering (db)', () => {
   });
 
   // Last on purpose: a pre-fix run deadlocks the shared pool for the rest of the file.
-  it('no pool deadlock: >=30 session_start and >=30 first_frame-first creates all complete', async (t) => {
+  it('no pool deadlock: >=30 each of session_start, first_frame-first and crash-first creates all complete', async (t) => {
     if (skip(t)) return;
     // Same shape the route builds: inside the session lock it may only read via `db`
     // (the lock-holding transaction) — the pool could be exhausted by other sessions.
@@ -373,6 +590,7 @@ describe('session telemetry ordering (db)', () => {
       ]);
     const jobs: Promise<unknown>[] = [];
     const expected = new Map<string, number | null>();
+    const crashed = new Set<string>();
     for (let i = 0; i < 30; i++) {
       const sessionId = nextSession();
       expected.set(sessionId, null);
@@ -384,6 +602,12 @@ describe('session telemetry ordering (db)', () => {
       expected.set(sessionId, ms);
       jobs.push(withTimeout(recordTelemetry(sessionId, GAME, 'first_frame', ms, null, admit(randomUUID(), nextIp())), sessionId));
     }
+    for (let i = 0; i < 30; i++) {
+      const sessionId = nextSession();
+      expected.set(sessionId, null);
+      crashed.add(sessionId);
+      jobs.push(withTimeout(recordTelemetry(sessionId, GAME, 'crash', 0, null, admit(randomUUID(), nextIp())), sessionId));
+    }
     const results = await Promise.allSettled(jobs);
     const stuck = results.filter((r) => r.status === 'rejected').length;
     assert.equal(stuck, 0, `${stuck} events did not complete (pool exhaustion/deadlock)`);
@@ -391,6 +615,7 @@ describe('session telemetry ordering (db)', () => {
       const r = await row(sessionId);
       assert.ok(r, `no row for ${sessionId}`);
       assert.equal(r.first_frame_ms, want);
+      assert.equal(r.crashed, crashed.has(sessionId));
     }
   });
 });
