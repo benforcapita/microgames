@@ -129,8 +129,15 @@ describe('game_assets schema', () => {
 
       const [rls] = await sql<{ relrowsecurity: boolean; policies: number }[]>`
         select c.relrowsecurity,
-               -- MGA-1 admin_read (meshgrounds_admin) is the only sanctioned policy.
-               (select count(*)::int from pg_policy p where p.polrelid = c.oid and p.polname <> 'admin_read') as policies
+               -- MGA-1: only an admin_read that is SELECT-only (polcmd 'r') and scoped to
+               -- exactly {meshgrounds_admin} is excluded; anything broader counts and fails.
+               (select count(*)::int from pg_policy p
+                 where p.polrelid = c.oid
+                   and not (p.polname = 'admin_read'
+                            and p.polcmd = 'r'
+                            and p.polroles = array[coalesce(
+                                  (select oid from pg_roles where rolname = 'meshgrounds_admin'),
+                                  '0'::oid)])) as policies
         from pg_class c
         join pg_namespace n on n.oid = c.relnamespace
         where n.nspname = 'public' and c.relname = 'game_assets'
