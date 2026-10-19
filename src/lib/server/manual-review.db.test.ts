@@ -774,7 +774,7 @@ describe('manual review (db)', () => {
           insert into public.sessions (id, game_id, first_frame_ms, started, completed, crashed, duration_ms)
           select gen_random_uuid(), ${id}, 100, true, true, false, 120000
           from generate_series(1, ${plays})`;
-        // MG-9: passing every check makes the game eligible; only a human stage write promotes it.
+        // MG-11: passing every check makes the game eligible; only a human stage write promotes it.
         assert.equal((await getHealth(id, tx)).eligible, true);
         const [eligible] = await tx<{ stage: string; graduated_at: Date | null }[]>`
           select stage, graduated_at from public.games where id = ${id}`;
