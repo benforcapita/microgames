@@ -42,8 +42,10 @@ function isValidDatabaseUrl(raw: string): boolean {
   } catch {
     return false;
   }
+  // User: exactly `meshgrounds_admin`, or the pooler form
+  // `meshgrounds_admin.<project-ref>` where ref is ^[a-z0-9]{20}$.
   return (
     (url.protocol === 'postgres:' || url.protocol === 'postgresql:') &&
-    url.username === 'meshgrounds_admin'
+    /^meshgrounds_admin(\.[a-z0-9]{20})?$/.test(url.username)
   );
 }
