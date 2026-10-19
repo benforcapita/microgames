@@ -45,8 +45,8 @@ describe('clean_orphan_game_asset migration files', () => {
     const second = names.indexOf(`${MIGRATION}.sql`);
     assert.ok(first >= 0, 'the original clean_orphan migration stays in the PR history');
     assert.ok(second > first, `object-check sorts after the original (${first} -> ${second})`);
-    // Manual review (20261018140000) lands after this file; the object-check is no longer last.
-    assert.equal(names.at(-1), '20261018140000_manual_review.sql', `last migration: ${names.at(-1)}`);
+    // Later migrations land after this file; the object-check is no longer last.
+    assert.notEqual(names.at(-1), `${MIGRATION}.sql`, `object-check must not be the last migration`);
   });
 });
 
