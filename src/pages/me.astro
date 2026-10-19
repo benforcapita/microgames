@@ -1,9 +1,11 @@
 ---
 import Layout from '../layouts/Layout.astro';
 import GameThumb from '../components/GameThumb.astro';
-import { listGames, ownerReviewMarks } from '../lib/server/games';
+import UploadSection from '../components/UploadSection.astro';
+import { getGame, listGames, ownerReviewMarks } from '../lib/server/games';
 import { ownerPreviewToken } from '../lib/server/owner-preview';
-import { compact, count, stars, ago } from '../lib/format';
+import { readManualReview } from '../lib/server/manual-review';
+import { count, stars, ago } from '../lib/format';
 
 const { user, profile } = Astro.locals;
 const NO_STORE = 'private, no-store';
@@ -14,7 +16,13 @@ if (!user || !profile) {
   r.headers.set('Cache-Control', NO_STORE);
   return r;
 }
-const games = await listGames({ ownerId: user.id, sort: 'new', limit: 200, includeUnpublished: true });
+const forkSlug = Astro.url.searchParams.get('fork');
+const [games, manualReview, fork] = await Promise.all([
+  listGames({ ownerId: user.id, sort: 'new', limit: 200, includeUnpublished: true }),
+  readManualReview(),
+  forkSlug ? getGame(forkSlug) : null,
+]);
+const forkable = fork && fork.license !== 'All rights reserved' ? fork : null;
 const marks = await ownerReviewMarks(games.map((g) => g.id));
 const stageText = (stage: string, id: string) => {
   if (stage === 'pending' && marks.get(id)?.latestStatus === 'passed') return 'Awaiting review';
@@ -37,7 +45,7 @@ const deleted = Astro.url.searchParams.has('deleted');
       </div>
       <div class="row">
         <a class="btn ghost" href={`/u/${profile.handle}`}>Public profile</a>
-        <a class="btn" href="/upload">Upload a game</a>
+        <a class="btn" href="#upload">Upload a game</a>
       </div>
     </div>
     {deleted && <p class="panel notice">Game deleted.</p>}
@@ -66,10 +74,19 @@ const deleted = Astro.url.searchParams.has('deleted');
       ) : (
         <div class="panel empty">
           <p>You haven't uploaded anything yet.</p>
-          <a class="btn" href="/upload">Ship your first game</a>
+          <a class="btn" href="#upload">Ship your first game</a>
         </div>
       )
     }
+  </section>
+
+  <section class="section wrap">
+    <UploadSection profile={profile} forkable={forkable} manualReview={manualReview} />
+  </section>
+
+  <section class="section wrap account">
+    <span class="eyebrow">Account</span>
+    <p class="muted mono">{user.email}</p>
     <form method="post" action="/api/auth/logout" class="logout"><button class="btn ghost sm" type="submit">Log out</button></form>
   </section>
 </Layout>
@@ -85,7 +102,8 @@ const deleted = Astro.url.searchParams.has('deleted');
   .review-note { display: block; margin-top: 0.35rem; color: var(--bad); }
   .notice { margin-top: 1rem; border-color: #c4ff3d55; }
   .empty { text-align: center; padding: 3rem; margin-top: 2rem; }
-  .logout { margin-top: 2rem; }
+  .account { border-top: 1px solid var(--line); }
+  .account p { margin: 0 0 1rem; }
 </style>
 
 <script>

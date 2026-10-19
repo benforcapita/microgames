@@ -243,12 +243,14 @@ export async function readSubmission(opts: {
   store: SubmissionStore;
   /** In-memory tests pass this. Omitted means the database row. */
   manualReview?: boolean;
+  /** AD-1: an admin working the review queue may read any submission, not only their own. */
+  reviewer?: boolean;
 }): Promise<SubmissionAccess> {
   if (!opts.userId) return { status: 401, error: 'Log in to view this submission.' };
   if (!ID_RE.test(opts.gameId)) return { status: 404, error: 'Not found' };
 
   const game = await opts.store.getGame(opts.gameId);
-  if (!game || game.ownerId !== opts.userId) return { status: 404, error: 'Not found' };
+  if (!game || (game.ownerId !== opts.userId && !opts.reviewer)) return { status: 404, error: 'Not found' };
 
   const validation = await opts.store.latestValidation(game.id);
   const manualReview = opts.manualReview ?? await readManualReview();
@@ -260,6 +262,7 @@ export async function handleSubmissionStatus(opts: {
   gameId: string;
   store: SubmissionStore;
   manualReview?: boolean;
+  reviewer?: boolean;
 }): Promise<Response> {
   const result = await readSubmission(opts);
   if (result.status !== 200) {

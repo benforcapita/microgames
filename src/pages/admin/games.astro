@@ -1,0 +1,75 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import AdminGameRow from '../../components/AdminGameRow.astro';
+import { listAdminGames, type AdminListOptions } from '../../lib/server/admin';
+import { requireAdmin } from '../../lib/server/admin-page';
+import { STAGES, type Stage } from '../../lib/server/game-rules';
+
+const gate = await requireAdmin(Astro);
+if (gate) return gate;
+
+const q = Astro.url.searchParams.get('q') ?? '';
+const stageParam = Astro.url.searchParams.get('stage') ?? '';
+const stage = (STAGES as readonly string[]).includes(stageParam) ? (stageParam as Stage) : undefined;
+const sortParam = Astro.url.searchParams.get('sort') ?? 'new';
+const sort = (['new', 'plays', 'plays7d'] as const).find((s) => s === sortParam) ?? 'new';
+const games = await listAdminGames({ stage, q, sort } satisfies AdminListOptions);
+const error = Astro.url.searchParams.get('error');
+const reviewed = Astro.url.searchParams.get('reviewed');
+const to = Astro.url.searchParams.get('to');
+// Return here after a decision, keeping the filters but dropping the one-shot flash params.
+const keep = new URLSearchParams(Astro.url.searchParams);
+for (const k of ['error', 'reviewed', 'to']) keep.delete(k);
+const next = `/admin/games${keep.size ? `?${keep}` : ''}`;
+---
+
+<Layout title="Admin · Games" noindex>
+  <section class="section wrap">
+    <div class="spread">
+      <div>
+        <span class="eyebrow">Admin</span>
+        <h1>All games <span class="muted">({games.length})</span></h1>
+      </div>
+      <nav class="row tabs mono">
+        <a href="/admin">Overview</a>
+        <a href="/admin/games" aria-current="page">All games</a>
+      </nav>
+    </div>
+    {error && <p class="panel notice bad" role="alert">{error}</p>}
+    {reviewed && <p class="panel notice">Game <code>{reviewed}</code> is now <b>{to}</b>.</p>}
+
+    <form method="get" class="panel filters" role="search">
+      <input type="search" name="q" value={q} placeholder="title, slug, creator or id" aria-label="Search games" />
+      <select name="stage" aria-label="Stage">
+        <option value="">Any stage</option>
+        {STAGES.map((s) => <option value={s} selected={s === stage}>{s}</option>)}
+      </select>
+      <select name="sort" aria-label="Sort">
+        <option value="new" selected={sort === 'new'}>Newest</option>
+        <option value="plays7d" selected={sort === 'plays7d'}>Plays this week</option>
+        <option value="plays" selected={sort === 'plays'}>Plays all time</option>
+      </select>
+      <button class="btn sm" type="submit">Filter</button>
+    </form>
+
+    {
+      games.length ? (
+        <ul class="list">{games.map((g) => <AdminGameRow game={g} next={next} />)}</ul>
+      ) : (
+        <p class="panel empty muted">No games match.</p>
+      )
+    }
+  </section>
+</Layout>
+
+<style>
+  .tabs a { text-decoration: none; color: var(--muted); font-size: 0.85rem; }
+  .tabs a[aria-current='page'], .tabs a:hover { color: var(--text); }
+  .notice { margin-top: 1rem; border-color: #c4ff3d55; }
+  .notice.bad { border-color: #ff5d5d66; color: #ffb3b3; }
+  .filters { display: grid; grid-template-columns: 1fr auto auto auto; gap: 0.6rem; padding: 0.75rem; margin: 1.5rem 0 1rem; align-items: center; }
+  .filters input, .filters select { margin: 0; }
+  .list { list-style: none; padding: 0; margin: 0; display: grid; gap: 0.75rem; }
+  .empty { padding: 2rem; text-align: center; }
+  @media (max-width: 720px) { .filters { grid-template-columns: 1fr 1fr; } .filters input { grid-column: 1 / -1; } }
+</style>

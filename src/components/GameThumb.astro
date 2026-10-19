@@ -4,7 +4,7 @@ import { CDN_ORIGIN } from '../lib/server/config';
 import MeshArt from './MeshArt.astro';
 
 interface Props {
-  game: Game;
+  game: Pick<Game, 'id' | 'thumb' | 'hue'>;
   class?: string;
   eager?: boolean;
   previewToken?: string | null;

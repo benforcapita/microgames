@@ -5,6 +5,7 @@ Open exchange for single-file browser games (Three.js etc.). Astro 7 SSR (`@astr
 ## Commands
 - `npm run db:start` / `npm run db:stop` — local Supabase stack (applies `supabase/migrations/*`); Mailpit inbox for auth emails at http://127.0.0.1:54324
 - `npm run seed` — demo games into the configured Supabase with zero plays/ratings (`-- --force` replaces them and their stats; `-- --synthetic-plays` adds fake sessions/ratings for local health/eligibility testing only)
+- `npm run admin:grant -- <handle> [--revoke]` — sets `profiles.role` to `admin` (unlocks `/admin`); `npx supabase migration up --local` applies pending migrations to the running local stack without wiping data
 - `npm run dev` — portal on http://localhost:4321 **and** the game CDN on http://localhost:4322 (both required; loads `.env`)
 - `npm run check` — `astro check` (types); `npm run build` — production build; `npm start` runs built portal + CDN
 - `npm run launch:video` — renders the launch film (`launch/video.html` + synthesized soundtrack) to `launch/out/meshground-launch.mp4` (needs ffmpeg + Playwright Chromium); `node launch/render.mjs --stills 3,24` for quick PNG checks; open `launch/video.html` directly to preview
@@ -21,6 +22,8 @@ Open exchange for single-file browser games (Three.js etc.). Astro 7 SSR (`@astr
 - `public/EXCHANGE_SDK.md` — prompt file creators paste into their AI coding tool; keep message types in sync with `player.ts` / `boot.js`
 - Game iframes use `sandbox="allow-scripts allow-pointer-lock"` — never add `allow-same-origin`
 - Uploading, rating, and cloud saves require login; playing does not.
+- Upload form lives on `/me#upload` (`src/components/UploadSection.astro`); `/upload` is a redirect alias that also carries `?fork=`. `/me` therefore gets the blob `frame-src` CSP.
+- Admin (`profiles.role = 'admin'`, `isAdmin()` in `profiles.ts`): `/admin` (analytics + MR-1 review queue from `games_awaiting_review`), `/admin/games`, `POST /api/admin/games/:id/review` (`decision=approve|reject`, reject needs `note`). Transition rules are pure in `src/lib/admin-rules.ts`; admins can open pending games on `/play` and `/submissions` via `reviewerPreviewToken`.
 
 ## Verification
 - `npm run check` and `npm run build` must pass

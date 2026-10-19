@@ -62,14 +62,14 @@ test('upload preview captures a 2D and a WebGL canvas, and times out when nothin
   const email = `qa-${stamp}@example.com`;
   const handle = `qa${stamp}`.slice(0, 32);
 
-  await page.goto('/login?mode=signup&next=/upload');
+  await page.goto('/login?mode=signup&next=/me');
   await page.locator('input[name="email"]').fill(email);
   await page.locator('input[name="password"]').fill('testpass1');
   await page.getByRole('button', { name: 'Sign up' }).click();
   await page.waitForURL(/\/onboarding/);
   await page.locator('input[name="handle"]').fill(handle);
   await page.getByRole('button', { name: 'Claim handle' }).click();
-  await page.waitForURL(/\/upload$/);
+  await page.waitForURL(/\/me(#upload)?$/);
   await expect(page.getByRole('heading', { name: 'Upload a game' })).toBeVisible();
 
   const gameInput = page.locator('input[name="game"]');

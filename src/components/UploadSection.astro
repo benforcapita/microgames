@@ -1,0 +1,371 @@
+---
+import CreatorPrompts from './CreatorPrompts.astro';
+import { homeCreatorSentence, uploadOutcome } from '../lib/manual-review';
+import { GAME_SIZE_LIMIT, UPLOAD } from '../lib/server/config';
+import type { Game } from '../lib/server/games';
+import type { Profile } from '../lib/server/profiles';
+
+interface Props {
+  profile: Profile;
+  /** A remixable parent game: the form is prefilled and the upload is recorded as a fork. */
+  forkable: Game | null;
+  manualReview: boolean;
+}
+const { profile, forkable, manualReview } = Astro.props;
+---
+
+<section class="upload" id="upload">
+  <div class="intro">
+    <span class="eyebrow">{forkable ? 'Remix' : 'Ship it'}</span>
+    <h2>{forkable ? `Fork ${forkable.title}` : 'Upload a game'}</h2>
+    <p class="muted">
+      One self-contained <code>.html</code> file — {GAME_SIZE_LIMIT}. Load Three.js from a CDN
+      such as jsDelivr, unpkg or esm.sh. {uploadOutcome(manualReview)}
+    </p>
+    {
+      forkable && (
+        <div class="panel fork">
+          Grab the <a href={`/play/${forkable.slug}`}>original</a>'s source, remix it, and upload your version.
+          Your fork credits @{forkable.creator} as the original creator.
+        </div>
+      )
+    }
+    <div class="panel creators">
+      <span class="eyebrow">For creators</span>
+      <h3>Built it with Claude, Cursor or by hand? Ship it here.</h3>
+      <p class="muted">{homeCreatorSentence(manualReview)}</p>
+      <ol class="steps">
+        <li><b>Build</b><span class="muted">Any tool, any AI. Three.js, Canvas, WebGPU, as long as it's one self-contained file.</span></li>
+        <li><b>Drop</b><span class="muted">Upload the .html. We sandbox it, add telemetry, and handle pause and saves automatically.</span></li>
+        <li><b>Graduate</b><span class="muted">Players and real telemetry decide eligibility. Clear the bar and our team promotes your game — then others can fork it.</span></li>
+      </ol>
+      <a class="btn ghost sm" href="/creators">How it works</a>
+    </div>
+    <div class="panel tips">
+      <h3>Works out of the box</h3>
+      <ul class="muted">
+        <li>Auto-pause and mute during ad breaks</li>
+        <li><code>localStorage</code> saves persist</li>
+        <li>Crash and load-time telemetry</li>
+      </ul>
+      <p class="muted">
+        Want rewarded-ad revives and score tracking? Paste <a href="/EXCHANGE_SDK.md">EXCHANGE_SDK.md</a> into your AI
+        coding tool and ask it to integrate.
+      </p>
+    </div>
+    <CreatorPrompts />
+  </div>
+
+  <form id="upload-form" class="panel form" method="post" action="/api/games" enctype="multipart/form-data" data-max-html={UPLOAD.maxHtmlBytes} data-max-thumb={UPLOAD.maxThumbBytes} data-size-limit={GAME_SIZE_LIMIT}>
+    {forkable && <input type="hidden" name="forkOf" value={forkable.slug} />}
+    <div id="errors" class="errors" role="alert" hidden></div>
+    <label>Game file <small>single .html, everything inlined except CDN libraries</small>
+      <input type="file" name="game" accept=".html,.htm,text/html" required />
+    </label>
+    <label>Title <small>publishing as <b class="accent">@{profile.handle}</b></small>
+      <input name="title" maxlength="60" required value={forkable ? `${forkable.title} Remix` : ''} />
+    </label>
+    <label>Tagline <small>one punchy line</small><input name="tagline" maxlength="90" /></label>
+    <label>Description <small>controls, goal, what you built it with</small><textarea name="description" rows="5" maxlength="2000"></textarea></label>
+    <div class="two">
+      <label>Tags <small>comma separated, up to 6</small><input name="tags" placeholder="arcade, physics, one-button" /></label>
+      <label>License
+        <select name="license">
+          {UPLOAD.licenses.map((l) => <option value={l} selected={forkable ? l === forkable.license : l === 'MIT'}>{l}</option>)}
+        </select>
+      </label>
+    </div>
+    <label>Thumbnail <small>required · PNG, JPEG, or WebP, at most {UPLOAD.maxThumbWidth}×{UPLOAD.maxThumbHeight}, under 512 KB</small>
+      <input id="thumb-file" type="file" name="thumb" accept="image/png,image/jpeg,image/webp" />
+    </label>
+    <div id="snap" class="snap" hidden>
+      <div class="stage">
+        <iframe id="game-preview" title="Game preview" sandbox="allow-scripts allow-pointer-lock" referrerpolicy="no-referrer"></iframe>
+        <img id="snap-img" alt="Captured preview of your game" hidden />
+      </div>
+      <div class="snap-copy">
+        <p id="snap-msg" class="muted"></p>
+        <button id="use-preview" class="btn ghost sm" type="button" hidden>Use this preview</button>
+      </div>
+    </div>
+    <label class="agree">
+      <span><input type="checkbox" name="agree" required /> I confirm this game contains no unlicensed copyrighted art, music
+      or characters, and no voice clones of real people. <a href="/creators#rules">Content rules</a></span>
+    </label>
+    <div id="asset-warnings" hidden></div>
+    <button class="btn" type="submit">Submit for validation</button>
+  </form>
+</section>
+
+<style>
+  .upload { display: grid; grid-template-columns: 1fr 1.3fr; gap: 2.5rem; align-items: start; scroll-margin-top: 80px; }
+  .intro { position: sticky; top: 90px; display: grid; gap: 1rem; }
+  .intro p { margin: 0; }
+  .fork { border-color: #ff4fd855; }
+  .creators { display: grid; gap: 0.75rem; }
+  .creators h3 { margin: 0; font-size: 1.25rem; }
+  .creators .eyebrow { margin-bottom: 0; }
+  .creators .btn { justify-self: start; }
+  .steps { list-style: none; counter-reset: s; margin: 0.25rem 0; padding: 0; display: grid; gap: 0.9rem; }
+  .steps li { counter-increment: s; display: grid; grid-template-columns: 2.2rem 1fr; column-gap: 0.6rem; font-size: 0.9rem; }
+  .steps li::before {
+    content: counter(s, decimal-leading-zero);
+    grid-row: span 2;
+    font: 700 1rem var(--mono);
+    color: var(--accent);
+  }
+  .tips ul { padding-left: 1.2rem; margin: 0.5rem 0 1rem; }
+  .form { display: grid; gap: 1.1rem; padding: 1.75rem; }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+  .agree span { font-weight: 400; font-size: 0.85rem; color: var(--muted); }
+  .agree input { width: auto; margin-right: 0.4rem; }
+  .errors { background: #ff5d5d1a; border: 1px solid #ff5d5d66; color: #ffb3b3; border-radius: 10px; padding: 0.75rem 1rem; }
+  .errors ul { margin: 0; padding-left: 1.1rem; }
+  .snap { display: grid; grid-template-columns: minmax(0, 320px) 1fr; gap: 1rem; align-items: center; }
+  .snap[hidden], .snap [hidden] { display: none !important; }
+  .stage { position: relative; width: 100%; max-width: 320px; height: auto; aspect-ratio: 16 / 9; overflow: hidden; border-radius: 10px; background: #000; border: 1px solid var(--line); }
+  .stage iframe { width: 200%; height: 200%; border: 0; transform: scale(0.5); transform-origin: top left; }
+  .stage img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; background: #000; }
+  .snap-copy { display: grid; gap: 0.6rem; align-content: center; }
+  .snap-copy p { margin: 0; }
+  #use-preview[aria-pressed='true'] { border-color: var(--accent); color: var(--accent); }
+  #asset-warnings { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 1.25rem; display: grid; gap: 0.75rem; }
+  #asset-warnings[hidden] { display: none !important; }
+  /* Children are created by the client script, so they carry no Astro scope attribute: hence :global. */
+  #asset-warnings :global(p) { margin: 0; }
+  #asset-warnings :global(ul) { margin: 0.25rem 0 0; padding-left: 1.25rem; }
+  #asset-warnings :global(li), #asset-warnings :global(p) { overflow-wrap: anywhere; }
+  #asset-warnings :global(.warn) { color: var(--warn); }
+  @media (max-width: 860px) {
+    .upload, .two, .snap { grid-template-columns: 1fr; }
+    .intro { position: static; }
+  }
+</style>
+
+<script>
+  import boot from '../../cdn/boot.js?raw';
+  import { PREVIEW_TIMEOUT_COPY, createPreviewWatch, injectPreview } from '../client/upload-preview';
+  import { formatTotal, summarizeAssets } from '../lib/asset-limits';
+
+  const form = document.getElementById('upload-form') as HTMLFormElement;
+  const errors = document.getElementById('errors')!;
+  const gameInput = form.querySelector<HTMLInputElement>('input[name="game"]')!;
+  const assetWarnings = document.getElementById('asset-warnings');
+  const thumbInput = document.getElementById('thumb-file') as HTMLInputElement;
+  const snap = document.getElementById('snap')!;
+  const frame = document.getElementById('game-preview') as HTMLIFrameElement;
+  const shot = document.getElementById('snap-img') as HTMLImageElement;
+  const snapMsg = document.getElementById('snap-msg')!;
+  const usePreview = document.getElementById('use-preview') as HTMLButtonElement;
+  let previewUrl = '';
+  let snapshot: { dataUrl: string; type: string } | null = null;
+  let usingPreview = false;
+  const watch = createPreviewWatch({
+    schedule: (ms, fn) => window.setTimeout(fn, ms),
+    cancel: (id) => window.clearTimeout(id),
+  });
+
+  function injectBoot(html: string): string {
+    return injectPreview(html, boot);
+  }
+
+  function dataUrlToFile(dataUrl: string, type: string): File {
+    const bin = atob(dataUrl.slice(dataUrl.indexOf(',') + 1));
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const ext = type === 'image/webp' ? 'webp' : type === 'image/jpeg' ? 'jpg' : 'png';
+    return new File([bytes], `preview.${ext}`, { type: type || 'image/png' });
+  }
+
+  function showSnapshotChoice() {
+    const hasFile = (thumbInput.files?.length ?? 0) > 0;
+    if (!snapshot || hasFile) {
+      usePreview.hidden = true;
+      return;
+    }
+    shot.src = snapshot.dataUrl;
+    shot.hidden = false;
+    usePreview.hidden = false;
+    snapMsg.textContent = usingPreview ? 'This preview will be the thumbnail.' : 'No thumbnail file selected.';
+  }
+
+  function renderAssetWarnings(container: HTMLElement, summary: ReturnType<typeof summarizeAssets>) {
+    container.replaceChildren();
+
+    const totalP = document.createElement('p');
+    if (summary.overTotal) totalP.className = 'warn';
+    totalP.textContent = `Whole game: ${formatTotal(summary.totalBytes)} of 4 MB`;
+    container.appendChild(totalP);
+
+    if (summary.missing.length > 0) {
+      const missingDiv = document.createElement('div');
+      missingDiv.setAttribute('role', 'status');
+
+      const msgP = document.createElement('p');
+      msgP.className = 'warn';
+      msgP.textContent = `${summary.missing.length} referenced file(s) not uploaded yet (upload them from the game's assets page after submitting):`;
+      missingDiv.appendChild(msgP);
+
+      const ul = document.createElement('ul');
+      for (const path of summary.missing) {
+        const li = document.createElement('li');
+        li.textContent = path;
+        ul.appendChild(li);
+      }
+      missingDiv.appendChild(ul);
+      container.appendChild(missingDiv);
+    }
+
+    container.hidden = false;
+  }
+
+  gameInput.addEventListener('change', () => {
+    const file = gameInput.files?.[0];
+    snapshot = null;
+    usingPreview = false;
+    usePreview.hidden = true;
+    usePreview.setAttribute('aria-pressed', 'false');
+    usePreview.textContent = 'Use this preview';
+    shot.hidden = true;
+    shot.removeAttribute('src');
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    previewUrl = '';
+    watch.stop();
+    if (assetWarnings) {
+      assetWarnings.hidden = true;
+      assetWarnings.replaceChildren();
+    }
+    if (!file) { snap.hidden = true; return; }
+    snap.hidden = false;
+    // Off-screen cross-origin iframes may get no animation frames, which capture relies on.
+    snap.scrollIntoView({ block: 'nearest' });
+    snapMsg.textContent = 'Capturing a preview from the first frames…';
+    watch.start(() => {
+      if (snapshot || (thumbInput.files?.length ?? 0) > 0) return;
+      shot.hidden = true;
+      usePreview.hidden = true;
+      snapMsg.textContent = PREVIEW_TIMEOUT_COPY;
+    });
+    file.text().then((html) => {
+      previewUrl = URL.createObjectURL(new Blob([injectBoot(html)], { type: 'text/html' }));
+      frame.src = previewUrl;
+
+      // The scanner pulls in acorn (~37 KB gz), so it loads only once a file is picked, not with the page.
+      import('../lib/server/asset-scan').then(({ scanAssetSource }) => {
+        if (!assetWarnings || gameInput.files?.[0] !== file) return;
+        const scan = scanAssetSource(html);
+        renderAssetWarnings(assetWarnings, summarizeAssets({
+          codeBytes: file.size,
+          assets: scan.assets.map((a) => ({ path: a.path, status: 'missing', sizeBytes: null })),
+        }));
+      }).catch(() => {
+        if (!assetWarnings || gameInput.files?.[0] !== file) return;
+        assetWarnings.replaceChildren();
+        const notice = document.createElement('p');
+        notice.className = 'warn';
+        notice.setAttribute('role', 'status');
+        notice.textContent = "Couldn't check for missing files; the submission page will list them";
+        assetWarnings.appendChild(notice);
+        assetWarnings.hidden = false;
+      });
+    }).catch(() => {
+      watch.stop();
+      snapMsg.textContent = 'Could not read that file. Upload a PNG, JPEG, or WebP thumbnail.';
+      if (assetWarnings) {
+        assetWarnings.hidden = true;
+        assetWarnings.replaceChildren();
+      }
+    });
+  });
+
+  thumbInput.addEventListener('change', () => {
+    if ((thumbInput.files?.length ?? 0) > 0) {
+      usingPreview = false;
+      usePreview.setAttribute('aria-pressed', 'false');
+      usePreview.textContent = 'Use this preview';
+    }
+    showSnapshotChoice();
+    if ((thumbInput.files?.length ?? 0) > 0) snapMsg.textContent = 'Using the thumbnail file you selected.';
+  });
+
+  usePreview.addEventListener('click', () => {
+    if (!snapshot) return;
+    usingPreview = true;
+    usePreview.setAttribute('aria-pressed', 'true');
+    usePreview.textContent = 'Using this preview';
+    snapMsg.textContent = 'This preview will be the thumbnail.';
+  });
+
+  window.addEventListener('message', (e) => {
+    if (e.source !== frame.contentWindow || !e.data || e.data.type !== '__MG_SNAPSHOT') return;
+    watch.arrived();
+    if (typeof e.data.error === 'string') {
+      snapshot = null;
+      usingPreview = false;
+      shot.hidden = true;
+      usePreview.hidden = true;
+      snapMsg.textContent = e.data.error;
+      return;
+    }
+    if (typeof e.data.dataUrl !== 'string') return;
+    snapshot = { dataUrl: e.data.dataUrl, type: String(e.data.mime || 'image/png') };
+    showSnapshotChoice();
+  });
+
+  const showErrors = (list: string[]) => {
+    const ul = document.createElement('ul');
+    list.forEach((msg) => ul.append(Object.assign(document.createElement('li'), { textContent: msg })));
+    errors.replaceChildren(ul);
+    errors.hidden = false;
+    errors.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  };
+
+  // Cheap checks the server would reject anyway, so a too-big file fails instantly instead of after a full upload.
+  const maxHtml = Number(form.dataset.maxHtml), maxThumb = Number(form.dataset.maxThumb);
+  const precheck = (): string[] => {
+    const out: string[] = [];
+    const game = gameInput.files?.[0], thumb = thumbInput.files?.[0];
+    if (game && !/\.html?$/i.test(game.name)) out.push('Game file must be .html.');
+    if (game && game.size > maxHtml) out.push(`${form.dataset.sizeLimit} (yours is ${(game.size / 1024 / 1024).toFixed(1)} MB).`);
+    if (thumb && thumb.size > maxThumb) out.push(`Thumbnail must be under ${Math.round(maxThumb / 1024)} KB.`);
+    if (!thumb && !(usingPreview && snapshot)) out.push('A thumbnail is required. Pick a file or use the captured preview.');
+    return out;
+  };
+
+  /** XHR rather than fetch so we can show upload progress for multi-MB games. */
+  const send = (body: FormData, onProgress: (pct: number) => void) =>
+    new Promise<{ url: string; status: number; text: string }>((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', form.action);
+      xhr.upload.onprogress = (ev) => ev.lengthComputable && onProgress(Math.round((ev.loaded / ev.total) * 100));
+      xhr.onload = () => resolve({ url: xhr.responseURL, status: xhr.status, text: xhr.responseText });
+      xhr.onerror = () => reject(new Error('network'));
+      xhr.send(body);
+    });
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const pre = precheck();
+    if (pre.length) return showErrors(pre);
+    errors.hidden = true;
+    const btn = form.querySelector<HTMLButtonElement>('button[type="submit"]')!;
+    btn.disabled = true;
+    btn.textContent = 'Uploading…';
+    try {
+      const body = new FormData(form);
+      const hasFile = (thumbInput.files?.length ?? 0) > 0;
+      if (!hasFile && usingPreview && snapshot) body.set('thumb', dataUrlToFile(snapshot.dataUrl, snapshot.type));
+      const res = await send(body, (pct) => (btn.textContent = pct < 100 ? `Uploading… ${pct}%` : 'Checking your game…'));
+      const target = new URL(res.url || form.action, location.href);
+      if (res.status < 400 && target.pathname !== new URL(form.action, location.href).pathname) return void location.assign(target.href);
+      let data: { errors?: string[]; error?: string } = {};
+      try { data = JSON.parse(res.text); } catch {}
+      showErrors(data.errors ?? (data.error ? [data.error] : [`Upload failed (HTTP ${res.status}).`]));
+    } catch {
+      showErrors(['Upload failed. Check your connection and try again.']);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Submit for validation';
+    }
+  });
+</script>

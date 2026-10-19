@@ -18,14 +18,14 @@ frame();
 test('one missing file is warned on upload and on the submission page, and submit still works', async ({ page }) => {
   test.setTimeout(120_000);
   const stamp = Date.now().toString(36);
-  await page.goto('/login?mode=signup&next=/upload');
+  await page.goto('/login?mode=signup&next=/me');
   await page.locator('input[name="email"]').fill(`as4-${stamp}@example.com`);
   await page.locator('input[name="password"]').fill('testpass1');
   await page.getByRole('button', { name: 'Sign up' }).click();
   await page.waitForURL(/\/onboarding/);
   await page.locator('input[name="handle"]').fill(`as4${stamp}`.slice(0, 32));
   await page.getByRole('button', { name: 'Claim handle' }).click();
-  await page.waitForURL(/\/upload$/);
+  await page.waitForURL(/\/me(#upload)?$/);
 
   await page.locator('input[name="game"]').setInputFiles({ name: 'missing.html', mimeType: 'text/html', buffer: Buffer.from(game) });
   const warn = page.locator('#asset-warnings');

@@ -7,8 +7,9 @@ import { isSubmissionPreviewPath } from './lib/server/submissions';
 
 const AD_FRAMES = ADSENSE_CLIENT ? ' https://*.googlesyndication.com https://*.doubleclick.net https://*.google.com' : '';
 const CSP = `frame-src ${CDN_ORIGIN}${AD_FRAMES}; frame-ancestors 'self'; object-src 'none'; base-uri 'self'`;
-// The upload page previews the chosen file in a blob iframe so boot.js can capture a thumbnail.
+// The upload form (on the creator dashboard) previews the chosen file in a blob iframe so boot.js can capture a thumbnail.
 const UPLOAD_CSP = `frame-src ${CDN_ORIGIN} blob:${AD_FRAMES}; frame-ancestors 'self'; object-src 'none'; base-uri 'self'`;
+const UPLOAD_PAGES = new Set(['/me', '/upload']);
 // UP-2b: the Files page PUTs assets to the signed URL the sign endpoint mints, which lives on the
 // configured Supabase origin (its /storage/v1 routes). Self covers the sign/finalize JSON calls;
 // nothing broader — every other page keeps the default connect-src.
@@ -31,7 +32,7 @@ export const onRequest = defineMiddleware(async (ctx, next) => {
 
   if (isSubmissionPreviewPath(pathname)) {
     ctx.locals.user = { id: 'preview-owner', email: 'preview@meshground.local' };
-    ctx.locals.profile = { id: 'preview-owner', handle: 'preview' };
+    ctx.locals.profile = { id: 'preview-owner', handle: 'preview', role: 'user' };
   } else if (!ANONYMOUS.has(pathname)) {
     const { data } = await ctx.locals.supabase.auth.getClaims();
     const claims = data?.claims;
@@ -46,7 +47,7 @@ export const onRequest = defineMiddleware(async (ctx, next) => {
 
   const res = await next();
   authHeaders.forEach((v, k) => res.headers.set(k, v));
-  res.headers.set('Content-Security-Policy', pathname === '/upload' ? UPLOAD_CSP : isAssetsPage(pathname) ? ASSETS_CSP : CSP);
+  res.headers.set('Content-Security-Policy', UPLOAD_PAGES.has(pathname) ? UPLOAD_CSP : isAssetsPage(pathname) ? ASSETS_CSP : CSP);
   res.headers.set('X-Content-Type-Options', 'nosniff');
   res.headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
   applyDeviceHeaders(res.headers, pathname);

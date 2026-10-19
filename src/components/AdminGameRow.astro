@@ -1,0 +1,57 @@
+---
+import GameThumb from './GameThumb.astro';
+import ReviewActions from './ReviewActions.astro';
+import type { AdminGame } from '../lib/server/admin';
+import { reviewerPreviewToken } from '../lib/server/owner-preview';
+import { ago, count, pct, stars } from '../lib/format';
+
+interface Props {
+  game: AdminGame;
+  next: string;
+}
+const { game: g, next } = Astro.props;
+const token = reviewerPreviewToken(g, true);
+const STAGE = { pending: 'Pending', proving: 'Proving Grounds', live: 'Live', rejected: 'Rejected' } as const;
+const stageText = g.awaitingReview ? 'Awaiting review' : STAGE[g.stage];
+---
+
+<li class="panel item" data-game={g.id}>
+  <a href={`/play/${g.slug}`} class="thumb"><GameThumb game={g} class="art" previewToken={token} /></a>
+  <div class="meta">
+    <a href={`/play/${g.slug}`}><h3>{g.title}</h3></a>
+    <p class="muted mono">
+      <span class:list={['badge', g.stage]}>{stageText}</span>{' '}
+      by <a href={`/u/${g.creator}`}>@{g.creator}</a>{g.ownerHandle && g.ownerHandle !== g.creator && <> (owner @{g.ownerHandle})</>}
+      {' · '}uploaded {ago(g.createdAt)}
+      {g.reviewedAt && <> · reviewed {ago(g.reviewedAt)}</>}
+      {g.latestValidation && <> · validation <b class:list={['val', g.latestValidation]}>{g.latestValidation}</b></>}
+    </p>
+    <p class="muted mono stats">
+      {count(g.plays, 'play')} ({g.plays7d} this week) · ★ {stars(g.avgRating)} ({g.ratingCount}) · crash {pct(g.crashRate)}
+    </p>
+    {g.reviewNote && <p class="review-note">Note: {g.reviewNote}</p>}
+    <p class="links mono">
+      <a href={`/play/${g.slug}`}>Play</a> · <a href={`/submissions/${g.id}`}>Validation report</a> · <a href={`/games/${g.slug}/assets`}>Files</a> · <span class="muted">{g.id}</span>
+    </p>
+  </div>
+  <ReviewActions game={g} next={next} />
+</li>
+
+<style>
+  .item { display: grid; grid-template-columns: 120px 1fr auto; gap: 1rem; align-items: center; padding: 0.75rem; }
+  .thumb { aspect-ratio: 16 / 10; border-radius: 8px; overflow: hidden; display: block; }
+  .thumb :global(.art) { width: 100%; height: 100%; object-fit: cover; }
+  .meta h3 { margin: 0 0 0.3rem; }
+  .meta a { text-decoration: none; }
+  .meta p { margin: 0; font-size: 0.8rem; }
+  .stats, .links { margin-top: 0.25rem !important; }
+  .links a { color: var(--accent); }
+  .review-note { margin-top: 0.35rem !important; color: var(--bad); }
+  .val.passed { color: var(--accent); }
+  .val.failed, .val.error { color: var(--bad); }
+  .val.queued, .val.running { color: var(--warn); }
+  @media (max-width: 720px) {
+    .item { grid-template-columns: 90px 1fr; }
+    .item > :global(.review-actions) { grid-column: 1 / -1; }
+  }
+</style>
