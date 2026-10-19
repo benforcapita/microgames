@@ -1,10 +1,21 @@
 import argon2 from '@node-rs/argon2';
 import assert from 'node:assert/strict';
 import { handleRequest, type Deps } from '../src/middleware.ts';
+import type {
+  EnrollResult,
+  FactorListResult,
+  PasswordSignInResult,
+  RequestAuth,
+  VerifyResult,
+} from '../src/lib/auth-supabase.ts';
 import type { LockoutStore } from '../src/lib/auth-basic.ts';
 import { GET as robotsGet } from '../src/pages/robots.txt.ts';
 import { GET as indexGet, POST as indexPost } from '../src/pages/[p]/index.ts';
 import { GET as cssGet } from '../src/pages/[p]/admin.css.ts';
+import { GET as signInGet, POST as signInPost } from '../src/pages/[p]/auth/signin.ts';
+import { GET as mfaGet, POST as mfaPost } from '../src/pages/[p]/auth/mfa.ts';
+import { GET as enrollGet, POST as enrollPost } from '../src/pages/[p]/auth/mfa/enroll.ts';
+import { GET as signOutGet, POST as signOutPost } from '../src/pages/[p]/auth/signout.ts';
 import { ALL as catchAll } from '../src/pages/[...any].ts';
 import type { LogFields } from '../src/lib/log.ts';
 
@@ -24,6 +35,22 @@ function routeNext(request: Request, locals: Record<string, unknown>) {
     if (segments.length === 2 && segments[1] === 'admin.css' && request.method === 'GET') {
       return cssGet(ctx);
     }
+    if (segments[1] === 'auth' && segments[2] === 'signin' && segments.length === 3) {
+      if (request.method === 'GET') return signInGet(ctx);
+      if (request.method === 'POST') return signInPost(ctx);
+    }
+    if (segments[1] === 'auth' && segments[2] === 'mfa' && segments.length === 3) {
+      if (request.method === 'GET') return mfaGet(ctx);
+      if (request.method === 'POST') return mfaPost(ctx);
+    }
+    if (segments[1] === 'auth' && segments[2] === 'mfa' && segments[3] === 'enroll' && segments.length === 4) {
+      if (request.method === 'GET') return enrollGet(ctx);
+      if (request.method === 'POST') return enrollPost(ctx);
+    }
+    if (segments[1] === 'auth' && segments[2] === 'signout' && segments.length === 3) {
+      if (request.method === 'GET') return signOutGet(ctx);
+      if (request.method === 'POST') return signOutPost(ctx);
+    }
     return catchAll(ctx);
   };
 }
@@ -40,10 +67,43 @@ export const unlockedStore: LockoutStore = {
   async clearFailures() {},
 };
 
+// Locks 1-2 tests don't have a session. They inject an allow so they stay on
+// the behaviour they cover. Lock 3 tests pass their own auth.
+const allowAuth: NonNullable<Deps['auth']> = () => allowSession;
+
+export const deniedAuth = {
+  async signInWithPassword(): Promise<PasswordSignInResult> {
+    return { kind: 'denied' };
+  },
+  async unverifiedFactors(): Promise<FactorListResult> {
+    return { kind: 'denied' };
+  },
+  async enrollTotp(): Promise<EnrollResult> {
+    return { kind: 'denied', unverified: [] };
+  },
+  async verifyTotp(): Promise<VerifyResult> {
+    return { kind: 'denied' };
+  },
+  async verifyVerifiedTotp(): Promise<VerifyResult> {
+    return { kind: 'denied' };
+  },
+};
+
+const allowSession: RequestAuth = {
+  async classify() {
+    return { kind: 'ok' };
+  },
+  async signOut() {},
+  setCookies() {
+    return [];
+  },
+  ...deniedAuth,
+};
+
 export async function runRequest(
   request: Request,
   env: Record<string, string | undefined>,
-  deps: Pick<Deps, 'store' | 'verify'> & { log?: (f: LogFields) => void } = {},
+  deps: Pick<Deps, 'store' | 'verify' | 'auth'> & { log?: (f: LogFields) => void } = {},
 ): Promise<RunResult> {
   const locals: Record<string, unknown> = {};
   const logs: LogFields[] = [];
@@ -51,6 +111,7 @@ export async function runRequest(
     env,
     store: deps.store ?? unlockedStore,
     verify: deps.verify,
+    auth: deps.auth ?? allowAuth,
     log: (f) => {
       deps.log?.(f);
       logs.push(f);
@@ -73,6 +134,10 @@ export const TEST_HASH = await argon2.hash(TEST_PASSWORD, {
   parallelism: 1,
 });
 
+export const TEST_ADMIN_ID = '00000000-0000-4000-8000-000000000001';
+export const TEST_SUPABASE_URL = 'https://admin-supabase-test.example';
+export const TEST_ANON_KEY = 'test-anon-key';
+
 export function testEnv(overrides: Record<string, string | undefined> = {}): Record<string, string> {
   return {
     ADMIN_PATH_SECRET: TEST_SECRET,
@@ -80,6 +145,9 @@ export function testEnv(overrides: Record<string, string | undefined> = {}): Rec
     ADMIN_PASSWORD_HASH: TEST_HASH,
     ADMIN_DATABASE_URL: 'postgres://meshgrounds_admin@127.0.0.1:54322/postgres',
     ADMIN_ORIGIN: TEST_ORIGIN,
+    ADMIN_USER_ID: TEST_ADMIN_ID,
+    ADMIN_SUPABASE_URL: TEST_SUPABASE_URL,
+    ADMIN_SUPABASE_ANON_KEY: TEST_ANON_KEY,
     ...overrides,
   };
 }
@@ -92,7 +160,7 @@ const EXPECTED_SECURITY_HEADERS: Record<string, string> = {
   'content-security-policy':
     "default-src 'none'; style-src 'self'; img-src 'self' data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; script-src 'none'",
   'x-robots-tag': 'noindex, nofollow',
-  'referrer-policy': 'no-referrer',
+  'referrer-policy': 'same-origin',
   'x-content-type-options': 'nosniff',
   'cache-control': 'no-store',
   'cross-origin-opener-policy': 'same-origin',

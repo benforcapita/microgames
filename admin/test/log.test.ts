@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { log } from '../src/lib/log.ts';
-import { runRequest, testEnv, basicAuth, TEST_SECRET, TEST_PASSWORD } from './helpers.ts';
+import { deniedAuth, runRequest, testEnv, basicAuth, TEST_SECRET, TEST_PASSWORD } from './helpers.ts';
 
 test('log: emits a single JSON line with allowlisted fields only', () => {
   const lines: string[] = [];
@@ -46,5 +46,50 @@ test('log: never emits the raw path, Authorization, cookies, IPs or emails throu
       assert.doesNotMatch(line, /@/, 'log leaked email');
       assert.doesNotMatch(line, /wrong|test-password/, 'log leaked password');
     }
+  }
+});
+
+test('log: a lock 3 failure does not emit email, token, user id, factor id, code or the raw path', async () => {
+  const email = 'lock3-ben@example.com';
+  const token = 'tok-marker-9f3c';
+  const userId = '11111111-2222-4333-8444-555555555555';
+  const factorId = 'factor-marker-9f3c';
+  const code = 'totp-marker-9f3c';
+  const cookie = `sb-test=${token}; factor=${factorId}; code=${code}; email=${email}`;
+  const cases = [
+    {
+      async classify() {
+        throw new Error(`${email} ${token} ${userId} ${factorId} ${code} ${TEST_SECRET}`);
+      },
+    },
+    {
+      async classify() {
+        return { kind: 'none' as const };
+      },
+    },
+  ];
+  for (const impl of cases) {
+    const { logs } = await runRequest(
+      new Request(`http://localhost/${TEST_SECRET}`, {
+        headers: { authorization: basicAuth('boss', TEST_PASSWORD), cookie },
+      }),
+      testEnv(),
+      {
+        auth: () => ({
+          ...deniedAuth,
+          classify: impl.classify,
+          async signOut() {},
+          setCookies: () => [],
+        }),
+      },
+    );
+    const line = JSON.stringify(logs);
+    assert.equal(line.includes(email), false, 'log leaked email');
+    assert.equal(line.includes(token), false, 'log leaked token');
+    assert.equal(line.includes(userId), false, 'log leaked user id');
+    assert.equal(line.includes(factorId), false, 'log leaked factor id');
+    assert.equal(line.includes(code), false, 'log leaked code');
+    assert.equal(line.includes(TEST_SECRET), false, 'log leaked path');
+    assert.equal(logs[0]?.lock, 3);
   }
 });

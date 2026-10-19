@@ -1,17 +1,19 @@
 // Request pipeline, in lock order (LLD §3):
-//   lock 1 secret path → lock 2 basic auth → [lock 3 slot, MGA-2b]
-//   → security headers → CSRF on POST.
-// Every response, including lock failures, carries the §3.5 header set.
+//   lock 1 secret path → lock 2 basic auth → lock 3 Supabase session
+//   → Origin + CSRF on non-GET.
+// Set-Cookie is applied, then the §3.5 header set, on every response
+// including lock failures.
 
 import type { MiddlewareHandler } from 'astro';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { loadConfig, type AdminConfig } from './lib/config';
 import { gateBasicAuth, type LockoutStore, type PasswordVerifier } from './lib/auth-basic';
+import { createRequestAuth, type RequestAuth } from './lib/auth-supabase';
 import { connect, createLockoutStore } from './lib/db';
 import { CSRF_COOKIE, CSRF_COOKIE_OPTS, CSRF_FIELD, csrfField, mintCookieValue, verifyField } from './lib/csrf';
 import { log, type LogFields } from './lib/log';
 
-export type Locals = { csrfCookie?: string; csrfField?: string };
+export type Locals = { csrfCookie?: string; csrfField?: string; auth?: RequestAuth };
 export type Deps = {
   env?: Record<string, string | undefined>;
   log?: (fields: LogFields) => void;
@@ -19,13 +21,18 @@ export type Deps = {
   store?: LockoutStore;
   /** Password verifier; default is argon2id/bcrypt per the stored hash. */
   verify?: PasswordVerifier;
+  /** Lock 3 session check; default talks to ADMIN_SUPABASE_URL. */
+  auth?: (request: Request, config: AdminConfig) => RequestAuth;
 };
 
 const SECURITY_HEADERS: Record<string, string> = {
   'content-security-policy':
     "default-src 'none'; style-src 'self'; img-src 'self' data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; script-src 'none'",
   'x-robots-tag': 'noindex, nofollow',
-  'referrer-policy': 'no-referrer',
+  // same-origin, not no-referrer. Chrome sends Origin: null on a form POST
+  // under no-referrer, and the CSRF check rejects that opaque origin.
+  // same-origin still omits the referrer on every other site.
+  'referrer-policy': 'same-origin',
   'x-content-type-options': 'nosniff',
   'cache-control': 'no-store',
   'cross-origin-opener-policy': 'same-origin',
@@ -77,6 +84,84 @@ function lockoutStore(databaseUrl: string): LockoutStore {
   return defaultStore.store;
 }
 
+// Exact paths only. These still pass locks 1 and 2. The stylesheet is not
+// an auth route. Auth routes render their own pages and do not run lock 3.
+const LOCK3_EXEMPT = new Set([
+  '/admin.css',
+  '/auth/signin',
+  '/auth/mfa',
+  '/auth/mfa/enroll',
+  '/auth/signout',
+]);
+
+function lock3Exempt(pathname: string, segment: string): boolean {
+  const prefix = `/${segment}`;
+  if (!pathname.startsWith(`${prefix}/`)) return false;
+  return LOCK3_EXEMPT.has(pathname.slice(prefix.length));
+}
+
+function isAuthRoute(pathname: string, segment: string): boolean {
+  if (!lock3Exempt(pathname, segment)) return false;
+  return pathname.slice(`/${segment}`.length).startsWith('/auth/');
+}
+
+function defaultAuth(request: Request, config: AdminConfig): RequestAuth {
+  return createRequestAuth({
+    url: config.supabaseUrl,
+    anonKey: config.supabaseAnonKey,
+    adminUserId: config.adminUserId,
+    request,
+  });
+}
+
+type Lock3Result = { ok: true; setCookies: string[] } | { ok: false; response: Response; setCookies: string[] };
+
+async function lock3(
+  request: Request,
+  config: AdminConfig,
+  deps: Deps,
+  fields: LogFields,
+): Promise<Lock3Result> {
+  let session: RequestAuth | undefined;
+  try {
+    session = (deps.auth ?? defaultAuth)(request, config);
+    const kind = await session.classify();
+    switch (kind.kind) {
+      case 'ok':
+        return { ok: true, setCookies: session.setCookies() };
+      case 'other-user': {
+        try {
+          await session.signOut();
+        } catch {
+          fields.level = 'error';
+          fields.error = 'auth_error';
+        }
+        fields.lock = 3;
+        return { ok: false, response: notFound(), setCookies: session.setCookies() };
+      }
+      case 'aal1-ben':
+      case 'none':
+      case 'error': {
+        if (kind.kind === 'error') {
+          fields.level = 'error';
+          fields.error = 'auth_error';
+        }
+        fields.lock = 3;
+        return { ok: false, response: notFound(), setCookies: session.setCookies() };
+      }
+      default: {
+        const unreachable: never = kind;
+        throw unreachable;
+      }
+    }
+  } catch {
+    fields.lock = 3;
+    fields.level = 'error';
+    fields.error = 'auth_error';
+    return { ok: false, response: notFound(), setCookies: session?.setCookies() ?? [] };
+  }
+}
+
 async function route(
   request: Request,
   locals: Locals,
@@ -84,7 +169,7 @@ async function route(
   env: Record<string, string | undefined>,
   deps: Deps,
   fields: LogFields,
-): Promise<{ response: Response; setCsrfCookie?: string }> {
+): Promise<{ response: Response; setCsrfCookie?: string; setCookies?: string[] }> {
   const cfg = loadConfig(env);
   if (!cfg.ok) {
     fields.level = 'error';
@@ -142,14 +227,35 @@ async function route(
     };
   }
 
-  // lock 3 slot (MGA-2b): Supabase session + AAL2 check goes here.
+  // Lock 3: the session must be ADMIN_USER_ID at AAL2 with a verified TOTP
+  // factor. Anything else is the same plain 404 as lock 1. Auth routes and
+  // the stylesheet are exempt. Auth routes still get a client so the page
+  // can sign in, enroll, verify, or sign out, and its Set-Cookie values
+  // ride on the response.
+  let authCookies: string[] | undefined;
+  let session: RequestAuth | undefined;
+  if (isAuthRoute(pathname, segment)) {
+    session = (deps.auth ?? defaultAuth)(request, config);
+    locals.auth = session;
+  }
+  if (!lock3Exempt(pathname, segment)) {
+    const gate = await lock3(request, config, deps, fields);
+    if (!gate.ok) return { response: gate.response, setCookies: gate.setCookies };
+    authCookies = gate.setCookies;
+  }
+  const cookies = () => session?.setCookies() ?? authCookies;
 
   if (method === 'POST') {
     if (!(await csrfOk(request, config))) {
       fields.error = 'csrf';
-      return { response: plain(403, 'Forbidden') };
+      return { response: plain(403, 'Forbidden'), setCookies: cookies() };
     }
-    return { response: await next() };
+    const csrfCookie = parseCookies(request.headers.get('cookie'))[CSRF_COOKIE];
+    if (csrfCookie) {
+      locals.csrfCookie = csrfCookie;
+      locals.csrfField = csrfField(config.pathSecret, csrfCookie);
+    }
+    return { response: await next(), setCookies: cookies() };
   }
 
   // GET past locks 1-2: ensure the CSRF cookie exists so pages can embed the
@@ -157,7 +263,11 @@ async function route(
   const existing = parseCookies(request.headers.get('cookie'))[CSRF_COOKIE];
   locals.csrfCookie = existing ?? mintCookieValue();
   locals.csrfField = csrfField(config.pathSecret, locals.csrfCookie);
-  return { response: await next(), setCsrfCookie: existing ? undefined : locals.csrfCookie };
+  return {
+    response: await next(),
+    setCsrfCookie: existing ? undefined : locals.csrfCookie,
+    setCookies: cookies(),
+  };
 }
 
 export async function handleRequest(
@@ -172,15 +282,18 @@ export async function handleRequest(
   const fields: LogFields = {};
   let response: Response;
   let setCsrfCookie: string | undefined;
+  let setCookies: string[] | undefined;
   try {
-    ({ response, setCsrfCookie } = await route(request, locals, next, env, deps, fields));
+    ({ response, setCsrfCookie, setCookies } = await route(request, locals, next, env, deps, fields));
   } catch {
     // Never let a route error surface as an Astro/framework error page.
     fields.level = 'error';
     fields.error = 'unhandled';
     response = plain(500, 'Internal server error');
   }
-  if (setCsrfCookie) {
+  for (const cookie of setCookies ?? []) response.headers.append('set-cookie', cookie);
+  // A 404 is the lock-1 response: it does not mint a CSRF cookie.
+  if (setCsrfCookie && response.status !== 404) {
     response.headers.append('set-cookie', `${CSRF_COOKIE}=${setCsrfCookie}; ${CSRF_COOKIE_OPTS}`);
   }
   for (const [name, value] of Object.entries(SECURITY_HEADERS)) response.headers.set(name, value);
