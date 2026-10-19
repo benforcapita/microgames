@@ -1,6 +1,10 @@
 // Structured logger: JSON lines to stdout, allowlisted fields only (LLD §10).
 // Never logged: raw URL/path, headers, cookies, Authorization, tokens,
 // emails, form bodies, connection strings, IPs.
+//
+// `error` is one of those fields. Its values are short codes. Lock 3 adds
+// `auth_error` (Auth failure, timeout, or throw). Never an email, user id,
+// token, factor id, one-time code, or raw path.
 
 const ALLOWED = [
   'time',
