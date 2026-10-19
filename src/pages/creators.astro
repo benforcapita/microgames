@@ -4,6 +4,8 @@ import { creatorsLiveStep } from '../lib/manual-review';
 import { GRADUATION } from '../lib/server/config';
 import { readManualReview } from '../lib/server/manual-review';
 
+throw new Error('MG-4b deliberate break: /creators must 500 so the CI smoke job fails and names the route');
+
 const pct = (n: number) => `${Math.round(n * 100)}%`;
 const gates = [
   ['Plays measured', `≥ ${GRADUATION.minPlays}`],
