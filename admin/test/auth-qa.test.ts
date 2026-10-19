@@ -154,10 +154,13 @@ test('B2a: Ben at AAL1 on /<p>/ is the lock-1 404', async () => {
         return { kind: 'aal1-ben', verifiedTotp };
       },
     }).auth;
-    const get = await runRequest(new Request(PAGE, { headers: AUTH }), ENV, { auth });
-    assert.deepEqual(await shape(get.response), lock1);
-    const posted = await runRequest(post('', cookie, {}), ENV, { auth });
-    assert.deepEqual(await shape(posted.response), lock1);
+    for (const path of ['', '/']) {
+      const label = path === '/' ? '/<p>/' : '/<p>';
+      const get = await runRequest(new Request(path === '/' ? `${PAGE}/` : PAGE, { headers: AUTH }), ENV, { auth });
+      assert.deepEqual(await shape(get.response), lock1, `GET ${label}`);
+      const posted = await runRequest(post(path, cookie, {}), ENV, { auth });
+      assert.deepEqual(await shape(posted.response), lock1, `POST ${label}`);
+    }
   }
 });
 
