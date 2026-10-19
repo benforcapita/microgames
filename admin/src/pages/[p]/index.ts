@@ -5,12 +5,13 @@ import { CSRF_FIELD } from '../../lib/csrf';
 // auth and a CSRF field bound to this request's cookie in locals.
 export const GET: APIRoute = (context) => {
   const field = context.locals.csrfField ?? '';
+  const cssHref = context.url.pathname.replace(/\/?$/, '/admin.css');
   const html = `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <title>Meshgrounds admin</title>
-<link rel="stylesheet" href="admin.css">
+<link rel="stylesheet" href="${cssHref}">
 </head>
 <body>
 <main>
