@@ -210,32 +210,34 @@ describe('telemetry session_start auth-cookie gate (db)', () => {
     assert.equal((await sessionRow(sessionId))?.user_id, null);
   });
 
-  it('getClaims error under a well-formed cookie: user_id stays null', async (t) => {
-    if (skip(t)) return;
-    const sessionId = nextSession();
-    const r = await post(
-      { sessionId, gameId: GAME, type: 'session_start', value: 0 },
-      `sb-mg14r-auth-token=${sessionCookie(jwt({ sub: userId }))}`,
-      null,
-      new Error('invalid JWT: unable to parse or verify signature'),
-    );
-    assert.equal(r.status, 204);
-    assert.equal(r.getClaimsCalls, 1);
-    assert.equal((await sessionRow(sessionId))?.user_id, null);
-  });
+  for (const name of ['sb-test-auth-token', 'sb-ref-auth-token']) {
+    it(`getClaims error under a well-formed ${name} cookie: user_id stays null`, async (t) => {
+      if (skip(t)) return;
+      const sessionId = nextSession();
+      const r = await post(
+        { sessionId, gameId: GAME, type: 'session_start', value: 0 },
+        `${name}=${sessionCookie(jwt({ sub: userId }))}`,
+        null,
+        new Error('invalid JWT: unable to parse or verify signature'),
+      );
+      assert.equal(r.status, 204);
+      assert.equal(r.getClaimsCalls, 1);
+      assert.equal((await sessionRow(sessionId))?.user_id, null);
+    });
 
-  it('claims without a sub under a well-formed cookie: user_id stays null', async (t) => {
-    if (skip(t)) return;
-    const sessionId = nextSession();
-    const r = await post(
-      { sessionId, gameId: GAME, type: 'session_start', value: 0 },
-      `sb-mg14r-auth-token=${sessionCookie(jwt({ sub: userId }))}`,
-      {},
-    );
-    assert.equal(r.status, 204);
-    assert.equal(r.getClaimsCalls, 1);
-    assert.equal((await sessionRow(sessionId))?.user_id, null);
-  });
+    it(`claims without a sub under a well-formed ${name} cookie: user_id stays null`, async (t) => {
+      if (skip(t)) return;
+      const sessionId = nextSession();
+      const r = await post(
+        { sessionId, gameId: GAME, type: 'session_start', value: 0 },
+        `${name}=${sessionCookie(jwt({ sub: userId }))}`,
+        {},
+      );
+      assert.equal(r.status, 204);
+      assert.equal(r.getClaimsCalls, 1);
+      assert.equal((await sessionRow(sessionId))?.user_id, null);
+    });
+  }
 
   it('expired-but-well-formed token still goes through getClaims (it may refresh)', async (t) => {
     if (skip(t)) return;
