@@ -2,9 +2,14 @@
 // stays behind the same getGame + admitSessionStart admission. Local stack only.
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { after, before, describe, it } from 'node:test';
+import { after, before, describe, it, mock } from 'node:test';
 import postgres from 'postgres';
-import { MG_UID_COOKIE } from './abuse.ts';
+import { MG_UID_COOKIE, admitSessionStart } from './abuse.ts';
+import {
+  insertSessionStart,
+  postgresSchemaClient,
+  resetSchemaWarnings,
+} from './schema-rollout.ts';
 
 const url = process.env.DATABASE_URL ?? 'postgresql://postgres:postgres@127.0.0.1:54322/postgres';
 
@@ -38,10 +43,13 @@ if (isLocal) {
 
 let sql: typeof import('./db.ts').sql;
 let POST: typeof import('../../pages/api/telemetry.ts').POST;
+let recordTelemetry: typeof import('./games.ts').recordTelemetry;
+let getGame: typeof import('./games.ts').getGame;
 
 if (probeOk) {
   sql = (await import('./db.ts')).sql;
   ({ POST } = await import('../../pages/api/telemetry.ts'));
+  ({ recordTelemetry, getGame } = await import('./games.ts'));
 }
 
 const GAME = 'stk7wr01'; // seed "Stack Tower" (live)
@@ -227,5 +235,92 @@ describe('session telemetry ordering (db)', () => {
     assert.equal((await post(uid, ip, { sessionId: b, gameId: GAME, type: 'first_frame', value: 220 })).status, 204);
     assert.equal((await row(a))?.first_frame_ms, 210);
     assert.equal(await row(b), undefined, 'second admitted attempt must not create a row');
+  });
+
+  it('holds no advisory locks after a burst of locked events', async (t) => {
+    if (skip(t)) return;
+    const peek = postgres(url, { max: 1, prepare: false, connect_timeout: 3 });
+    try {
+      const locks = async () =>
+        (await peek<{ n: number }[]>`select count(*)::int as n from pg_locks where locktype = 'advisory'`)[0]?.n ?? -1;
+      const before = await locks();
+      // Fewer than the pool's 10 connections so this guard cannot itself exhaust it.
+      await Promise.all(
+        Array.from({ length: 8 }, (_, i) =>
+          post(randomUUID(), nextIp(), {
+            sessionId: nextSession(),
+            gameId: GAME,
+            type: i % 2 ? 'first_frame' : 'session_start',
+            value: 100 + i,
+          })),
+      );
+      assert.equal(await locks(), before, 'advisory locks leaked');
+    } finally {
+      await peek.end({ timeout: 1 }).catch(() => {});
+    }
+  });
+
+  it('insertSessionStart keeps its missing-user_id fallback inside a transaction (savepoint)', async (t) => {
+    if (skip(t)) return;
+    resetSchemaWarnings();
+    const warn = mock.method(console, 'warn', () => {});
+    const sessionId = nextSession();
+    try {
+      await sql.begin(async (tx) => {
+        // Reproduce the pre-play_gate schema inside a rolled-back tx: the first insert
+        // errors 42703, and only a savepoint lets the retry run in an aborted tx.
+        await tx`alter table public.sessions drop column user_id cascade`;
+        await insertSessionStart(postgresSchemaClient(tx), { sessionId, gameId: GAME, userId });
+        const [r] = await tx<{ game_id: string }[]>`select game_id from sessions where id = ${sessionId}`;
+        assert.equal(r?.game_id, GAME, 'fallback insert must land the row inside the tx');
+        throw new Error('__rollback__');
+      });
+      assert.fail('tx must roll back');
+    } catch (err) {
+      if ((err as Error).message !== '__rollback__') throw err;
+    } finally {
+      warn.mock.restore();
+    }
+    const [col] = await sql<{ n: number }[]>`
+      select count(*)::int as n from information_schema.columns
+      where table_name = 'sessions' and column_name = 'user_id'`;
+    assert.equal(col?.n, 1, 'rollback must restore user_id');
+    assert.equal(await row(sessionId), undefined);
+  });
+
+  // Last on purpose: a pre-fix run deadlocks the shared pool for the rest of the file.
+  it('no pool deadlock: >=30 session_start and >=30 first_frame-first creates all complete', async (t) => {
+    if (skip(t)) return;
+    // Same shape the route builds: inside the session lock it may only read via `db`
+    // (the lock-holding transaction) — the pool could be exhausted by other sessions.
+    const admit =
+      (uid: string, ip: string) => async (db: postgres.Sql | postgres.TransactionSql) =>
+        Boolean(await getGame(GAME, { db })) && admitSessionStart(uid, ip, GAME);
+    const withTimeout = (p: Promise<unknown>, label: string) =>
+      Promise.race([
+        p,
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`timeout ${label}`)), 15_000)),
+      ]);
+    const jobs: Promise<unknown>[] = [];
+    const expected = new Map<string, number | null>();
+    for (let i = 0; i < 30; i++) {
+      const sessionId = nextSession();
+      expected.set(sessionId, null);
+      jobs.push(withTimeout(recordTelemetry(sessionId, GAME, 'session_start', 0, null, admit(randomUUID(), nextIp())), sessionId));
+    }
+    for (let i = 0; i < 30; i++) {
+      const sessionId = nextSession();
+      const ms = 900 + i;
+      expected.set(sessionId, ms);
+      jobs.push(withTimeout(recordTelemetry(sessionId, GAME, 'first_frame', ms, null, admit(randomUUID(), nextIp())), sessionId));
+    }
+    const results = await Promise.allSettled(jobs);
+    const stuck = results.filter((r) => r.status === 'rejected').length;
+    assert.equal(stuck, 0, `${stuck} events did not complete (pool exhaustion/deadlock)`);
+    for (const [sessionId, want] of expected) {
+      const r = await row(sessionId);
+      assert.ok(r, `no row for ${sessionId}`);
+      assert.equal(r.first_frame_ms, want);
+    }
   });
 });
