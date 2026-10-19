@@ -37,7 +37,7 @@ The platform architecture separates the main portal from a dedicated, cookieless
    ```bash
    npm run seed
    ```
-   Loads the sample games into the local database and Storage bucket with **no** plays or ratings, so every stat on the site is real. Add `-- --synthetic-plays` to also create fake sessions and ratings for testing eligibility locally — a human still promotes games to live (never on a project real players see). To replace existing seed games (this also deletes their plays and ratings), pass `-- --force`:
+   Loads the sample games into the local database and Storage bucket with **no** plays or ratings, so every stat on the site is real. Add `-- --synthetic-plays` to also create fake sessions and ratings for testing eligibility locally (never on a project real players see); a human still promotes games to live. To replace existing seed games (this also deletes their plays and ratings), pass `-- --force`:
    ```bash
    npm run seed -- --force
    ```
