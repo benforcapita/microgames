@@ -56,10 +56,17 @@ const GAME = 'stk7wr01'; // seed "Stack Tower" (live)
 const GAME2 = 'neon1an3'; // seed "Neon Lanes" (live)
 
 const userId = randomUUID();
+const userIdB = randomUUID();
 const sessionIds: string[] = [];
 const nextSession = () => {
   const id = randomUUID();
   sessionIds.push(id);
+  return id;
+};
+const gameIds: string[] = [];
+const nextGame = () => {
+  const id = `mg10-${randomUUID().replace(/-/g, '').slice(0, 12)}`;
+  gameIds.push(id);
   return id;
 };
 let ipCounter = 0;
@@ -118,14 +125,17 @@ describe('session telemetry ordering (db)', () => {
     await sql`
       insert into auth.users (instance_id, id, aud, role, email, encrypted_password, created_at, updated_at)
       values ('00000000-0000-0000-0000-000000000000', ${userId}, 'authenticated', 'authenticated',
-              ${`mg10${userId.replace(/-/g, '').slice(0, 12)}@example.com`}, '', now(), now())`;
+              ${`mg10${userId.replace(/-/g, '').slice(0, 12)}@example.com`}, '', now(), now()),
+             ('00000000-0000-0000-0000-000000000000', ${userIdB}, 'authenticated', 'authenticated',
+              ${`mg10${userIdB.replace(/-/g, '').slice(0, 12)}@example.com`}, '', now(), now())`;
   });
 
   after(async () => {
     if (!sql) return;
     try {
       await sql`delete from public.sessions where id in ${sql(sessionIds)}`;
-      await sql`delete from auth.users where id = ${userId}`;
+      if (gameIds.length) await sql`delete from public.games where id in ${sql(gameIds)}`;
+      await sql`delete from auth.users where id in ${sql([userId, userIdB])}`;
     } finally {
       await sql.end({ timeout: 1 }).catch(() => {});
     }
@@ -235,6 +245,66 @@ describe('session telemetry ordering (db)', () => {
     assert.equal((await post(uid, ip, { sessionId: b, gameId: GAME, type: 'first_frame', value: 220 })).status, 204);
     assert.equal((await row(a))?.first_frame_ms, 210);
     assert.equal(await row(b), undefined, 'second admitted attempt must not create a row');
+  });
+
+  it('a session_start from another signed-in user cannot take over a start-created session row', async (t) => {
+    if (skip(t)) return;
+    const sessionId = nextSession();
+    const uidA = randomUUID();
+    const uidB = randomUUID();
+    // Paired allowed case: A's own start does set user_id on the row it created.
+    assert.equal((await post(uidA, nextIp(), { sessionId, gameId: GAME, type: 'session_start', value: 0 }, userId)).status, 204);
+    assert.equal((await row(sessionId))?.user_id, userId);
+    assert.equal((await post(uidB, nextIp(), { sessionId, gameId: GAME, type: 'session_start', value: 0 }, userIdB)).status, 204);
+    const rows = await sql<SessionRow[]>`select id, game_id, first_frame_ms, user_id from sessions where id = ${sessionId}`;
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]?.user_id, userId, "another user's session_start must not overwrite user_id");
+    // An anonymous start for the same session id cannot clear it either.
+    await post(uidB, nextIp(), { sessionId, gameId: GAME, type: 'session_start', value: 0 });
+    assert.equal((await row(sessionId))?.user_id, userId);
+  });
+
+  it('a session_start from another signed-in user cannot take over a first_frame-created row once claimed', async (t) => {
+    if (skip(t)) return;
+    const sessionId = nextSession();
+    const uidA = randomUUID();
+    const uidB = randomUUID();
+    assert.equal((await post(uidA, nextIp(), { sessionId, gameId: GAME, type: 'first_frame', value: 640 })).status, 204);
+    // Paired allowed case: A's signed-in start claims the anonymous row.
+    assert.equal((await post(uidA, nextIp(), { sessionId, gameId: GAME, type: 'session_start', value: 0 }, userId)).status, 204);
+    assert.equal((await row(sessionId))?.user_id, userId);
+    assert.equal((await post(uidB, nextIp(), { sessionId, gameId: GAME, type: 'session_start', value: 0 }, userIdB)).status, 204);
+    const rows = await sql<SessionRow[]>`select id, game_id, first_frame_ms, user_id from sessions where id = ${sessionId}`;
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]?.user_id, userId, "another user's session_start must not overwrite user_id");
+    assert.equal(rows[0]?.first_frame_ms, 640, "another user's session_start must not touch first_frame_ms");
+  });
+
+  it('an anonymous session row gains user_id when a later session_start is signed in', async (t) => {
+    if (skip(t)) return;
+    const sessionId = nextSession();
+    const uid = randomUUID();
+    assert.equal((await post(uid, nextIp(), { sessionId, gameId: GAME, type: 'session_start', value: 0 })).status, 204);
+    assert.equal((await row(sessionId))?.user_id, null);
+    assert.equal((await post(uid, nextIp(), { sessionId, gameId: GAME, type: 'session_start', value: 0 }, userId)).status, 204);
+    assert.equal((await row(sessionId))?.user_id, userId);
+  });
+
+  it('first_frame on an unpublished game creates no session row even when admission allows', async (t) => {
+    if (skip(t)) return;
+    const rejected = nextGame();
+    await sql`insert into public.games (id, slug, creator, title, stage)
+              values (${rejected}, ${rejected}, 'mg10', 'MG10 Rejected', 'rejected')`;
+    // Reach the insert guard itself: admission always allows, so only the
+    // public-stage EXISTS in the first_frame insert can stop the row. The route
+    // would 404 earlier on getGame; the DB must not depend on that.
+    const admit = async () => true;
+    const denied = nextSession();
+    await recordTelemetry(denied, rejected, 'first_frame', 300, null, admit);
+    assert.equal(await row(denied), undefined, 'first_frame created a session row for an unpublished game');
+    const allowed = nextSession();
+    await recordTelemetry(allowed, GAME, 'first_frame', 300, null, admit);
+    assert.equal((await row(allowed))?.first_frame_ms, 300, 'same admitted call creates the row on a live game');
   });
 
   it('holds no advisory locks after a burst of locked events', async (t) => {
