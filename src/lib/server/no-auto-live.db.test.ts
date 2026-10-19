@@ -66,27 +66,29 @@ interface StageRow {
   graduated_at: Date | null;
 }
 
+type Db = postgres.Sql | postgres.TransactionSql;
+
 /** A proving game that already clears every health check — eligible, not yet promoted. */
-async function seedEligibleProvingGame(tag: string): Promise<string> {
+async function seedEligibleProvingGame(tag: string, db: Db = sql): Promise<string> {
   const id = `mg9${tag}${run}`;
-  created.push(id);
-  await sql`
+  if (db === sql) created.push(id);
+  await db`
     insert into public.games (id, slug, title, creator, stage)
     values (${id}, ${id}, 'Eligible', 'mg9test', 'proving')`;
-  await sql`
+  await db`
     insert into public.sessions (id, game_id, first_frame_ms, started, completed, crashed, duration_ms)
     select gen_random_uuid(), ${id}, 100, true, true, false, 120000
     from generate_series(1, ${GRADUATION.minPlays})`;
-  await sql`
+  await db`
     insert into public.ratings (game_id, voter, stars)
     select ${id}, 'seed-' || g::text, 5 from generate_series(1, ${GRADUATION.minRatingsForRatingGate + 2}) g`;
-  const health = await getHealth(id);
+  const health = await getHealth(id, db);
   assert.equal(health.eligible, true, 'fixture must report eligible');
   return id;
 }
 
-const stageOf = async (id: string) =>
-  (await sql<StageRow[]>`select stage, graduated_at from public.games where id = ${id}`)[0];
+const stageOf = async (id: string, db: Db = sql) =>
+  (await db<StageRow[]>`select stage, graduated_at from public.games where id = ${id}`)[0];
 
 async function assertStaysProving(id: string, via: string) {
   const row = await stageOf(id);
@@ -145,8 +147,18 @@ describe('MG-9: nothing promotes a game out of the Proving Grounds on its own (d
 
   it('a human stage write still promotes (the test can see success)', async (t) => {
     if (skip(t)) return;
-    const id = await seedEligibleProvingGame('admin');
-    await sql`update public.games set stage = 'live' where id = ${id}`;
-    assert.equal((await stageOf(id))?.stage, 'live');
+    // Everything runs inside a rolled-back transaction: a committed live game with real
+    // plays would be counted by platformStats()/homepage queries in other test files.
+    const rollback = new Error('rollback-human-promote');
+    try {
+      await sql.begin(async (tx) => {
+        const id = await seedEligibleProvingGame('admin', tx);
+        await tx`update public.games set stage = 'live' where id = ${id}`;
+        assert.equal((await stageOf(id, tx))?.stage, 'live');
+        throw rollback;
+      });
+    } catch (err) {
+      if (err !== rollback) throw err;
+    }
   });
 });
