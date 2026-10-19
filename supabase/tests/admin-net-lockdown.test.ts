@@ -72,6 +72,43 @@ async function adminNet(tx: Sql): Promise<AdminNet> {
 
 const allFalse: AdminNet = { usage: false, select: false, insert: false, update: false, delete: false };
 
+type HeldNetPrivilege = { role: string; object: string; privilege: string };
+
+// Every privilege in schema net that any of roles holds, enumerated from the
+// catalog: USAGE/CREATE on the schema, every applicable privilege on every
+// table and every sequence, and EXECUTE on every function. 'public' is the
+// PUBLIC pseudo-role to has_*_privilege.
+async function netPrivilegesHeld(tx: Sql, roles: readonly string[]): Promise<HeldNetPrivilege[]> {
+  return tx<HeldNetPrivilege[]>`
+    with checks as (
+      select r.role, 'schema net' as object, p.priv as privilege,
+             has_schema_privilege(r.role, 'net', p.priv) as held
+        from unnest(${roles}::text[]) as r(role)
+        cross join (values ('USAGE'), ('CREATE')) as p(priv)
+      union all
+      select r.role, 'net.' || c.relname, p.priv, has_table_privilege(r.role, c.oid, p.priv)
+        from unnest(${roles}::text[]) as r(role)
+        cross join pg_class c
+        cross join (values ('SELECT'), ('INSERT'), ('UPDATE'), ('DELETE'), ('TRUNCATE'), ('REFERENCES'), ('TRIGGER'), ('MAINTAIN')) as p(priv)
+        where c.relnamespace = 'net'::regnamespace and c.relkind <> 'S'
+      union all
+      select r.role, 'net.' || c.relname, p.priv, has_sequence_privilege(r.role, c.oid, p.priv)
+        from unnest(${roles}::text[]) as r(role)
+        cross join pg_class c
+        cross join (values ('SELECT'), ('UPDATE'), ('USAGE')) as p(priv)
+        where c.relnamespace = 'net'::regnamespace and c.relkind = 'S'
+      union all
+      select r.role, p.oid::regprocedure::text, 'EXECUTE', has_function_privilege(r.role, p.oid, 'EXECUTE')
+        from unnest(${roles}::text[]) as r(role)
+        cross join pg_proc p
+        where p.pronamespace = 'net'::regnamespace
+    )
+    select role, object, privilege from checks where held order by 1, 2, 3
+  `;
+}
+
+const closedNetRoles: readonly string[] = ['meshgrounds_admin', 'public', 'anon', 'authenticated'];
+
 async function canLogin(tx: Sql): Promise<boolean> {
   const [row] = await tx<{ rolcanlogin: boolean }[]>`
     select rolcanlogin from pg_roles where rolname = 'meshgrounds_admin'
@@ -192,29 +229,10 @@ describe('meshgrounds_admin has no pg_net access', { concurrency: false }, () =>
 
         assert.deepEqual(await adminNet(tx), allFalse);
         // Catalog-wide: every object in schema net, every applicable
-        // privilege — meshgrounds_admin holds none of them.
-        const reachable = await tx<{ object: string; privilege: string }[]>`
-          with checks as (
-            select 'schema net' as object, p.priv as privilege,
-                   has_schema_privilege('meshgrounds_admin', 'net', p.priv) as held
-              from (values ('USAGE'), ('CREATE')) as p(priv)
-            union all
-            select 'net.' || c.relname, p.priv, has_table_privilege('meshgrounds_admin', c.oid, p.priv)
-              from pg_class c
-              cross join (values ('SELECT'), ('INSERT'), ('UPDATE'), ('DELETE'), ('TRUNCATE'), ('REFERENCES'), ('TRIGGER'), ('MAINTAIN')) as p(priv)
-              where c.relnamespace = 'net'::regnamespace and c.relkind <> 'S'
-            union all
-            select 'net.' || c.relname, p.priv, has_sequence_privilege('meshgrounds_admin', c.oid, p.priv)
-              from pg_class c
-              cross join (values ('SELECT'), ('UPDATE'), ('USAGE')) as p(priv)
-              where c.relnamespace = 'net'::regnamespace and c.relkind = 'S'
-            union all
-            select p.oid::regprocedure::text, 'EXECUTE', has_function_privilege('meshgrounds_admin', p.oid, 'EXECUTE')
-              from pg_proc p where p.pronamespace = 'net'::regnamespace
-          )
-          select object, privilege from checks where held order by 1, 2
-        `;
-        assert.equal(reachable.length, 0, `meshgrounds_admin still holds: ${JSON.stringify([...reachable])}`);
+        // privilege — meshgrounds_admin, PUBLIC, anon and authenticated hold
+        // none of them.
+        const reachable = await netPrivilegesHeld(tx, closedNetRoles);
+        assert.equal(reachable.length, 0, `closed roles still hold: ${JSON.stringify([...reachable])}`);
         const [pub] = await tx<{ usage: boolean; select: boolean; insert: boolean }[]>`
           select
             has_schema_privilege('public', 'net', 'USAGE') as usage,
@@ -266,6 +284,57 @@ describe('meshgrounds_admin has no pg_net access', { concurrency: false }, () =>
         assert.ok(req, 'dispatch still queues after the PUBLIC revoke');
         assert.deepEqual(JSON.parse(req.body), { gameId: id, reason: 'stage_pending' });
         await tx`select private.sweep_stuck_pending_games()`;
+      });
+    } finally {
+      await admin.end({ timeout: 1 });
+    }
+  });
+
+  it('as supabase_admin: ops pg_net_lockdown.sql leaves meshgrounds_admin, PUBLIC, anon and authenticated with zero net privileges', async (t) => {
+    const sql = await connect(t);
+    if (!sql) return;
+    await sql.end({ timeout: 1 });
+    const admin = withRole(dbUrl, 'supabase_admin');
+    try {
+      try {
+        await admin`select 1`;
+      } catch {
+        throw new Error('local supabase_admin login failed; cannot prove the ops lockdown');
+      }
+      await rollback(admin, async (tx) => {
+        await tx.unsafe(lockdownSql);
+        await tx.unsafe(lockdownSql); // idempotent
+
+        // Catalog-wide: every closed role holds nothing in schema net.
+        const closed = await netPrivilegesHeld(tx, closedNetRoles);
+        assert.equal(closed.length, 0, `closed roles still hold: ${JSON.stringify(closed)}`);
+
+        // Paired allowed case: the sweep can see held privileges — postgres
+        // and service_role keep USAGE on schema net and EXECUTE on http_post.
+        const kept = await netPrivilegesHeld(tx, ['postgres', 'service_role']);
+        for (const role of ['postgres', 'service_role']) {
+          assert.ok(
+            kept.some((row) => row.role === role && row.object === 'schema net' && row.privilege === 'USAGE'),
+            `${role} lost USAGE on schema net`,
+          );
+          assert.ok(
+            kept.some((row) => row.role === role && row.object.startsWith('net.http_post(') && row.privilege === 'EXECUTE'),
+            `${role} lost EXECUTE on net.http_post`,
+          );
+        }
+
+        // Real access, not only the catalog: the queue and http_post are refused.
+        for (const role of ['meshgrounds_admin', 'anon']) {
+          await tx.unsafe(`set local role ${role}`);
+          for (const query of [
+            'select 1 from net.http_request_queue limit 1',
+            `insert into net.http_request_queue (method, url, headers, timeout_milliseconds) values ('GET', 'http://127.0.0.1:9/', '{}'::jsonb, 1000)`,
+            `select net.http_post('http://127.0.0.1:9/', '{}'::jsonb, '{}'::jsonb, '{}'::jsonb, 1000)`,
+          ]) {
+            assert.equal(await sqlState(tx, query), '42501', `${role}: ${query}`);
+          }
+          await tx.unsafe('reset role');
+        }
       });
     } finally {
       await admin.end({ timeout: 1 });
