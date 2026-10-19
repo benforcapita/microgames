@@ -59,26 +59,12 @@ export async function runRequest(
   return { response, locals, logs };
 }
 
-const EXPECTED_SECURITY_HEADERS: Record<string, string> = {
-  'content-security-policy':
-    "default-src 'none'; style-src 'self'; img-src 'self' data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; script-src 'none'",
-  'x-robots-tag': 'noindex, nofollow',
-  'referrer-policy': 'no-referrer',
-  'x-content-type-options': 'nosniff',
-  'cache-control': 'no-store',
-  'cross-origin-opener-policy': 'same-origin',
-  'strict-transport-security': 'max-age=31536000',
-};
-
-export function assertSecurityHeaders(res: Response) {
-  for (const [name, value] of Object.entries(EXPECTED_SECURITY_HEADERS)) {
-    assert.equal(res.headers.get(name), value, `header ${name}`);
-  }
-}
-
 export const TEST_PASSWORD = 'test-password-9f2c';
 export const TEST_SECRET = 'test_path-secret_0123456789abcdef0123456789';
-export const TEST_ORIGIN = 'http://localhost:56905';
+// ADMIN_ORIGIN is boot-checked: https only, exact origin, never the public
+// site (see config.test.ts). The request URL stays http://localhost — the
+// Origin check is an exact string match against the header.
+export const TEST_ORIGIN = 'https://mga-admin-test.example';
 
 // Generated at runtime; never committed or printed.
 export const TEST_HASH = await argon2.hash(TEST_PASSWORD, {
@@ -100,4 +86,21 @@ export function testEnv(overrides: Record<string, string | undefined> = {}): Rec
 
 export function basicAuth(user: string, password: string): string {
   return 'Basic ' + Buffer.from(`${user}:${password}`).toString('base64');
+}
+
+const EXPECTED_SECURITY_HEADERS: Record<string, string> = {
+  'content-security-policy':
+    "default-src 'none'; style-src 'self'; img-src 'self' data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; script-src 'none'",
+  'x-robots-tag': 'noindex, nofollow',
+  'referrer-policy': 'no-referrer',
+  'x-content-type-options': 'nosniff',
+  'cache-control': 'no-store',
+  'cross-origin-opener-policy': 'same-origin',
+  'strict-transport-security': 'max-age=31536000',
+};
+
+export function assertSecurityHeaders(res: Response) {
+  for (const [name, value] of Object.entries(EXPECTED_SECURITY_HEADERS)) {
+    assert.equal(res.headers.get(name), value, `header ${name}`);
+  }
 }

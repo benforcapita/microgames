@@ -7,7 +7,12 @@ import vercel from '@astrojs/vercel';
 export default defineConfig({
   output: 'server',
   adapter: vercel(),
-  security: { checkOrigin: true },
+  // Off on purpose: Astro's built-in check runs before our middleware and
+  // answers non-GET requests with an unheadered, Astro-fingerprinting 403.
+  // Our middleware owns the check instead — POSTs that pass locks 1-2 must
+  // carry Origin exactly equal to ADMIN_ORIGIN plus a valid CSRF pair, and
+  // every failure is our plain, fully-headered response.
+  security: { checkOrigin: false },
   vite: {
     // Pin tsconfig discovery to this package. Rolldown's auto discovery walks
     // past a tsconfig that doesn't cover the resolved file (e.g. virtual

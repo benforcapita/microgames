@@ -17,10 +17,13 @@ cp .env.example .env   # then replace every placeholder
 npm run dev            # http://localhost:56905
 ```
 
-`.env.example` contains placeholders only. Until `ADMIN_PATH_SECRET` is a real
-random value (>= 32 chars of `[A-Za-z0-9_-]`), a real user, and
-`ADMIN_PASSWORD_HASH` a real hash, every request returns a plain 503 — the app
-fails closed. Astro loads `.env` automatically for `dev` and `build`.
+`.env.example` contains placeholders only. Every request returns a plain 503 —
+the app fails closed — until all boot-checked settings are real values:
+`ADMIN_PATH_SECRET` (>= 32 chars of `[A-Za-z0-9_-]`), `ADMIN_USER`,
+`ADMIN_PASSWORD_HASH`, `ADMIN_DATABASE_URL` and `ADMIN_ORIGIN` (an exact
+https origin — no path, no trailing slash — that is not `meshground.app`, a
+subdomain of it, or `meshgrounds.vercel.app`). Astro loads `.env`
+automatically for `dev` and `build`.
 
 ## Hashing a password
 
