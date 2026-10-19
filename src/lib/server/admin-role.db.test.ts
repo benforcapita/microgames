@@ -131,12 +131,15 @@ async function seed(tx: Tx) {
 }
 
 // Seed as postgres, become the role for fn, roll the whole transaction back.
+// PG16+ gives the role's creator ADMIN on it but not SET, so the test grants
+// postgres membership inside the transaction (rolled back with everything else).
 async function asRole(fn: (tx: Tx) => Promise<void>) {
   assert.ok(sql);
   let done = false;
   try {
     await sql.begin(async (tx) => {
       await seed(tx);
+      await tx`grant meshgrounds_admin to postgres`;
       await tx.unsafe('set local role meshgrounds_admin');
       await fn(tx);
       done = true;
@@ -346,7 +349,7 @@ describe('meshgrounds_admin role (db)', () => {
       await denied(tx, (s) => s`update public.admin_actions set action = 'reject'`, 'admin_actions update');
       await denied(tx, (s) => s`delete from public.admin_actions`, 'admin_actions delete');
       await denied(tx, (s) => s`truncate public.admin_actions`, 'admin_actions truncate');
-      await denied(tx, (s) => s`update public.admin_auth_failures set id = id`, 'admin_auth_failures update');
+      await denied(tx, (s) => s`update public.admin_auth_failures set created_at = created_at`, 'admin_auth_failures update');
       await denied(tx, (s) => s`truncate public.admin_auth_failures`, 'admin_auth_failures truncate');
 
       // The audit insert grant still runs through the table's own checks.
@@ -481,7 +484,7 @@ describe('meshgrounds_admin role (db)', () => {
       select routine_schema, routine_name
       from information_schema.role_routine_grants
       where grantee = ${ROLE}`;
-    assert.deepEqual(routines, []);
+    assert.equal(routines.length, 0, JSON.stringify(routines));
     const schemata = await sql!<{ schema_name: string }[]>`
       select schema_name from information_schema.schemata
       where schema_name !~ '^(pg_|information_schema)'`;
@@ -500,6 +503,6 @@ describe('meshgrounds_admin role (db)', () => {
         and has_function_privilege(${ROLE}, p.oid::regprocedure::text, 'EXECUTE')
         and not has_function_privilege('public', p.oid::regprocedure::text, 'EXECUTE')
       order by 1`;
-    assert.deepEqual(extraExecute, []);
+    assert.equal(extraExecute.length, 0, JSON.stringify(extraExecute));
   });
 });
