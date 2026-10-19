@@ -106,12 +106,13 @@ test('lockout: no lock + wrong password → 401 and exactly one recorded failure
 test('lockout: no Basic credentials → 401 without recording a failure', async () => {
   const { store, calls } = fakeStore(0);
   const { verify, calls: verifyCalls } = countingVerify();
-  for (const headers of [
+  const headerCases: Record<string, string>[] = [
     {},
     { authorization: 'Bearer abc' },
     { authorization: 'Basic !!!notbase64' },
     { authorization: 'Basic ' + Buffer.from('nopasswordcolon').toString('base64') },
-  ]) {
+  ];
+  for (const headers of headerCases) {
     const { response } = await runRequest(new Request(`http://localhost/${TEST_SECRET}`, { headers }), ENV, {
       store,
       verify,

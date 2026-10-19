@@ -34,10 +34,17 @@ Prints an argon2id PHC string (`$argon2id$...`, m=19456, t=2, p=1) to put in
 ## Checks
 
 ```sh
-npm run check   # astro check
-npm test        # node:test over test/*.test.ts
-npm run build   # Vercel build; the static output must stay empty
+npm run check    # astro check
+npm test         # node:test over test/*.test.ts (unit tests only)
+npm run test:db  # node:test over test/*.db.test.ts; needs DATABASE_URL, skips otherwise
+npm run build    # Vercel build; the static output must stay empty
 ```
+
+The lockout counts `admin_auth_failures` rows in the database, so repeated
+wrong passwords are locked across function instances: 5 failures within 15
+minutes → 429 with `Retry-After` until the window clears. A success deletes
+all rows. `test:db` expects `DATABASE_URL` pointing at a local Supabase stack
+with the MGA-1 migration applied.
 
 There are no static assets, no client JavaScript and no `public/` folder on
 purpose: Vercel serves static files without running middleware, which would
@@ -48,7 +55,10 @@ bypass the locks and fingerprint the app.
 - `src/middleware.ts` — lock 1 (secret path) → lock 2 (basic auth) →
   lock 3 slot (MGA-2b) → security headers → CSRF on POST
 - `src/lib/config.ts` — boot env validation, fails closed (503 everywhere)
-- `src/lib/auth-basic.ts` — constant-time basic auth (argon2id / bcrypt)
+- `src/lib/auth-basic.ts` — constant-time basic auth (argon2id / bcrypt) +
+  DB-backed lockout gate
+- `src/lib/db.ts` — postgres.js client for `ADMIN_DATABASE_URL` and the
+  `admin_auth_failures` store
 - `src/lib/csrf.ts` — `__Host-mga_csrf` cookie + HMAC field (HKDF key from
   `ADMIN_PATH_SECRET`, label `mga-csrf-v1`)
 - `src/lib/log.ts` — JSON-lines logger, allowlisted fields only

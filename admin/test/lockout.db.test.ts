@@ -167,15 +167,20 @@ describe('basic-auth lockout via admin_auth_failures (local DB)', { skip: !DB_UR
   });
 
   describe('role behaviour as meshgrounds_admin', () => {
-    // Connect as the superuser and borrow the role inside a rolled-back
-    // transaction, per the ticket: begin; set local role; assert; rollback.
-    const asRole = <T>(fn: (tx: postgres.TransactionSql) => Promise<T>) =>
-      superuser.begin(async (tx) => {
-        await tx`set local role meshgrounds_admin`;
-        return fn(tx);
+    // The ticket's `begin; set local role meshgrounds_admin; assert; rollback`
+    // pattern is impossible on this stack: supautils restricts SET ROLE to the
+    // reserved API roles, even for a member of the target role. Instead each
+    // case runs on the app's own meshgrounds_admin client (sqlA, created by
+    // db.ts — the real grants) inside a transaction that is always rolled
+    // back, so cases stay independent.
+    const ROLLBACK = new Error('rollback');
+    const inTx = (fn: (tx: postgres.TransactionSql) => Promise<unknown>) =>
+      sqlA.begin(async (tx) => {
+        await fn(tx);
+        throw ROLLBACK;
       });
     const denied = async (fn: (tx: postgres.TransactionSql) => Promise<unknown>) => {
-      const err = await asRole(fn).then(
+      const err = await inTx(fn).then(
         () => null,
         (e) => e as { code?: string },
       );
@@ -183,19 +188,26 @@ describe('basic-auth lockout via admin_auth_failures (local DB)', { skip: !DB_UR
     };
 
     it('can select, insert and delete admin_auth_failures', async () => {
-      await asRole(async (tx) => {
+      const err = await inTx(async (tx) => {
         const [r] = await tx`insert into public.admin_auth_failures default values returning id`;
         assert.ok(r.id);
         const [c] = await tx`select count(*) as n from public.admin_auth_failures`;
         assert.ok(Number(c.n) >= 1);
         await tx`delete from public.admin_auth_failures`;
-      });
-      assert.equal(await failureCount(), 0, 'the transaction left the table as found');
+      }).then(
+        () => null,
+        (e) => e,
+      );
+      assert.equal(err, ROLLBACK, 'expected the rollback sentinel, not a grant error');
+      assert.equal(await failureCount(), 0, 'the rolled-back transaction left nothing behind');
     });
 
     it('can select public.games (the admin read grant)', async () => {
-      const rows = await asRole((tx) => tx`select id from public.games limit 1`);
-      assert.ok(Array.isArray(rows));
+      const err = await inTx((tx) => tx`select id from public.games limit 1`).then(
+        () => null,
+        (e) => e,
+      );
+      assert.equal(err, ROLLBACK);
     });
 
     it('cannot select from auth.users', () => denied((tx) => tx`select count(*) from auth.users`));
