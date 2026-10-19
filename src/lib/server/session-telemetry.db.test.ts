@@ -125,12 +125,6 @@ function skip(t: { skip: (message?: string) => void }) {
   return false;
 }
 
-/**
- * The five events that may arrive before session_start. `applied` asserts the
- * event left its value on its own session row; `untouched` asserts another
- * game's row kept the column defaults — the markers the unpublished-game,
- * cross-game and admission tests assert per event.
- */
 const EVENTS: {
   type: TelemetryType;
   value: number;
@@ -432,9 +426,6 @@ describe('session telemetry ordering (db)', () => {
       const rejected = nextGame();
       await sql`insert into public.games (id, slug, creator, title, stage)
                 values (${rejected}, ${rejected}, 'mg10', 'MG13 Rejected', 'rejected')`;
-      // Reach the insert guard itself: admission always allows, so only the
-      // public-stage EXISTS in the event insert can stop the row. The route
-      // would 404 earlier on getGame; the DB must not depend on that.
       const admit = async () => true;
       const denied = nextSession();
       await recordTelemetry(denied, rejected, e.type, e.value, null, admit);
@@ -448,9 +439,6 @@ describe('session telemetry ordering (db)', () => {
   }
 
   for (const e of EVENTS) {
-    // The session row belongs to GAME; the event names GAME2. Both UPDATE paths
-    // miss on game_id, so only the INSERT's ON CONFLICT game guard protects the
-    // foreign row — the path these parametrized tests pin.
     it(`${e.type} naming a different game cannot touch another game’s session row`, async (t) => {
       if (skip(t)) return;
       const sessionId = nextSession();
