@@ -78,7 +78,7 @@ describe('submission page asset summary reads the current version from game_asse
         (${gameId}, 1, 'bad.png', 'image', 'rejected', null)`;
 
     const summary = summarizeAssets(await loadAssetSummaryInput(gameId));
-    assert.deepEqual(summary.missing, ['audio/MG-4c-deliberate-break.mp3']);
+    assert.deepEqual(summary.missing, ['audio/jump.mp3']);
     assert.equal(summary.totalBytes, 50_000 + 150 * 1024);
     assert.equal(summary.overTotal, false);
     assert.deepEqual(summary.large, [{ path: 'sprites/hero.png', sizeBytes: 150 * 1024 }]);
