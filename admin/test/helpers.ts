@@ -1,6 +1,7 @@
 import argon2 from '@node-rs/argon2';
 import assert from 'node:assert/strict';
 import { handleRequest, type Deps } from '../src/middleware.ts';
+import type { RequestAuth } from '../src/lib/auth-supabase.ts';
 import type { LockoutStore } from '../src/lib/auth-basic.ts';
 import { GET as robotsGet } from '../src/pages/robots.txt.ts';
 import { GET as indexGet, POST as indexPost } from '../src/pages/[p]/index.ts';
@@ -40,10 +41,24 @@ export const unlockedStore: LockoutStore = {
   async clearFailures() {},
 };
 
+// Locks 1-2 tests don't have a session. They inject an allow so they stay on
+// the behaviour they cover. Lock 3 tests pass their own auth.
+const allowAuth: NonNullable<Deps['auth']> = () => allowSession;
+
+const allowSession: RequestAuth = {
+  async classify() {
+    return { kind: 'ok' };
+  },
+  async signOut() {},
+  setCookies() {
+    return [];
+  },
+};
+
 export async function runRequest(
   request: Request,
   env: Record<string, string | undefined>,
-  deps: Pick<Deps, 'store' | 'verify'> & { log?: (f: LogFields) => void } = {},
+  deps: Pick<Deps, 'store' | 'verify' | 'auth'> & { log?: (f: LogFields) => void } = {},
 ): Promise<RunResult> {
   const locals: Record<string, unknown> = {};
   const logs: LogFields[] = [];
@@ -51,6 +66,7 @@ export async function runRequest(
     env,
     store: deps.store ?? unlockedStore,
     verify: deps.verify,
+    auth: deps.auth ?? allowAuth,
     log: (f) => {
       deps.log?.(f);
       logs.push(f);
@@ -73,6 +89,10 @@ export const TEST_HASH = await argon2.hash(TEST_PASSWORD, {
   parallelism: 1,
 });
 
+export const TEST_ADMIN_ID = '00000000-0000-4000-8000-000000000001';
+export const TEST_SUPABASE_URL = 'https://admin-supabase-test.example';
+export const TEST_ANON_KEY = 'test-anon-key';
+
 export function testEnv(overrides: Record<string, string | undefined> = {}): Record<string, string> {
   return {
     ADMIN_PATH_SECRET: TEST_SECRET,
@@ -80,6 +100,9 @@ export function testEnv(overrides: Record<string, string | undefined> = {}): Rec
     ADMIN_PASSWORD_HASH: TEST_HASH,
     ADMIN_DATABASE_URL: 'postgres://meshgrounds_admin@127.0.0.1:54322/postgres',
     ADMIN_ORIGIN: TEST_ORIGIN,
+    ADMIN_USER_ID: TEST_ADMIN_ID,
+    ADMIN_SUPABASE_URL: TEST_SUPABASE_URL,
+    ADMIN_SUPABASE_ANON_KEY: TEST_ANON_KEY,
     ...overrides,
   };
 }

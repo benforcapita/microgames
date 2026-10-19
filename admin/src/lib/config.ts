@@ -1,5 +1,9 @@
-// Boot validation, fails closed (LLD §2). MGA-2 validates these five keys;
-// later tickets add ADMIN_USER_ID / ADMIN_SUPABASE_* / PREVIEW_SIGNING_SECRET.
+// Boot validation, fails closed (LLD §2). Missing or invalid values are a
+// plain 503 on every request; the log names the key only
+// (`invalid_config:<KEY>`). MGA-2 checks the first five keys. MGA-2b adds
+// ADMIN_USER_ID (stored lowercase), ADMIN_SUPABASE_URL (https only) and
+// ADMIN_SUPABASE_ANON_KEY (non-empty, no whitespace — a space or newline is
+// rejected rather than trimmed). PREVIEW_SIGNING_SECRET is a later ticket.
 
 export type AdminConfig = {
   pathSecret: string;
@@ -8,6 +12,12 @@ export type AdminConfig = {
   databaseUrl: string;
   /** Exact https origin the admin is served from; checked on every POST. */
   origin: string;
+  /** Auth user id of the single admin account. */
+  adminUserId: string;
+  /** https URL of the Supabase project. http is rejected. */
+  supabaseUrl: string;
+  /** Anon key sent to Auth. Not a secret key. */
+  supabaseAnonKey: string;
 };
 
 export type ConfigResult = { ok: true; config: AdminConfig } | { ok: false; key: string };
@@ -33,10 +43,49 @@ export function loadConfig(env: Env): ConfigResult {
   if (!origin || !isValidOrigin(origin)) {
     return { ok: false, key: 'ADMIN_ORIGIN' };
   }
+  const adminUserId = env.ADMIN_USER_ID;
+  if (!adminUserId || !isUuid(adminUserId)) {
+    return { ok: false, key: 'ADMIN_USER_ID' };
+  }
+  const supabaseUrl = env.ADMIN_SUPABASE_URL;
+  if (!supabaseUrl || !isHttpsUrl(supabaseUrl)) {
+    return { ok: false, key: 'ADMIN_SUPABASE_URL' };
+  }
+  const supabaseAnonKey = env.ADMIN_SUPABASE_ANON_KEY;
+  // Whitespace is rejected, not trimmed: a key with a space or newline is not
+  // the key, and sending it would fail every Auth call.
+  if (!supabaseAnonKey || /\s/.test(supabaseAnonKey)) {
+    return { ok: false, key: 'ADMIN_SUPABASE_ANON_KEY' };
+  }
   return {
     ok: true,
-    config: { pathSecret: secret, user, passwordHash, databaseUrl, origin },
+    config: {
+      pathSecret: secret,
+      user,
+      passwordHash,
+      databaseUrl,
+      origin,
+      adminUserId: adminUserId.toLowerCase(),
+      supabaseUrl,
+      supabaseAnonKey,
+    },
   };
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function isUuid(raw: string): boolean {
+  return UUID_RE.test(raw);
+}
+
+function isHttpsUrl(raw: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return false;
+  }
+  return url.protocol === 'https:' && url.hostname !== '';
 }
 
 function isValidDatabaseUrl(raw: string): boolean {

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadConfig } from '../src/lib/config.ts';
-import { testEnv, runRequest, TEST_SECRET } from './helpers.ts';
+import { testEnv, runRequest, TEST_SECRET, TEST_ADMIN_ID, TEST_SUPABASE_URL } from './helpers.ts';
 
 const VALID = testEnv();
 
@@ -11,6 +11,8 @@ test('config: valid env passes validation', () => {
   if (res.ok) {
     assert.equal(res.config.pathSecret, TEST_SECRET);
     assert.equal(res.config.user, 'boss');
+    assert.equal(res.config.adminUserId, TEST_ADMIN_ID);
+    assert.equal(res.config.supabaseUrl, TEST_SUPABASE_URL);
   }
 });
 
@@ -150,6 +152,81 @@ test('boundary: bad ADMIN_ORIGIN makes every request a plain 503; the log names 
 test('config: failure reports the first bad key in a fixed order', () => {
   const res = loadConfig(testEnv({ ADMIN_PATH_SECRET: 'short', ADMIN_USER: '' }));
   assert.deepEqual(res, { ok: false, key: 'ADMIN_PATH_SECRET' });
+});
+
+test('config: ADMIN_USER_ID must be a UUID', () => {
+  for (const bad of [undefined, '', 'not-a-uuid', '00000000-0000-0000-0000-00000000000g', '00000000000040008000000000000001']) {
+    assert.deepEqual(loadConfig(testEnv({ ADMIN_USER_ID: bad })), { ok: false, key: 'ADMIN_USER_ID' });
+  }
+  const upper = loadConfig(testEnv({ ADMIN_USER_ID: 'AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE' }));
+  assert.equal(upper.ok, true);
+  if (upper.ok) assert.equal(upper.config.adminUserId, 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+});
+
+test('config: ADMIN_SUPABASE_URL must be an https URL', () => {
+  for (const bad of [undefined, '', 'not a url', 'http://127.0.0.1:54321', 'http://auth.example', 'ws://auth.example', 'https://']) {
+    assert.deepEqual(loadConfig(testEnv({ ADMIN_SUPABASE_URL: bad })), {
+      ok: false,
+      key: 'ADMIN_SUPABASE_URL',
+    });
+  }
+  assert.equal(loadConfig(testEnv({ ADMIN_SUPABASE_URL: 'https://auth.example' })).ok, true);
+  assert.equal(loadConfig(testEnv({ ADMIN_SUPABASE_URL: 'https://auth.example/project' })).ok, true);
+});
+
+test('config: ADMIN_SUPABASE_ANON_KEY must be non-empty and contain no whitespace', () => {
+  for (const bad of [undefined, '', ' ', 'anon key', 'anon\n', '\tanon', 'anon ']) {
+    assert.deepEqual(loadConfig(testEnv({ ADMIN_SUPABASE_ANON_KEY: bad })), {
+      ok: false,
+      key: 'ADMIN_SUPABASE_ANON_KEY',
+    });
+  }
+  assert.equal(loadConfig(testEnv({ ADMIN_SUPABASE_ANON_KEY: 'anon' })).ok, true);
+});
+
+test('config: a bad lock-3 key is reported after the MGA-2 keys', () => {
+  assert.deepEqual(loadConfig(testEnv({ ADMIN_ORIGIN: 'http://nope', ADMIN_USER_ID: 'nope' })), {
+    ok: false,
+    key: 'ADMIN_ORIGIN',
+  });
+  assert.deepEqual(
+    loadConfig(testEnv({ ADMIN_USER_ID: 'nope', ADMIN_SUPABASE_URL: 'http://nope' })),
+    { ok: false, key: 'ADMIN_USER_ID' },
+  );
+});
+
+test('boundary: a whitespace-only ADMIN_SUPABASE_ANON_KEY is a plain 503', async () => {
+  const env = testEnv({ ADMIN_SUPABASE_ANON_KEY: ' \t\n ' });
+  const { response, logs } = await runRequest(new Request(`http://localhost/${TEST_SECRET}`), env);
+  assert.equal(response.status, 503);
+  assert.equal(await response.text(), 'Service unavailable');
+  assert.equal(response.headers.get('content-type'), 'text/plain');
+  const errors = logs.filter((line) => line.error);
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0]?.error, 'invalid_config:ADMIN_SUPABASE_ANON_KEY');
+});
+
+test('boundary: each bad lock-3 key is a plain 503 and one log line naming the key', async () => {
+  const cases: [string, Record<string, string | undefined>, string | undefined][] = [
+    ['ADMIN_USER_ID', { ADMIN_USER_ID: undefined }, undefined],
+    ['ADMIN_USER_ID', { ADMIN_USER_ID: 'not-a-uuid' }, 'not-a-uuid'],
+    ['ADMIN_SUPABASE_URL', { ADMIN_SUPABASE_URL: 'not a url' }, 'not a url'],
+    ['ADMIN_SUPABASE_URL', { ADMIN_SUPABASE_URL: 'http://127.0.0.1:54321' }, '127.0.0.1'],
+    ['ADMIN_SUPABASE_ANON_KEY', { ADMIN_SUPABASE_ANON_KEY: '' }, undefined],
+  ];
+  for (const [key, overrides, leaked] of cases) {
+    const env = testEnv(overrides);
+    for (const path of ['/', '/robots.txt', `/${TEST_SECRET}`]) {
+      const { response, logs } = await runRequest(new Request(`http://localhost${path}`), env);
+      assert.equal(response.status, 503, `${key} ${path}`);
+      assert.equal(await response.text(), 'Service unavailable');
+      assert.equal(response.headers.get('content-type'), 'text/plain');
+      const errors = logs.filter((line) => line.error);
+      assert.equal(errors.length, 1, `${key} ${path}`);
+      assert.equal(errors[0]?.error, `invalid_config:${key}`);
+      if (leaked) assert.equal(JSON.stringify(logs).includes(leaked), false, `${key} ${path}`);
+    }
+  }
 });
 
 test('boundary: bad config makes every request a plain 503', async () => {

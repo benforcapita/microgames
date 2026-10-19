@@ -17,6 +17,8 @@
   "dependencies": {
     "@astrojs/vercel": "11.0.14",
     "@node-rs/argon2": "2.2.2",
+    "@supabase/ssr": "0.12.7",
+    "@supabase/supabase-js": "2.117.3",
     "astro": "7.3.5",
     "bcryptjs": "3.0.3",
     "postgres": "3.4.9"
