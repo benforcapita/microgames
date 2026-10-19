@@ -237,12 +237,15 @@ test('lock 3: auth routes and the stylesheet skip the session check', async () =
     assert.equal(response.status, 200, suffix);
     assert.equal(logs[0]?.lock, undefined, suffix);
   }
-  for (const suffix of ['/auth/mfa', '/auth/mfa/enroll']) {
-    const { response, logs } = await runRequest(new Request(PAGE + suffix, { headers: AUTH }), ENV, { auth });
-    assert.equal(response.status, 303, suffix);
-    assert.equal(response.headers.get('location'), `/${TEST_SECRET}/auth/signin`, suffix);
-    assert.equal(logs[0]?.lock, undefined, suffix);
-  }
+  const mfa = await runRequest(new Request(`${PAGE}/auth/mfa`, { headers: AUTH }), ENV, { auth });
+  assert.equal(mfa.response.status, 303);
+  assert.equal(mfa.response.headers.get('location'), `/${TEST_SECRET}/auth/signin`);
+  assert.equal(mfa.logs[0]?.lock, undefined);
+  const enroll = await runRequest(new Request(`${PAGE}/auth/mfa/enroll`, { headers: AUTH }), ENV, { auth });
+  assert.equal(enroll.response.status, 404);
+  assert.equal(enroll.response.headers.get('location'), null);
+  assert.equal(await enroll.response.text(), 'Not found');
+  assert.equal(enroll.logs[0]?.lock, undefined);
   assert.equal(calls, 2);
   const nested = await runRequest(new Request(`${PAGE}/auth/signin/extra`, { headers: AUTH }), ENV, { auth });
   assert.equal(nested.response.status, 404);

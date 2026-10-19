@@ -292,7 +292,8 @@ export async function handleRequest(
     response = plain(500, 'Internal server error');
   }
   for (const cookie of setCookies ?? []) response.headers.append('set-cookie', cookie);
-  if (setCsrfCookie) {
+  // A 404 is the lock-1 response: it does not mint a CSRF cookie.
+  if (setCsrfCookie && response.status !== 404) {
     response.headers.append('set-cookie', `${CSRF_COOKIE}=${setCsrfCookie}; ${CSRF_COOKIE_OPTS}`);
   }
   for (const [name, value] of Object.entries(SECURITY_HEADERS)) response.headers.set(name, value);

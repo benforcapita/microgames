@@ -39,6 +39,11 @@ export function plain(status: number, body: string): Response {
   return new Response(body, { status, headers: { 'content-type': 'text/plain; charset=utf-8' } });
 }
 
+// Same response lock 1 builds: plain text, no charset, no redirect.
+export function lockNotFound(): Response {
+  return new Response('Not found', { status: 404, headers: { 'content-type': 'text/plain' } });
+}
+
 export function escapeHtml(value: string): string {
   return value
     .replaceAll('&', '&amp;')
@@ -240,6 +245,41 @@ export async function readForm(request: Request): Promise<FormFields> {
 }
 
 export type Aal1Gate = { kind: 'continue'; verifiedTotp: boolean } | { kind: 'response'; response: Response };
+
+export type EnrollGate = { kind: 'continue' } | { kind: 'response'; response: Response };
+
+// No session, AAL2, or a verified factor: the lock-1 404. Enrollment only
+// continues for Ben at AAL1 with no verified factor. Another user is signed
+// out first. An Auth error is that same 404.
+export async function gateEnroll(auth: RequestAuth): Promise<EnrollGate> {
+  let kind: AuthKind;
+  try {
+    kind = await auth.classify();
+  } catch {
+    return { kind: 'response', response: lockNotFound() };
+  }
+  switch (kind.kind) {
+    case 'none':
+    case 'ok':
+      return { kind: 'response', response: lockNotFound() };
+    case 'aal1-ben':
+      if (kind.verifiedTotp) return { kind: 'response', response: lockNotFound() };
+      return { kind: 'continue' };
+    case 'other-user':
+      try {
+        await auth.signOut();
+      } catch {
+        // signOut clears cookies even when Auth refuses the call.
+      }
+      return { kind: 'response', response: lockNotFound() };
+    case 'error':
+      return { kind: 'response', response: lockNotFound() };
+    default: {
+      const unreachable: never = kind;
+      throw unreachable;
+    }
+  }
+}
 
 // AAL2 goes home. No session goes to sign-in. Another user is signed out
 // and answered with the plain 404. An Auth error is that same 404.

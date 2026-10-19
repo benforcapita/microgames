@@ -381,7 +381,7 @@ test('enroll lists leftover unverified factors and does not remove them', async 
   assert.doesNotMatch(body, /<style|<script|style=/i);
 });
 
-test('enroll with a verified factor goes to the challenge', async () => {
+test('enroll with a verified factor is the lock-1 404', async () => {
   const stub = client({
     async classify(): Promise<AuthKind> {
       return { kind: 'aal1-ben', verifiedTotp: true };
@@ -390,7 +390,10 @@ test('enroll with a verified factor goes to the challenge', async () => {
   const { response } = await runRequest(new Request(`${PAGE}/auth/mfa/enroll`, { headers: AUTH }), ENV, {
     auth: stub.auth,
   });
-  assertLocation(response, '/auth/mfa');
+  assert.equal(response.status, 404);
+  assert.equal(response.headers.get('content-type'), 'text/plain');
+  assert.equal(response.headers.get('location'), null);
+  assert.equal(await response.text(), 'Not found');
   assert.equal(stub.calls.enroll, 0);
 });
 

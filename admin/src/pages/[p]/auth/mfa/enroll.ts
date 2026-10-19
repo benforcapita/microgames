@@ -5,7 +5,7 @@ import {
   enrollQrPage,
   enrollRetryPage,
   enrollStartPage,
-  gateAal1,
+  gateEnroll,
   plain,
   readForm,
   redirectInside,
@@ -13,7 +13,7 @@ import {
 
 // First-factor enrollment. The QR is the data URI Auth returned, encoded
 // for an img src. Leftover unverified factors are listed and left in place.
-// A verified factor goes to the challenge page instead of enrolling another.
+// No session, AAL2, or a verified factor is the lock-1 404.
 
 const FACTOR_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -30,9 +30,8 @@ async function report(auth: RequestAuth): Promise<ReportedFactor[] | undefined> 
 export const GET: APIRoute = async (context) => {
   const auth = context.locals.auth;
   if (!auth) return plain(404, 'Not found');
-  const gate = await gateAal1(auth, context.url);
+  const gate = await gateEnroll(auth);
   if (gate.kind === 'response') return gate.response;
-  if (gate.verifiedTotp) return redirectInside(context.url, 'mfa');
   const unverified = await report(auth);
   if (!unverified) return plain(404, 'Not found');
   return enrollStartPage(context.url, context.locals.csrfField, unverified);
@@ -41,9 +40,8 @@ export const GET: APIRoute = async (context) => {
 export const POST: APIRoute = async (context) => {
   const auth = context.locals.auth;
   if (!auth) return plain(404, 'Not found');
-  const gate = await gateAal1(auth, context.url);
+  const gate = await gateEnroll(auth);
   if (gate.kind === 'response') return gate.response;
-  if (gate.verifiedTotp) return redirectInside(context.url, 'mfa');
   const form = await readForm(context.request);
   const field = context.locals.csrfField;
   if (form.code) {
