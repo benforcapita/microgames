@@ -58,11 +58,14 @@ jobs:
         run: supabase start -x vector,logflare,edge-runtime,realtime,studio,imgproxy > /dev/null
       # Masks are registered before export; values come only from supabase status via the loopback guard, never from repo secrets.
       - name: Export local Supabase env (masked)
-        run: node --input-type=module -e "import fs from 'node:fs'; import { localSupabaseEnv } from './scripts/lib/local-supabase.mjs'; const env = localSupabaseEnv(); for (const k of ['PUBLIC_SUPABASE_URL', 'PUBLIC_SUPABASE_PUBLISHABLE_KEY', 'SUPABASE_SECRET_KEY', 'DATABASE_URL', 'MAILPIT_URL']) { const v = env[k]; if (!v) continue; if (['PUBLIC_SUPABASE_PUBLISHABLE_KEY', 'SUPABASE_SECRET_KEY', 'DATABASE_URL'].includes(k)) console.log('::add-mask::' + v); fs.appendFileSync(process.env.GITHUB_ENV, k + '=' + v + '\n'); }"
+        run: node --input-type=module -e "import fs from 'node:fs'; import { localSupabaseEnv } from './scripts/lib/local-supabase.mjs'; const env = localSupabaseEnv(); for (const k of ['PUBLIC_SUPABASE_URL', 'PUBLIC_SUPABASE_PUBLISHABLE_KEY', 'SUPABASE_SECRET_KEY', 'DATABASE_URL', 'MAILPIT_URL']) { const v = env[k]; if (!v) { if (k === 'MAILPIT_URL') continue; console.error('missing ' + k + ' from supabase status'); process.exit(1); } if (['PUBLIC_SUPABASE_PUBLISHABLE_KEY', 'SUPABASE_SECRET_KEY', 'DATABASE_URL'].includes(k)) console.log('::add-mask::' + v); fs.appendFileSync(process.env.GITHUB_ENV, k + '=' + v + '\n'); }"
       - name: Smoke
         run: npm run smoke
       - name: DB tests
-        run: npm test
+        shell: bash
+        run: npm test 2>&1 | tee "$RUNNER_TEMP/db-tests.tap"
+      - name: Assert no DB suites skipped
+        run: node scripts/ci/assert-no-db-skips.mjs "$RUNNER_TEMP/db-tests.tap"
       # MG-7: add e2e steps (npx playwright test) here, after Smoke and before Stop.
       - name: Stop local Supabase
         if: always()
