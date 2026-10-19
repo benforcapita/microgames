@@ -90,21 +90,35 @@ async function seedEligibleProvingGame(tag: string, db: Db = sql): Promise<strin
 const stageOf = async (id: string, db: Db = sql) =>
   (await db<StageRow[]>`select stage, graduated_at from public.games where id = ${id}`)[0];
 
+/** Runs `fn` in a transaction that is always rolled back — nothing is committed. */
+async function inTx(fn: (tx: postgres.TransactionSql) => Promise<void>): Promise<void> {
+  const rollback = new Error('rollback');
+  try {
+    await sql.begin(async (tx) => {
+      await fn(tx);
+      throw rollback;
+    });
+  } catch (err) {
+    if (err !== rollback) throw err;
+  }
+}
+
 async function assertStaysProving(id: string, via: string) {
   const row = await stageOf(id);
   assert.equal(row?.stage, 'proving', `${via} must not promote the game`);
   assert.equal(row?.graduated_at, null, `${via} must not stamp graduated_at`);
 }
 
+after(async () => {
+  if (!sql) return;
+  try {
+    if (created.length) await sql`delete from public.games where id in ${sql(created)}`;
+  } finally {
+    await sql.end({ timeout: 1 }).catch(() => {});
+  }
+});
+
 describe('MG-9: nothing promotes a game out of the Proving Grounds on its own (db)', () => {
-  after(async () => {
-    if (!sql) return;
-    try {
-      if (created.length) await sql`delete from public.games where id in ${sql(created)}`;
-    } finally {
-      await sql.end({ timeout: 1 }).catch(() => {});
-    }
-  });
 
   it('rateGame keeps an eligible game proving', async (t) => {
     if (skip(t)) return;
@@ -149,16 +163,79 @@ describe('MG-9: nothing promotes a game out of the Proving Grounds on its own (d
     if (skip(t)) return;
     // Everything runs inside a rolled-back transaction: a committed live game with real
     // plays would be counted by platformStats()/homepage queries in other test files.
-    const rollback = new Error('rollback-human-promote');
-    try {
-      await sql.begin(async (tx) => {
-        const id = await seedEligibleProvingGame('admin', tx);
-        await tx`update public.games set stage = 'live' where id = ${id}`;
-        assert.equal((await stageOf(id, tx))?.stage, 'live');
-        throw rollback;
+    await inTx(async (tx) => {
+      const id = await seedEligibleProvingGame('admin', tx);
+      await tx`update public.games set stage = 'live' where id = ${id}`;
+      assert.equal((await stageOf(id, tx))?.stage, 'live');
+    });
+  });
+});
+
+describe('MG-9: an unhealthy game is not eligible (db)', () => {
+  /** A proving game with `plays` sessions, `crashed` of them crashed, and `votes` ratings at `stars`. */
+  async function seedHealthGame(
+    tx: postgres.TransactionSql,
+    tag: string,
+    { plays, crashed = 0, stars = 5, votes = GRADUATION.minRatingsForRatingGate + 2 }:
+      { plays: number; crashed?: number; stars?: number; votes?: number },
+  ): Promise<string> {
+    const id = `mg9h${tag}${run}`;
+    await tx`
+      insert into public.games (id, slug, title, creator, stage)
+      values (${id}, ${id}, 'Health', 'mg9test', 'proving')`;
+    await tx`
+      insert into public.sessions (id, game_id, first_frame_ms, started, completed, crashed, duration_ms)
+      select gen_random_uuid(), ${id}, 100, true, true, g <= ${crashed}, 120000
+      from generate_series(1, ${plays}) g`;
+    await tx`
+      insert into public.ratings (game_id, voter, stars)
+      select ${id}, 'seed-' || g::text, ${stars} from generate_series(1, ${votes}) g`;
+    return id;
+  }
+
+  const failing = (health: { checks: { key: string; pass: boolean }[] }) =>
+    health.checks.filter((c) => !c.pass).map((c) => c.key);
+
+  it('a healthy game is eligible (the test can see success)', async (t) => {
+    if (skip(t)) return;
+    await inTx(async (tx) => {
+      const id = await seedHealthGame(tx, 'ok', { plays: GRADUATION.minPlays });
+      const health = await getHealth(id, tx);
+      assert.equal(health.eligible, true);
+      assert.deepEqual(failing(health), []);
+    });
+  });
+
+  it('too few plays alone makes a game ineligible', async (t) => {
+    if (skip(t)) return;
+    await inTx(async (tx) => {
+      const id = await seedHealthGame(tx, 'few', { plays: GRADUATION.minPlays - 1 });
+      const health = await getHealth(id, tx);
+      assert.equal(health.eligible, false);
+      assert.deepEqual(failing(health), ['plays']);
+    });
+  });
+
+  it('a high crash rate alone makes a game ineligible', async (t) => {
+    if (skip(t)) return;
+    await inTx(async (tx) => {
+      const id = await seedHealthGame(tx, 'crash', {
+        plays: GRADUATION.minPlays,
+        crashed: Math.ceil(GRADUATION.minPlays * (GRADUATION.maxCrashRate + 0.05)),
       });
-    } catch (err) {
-      if (err !== rollback) throw err;
-    }
+      const health = await getHealth(id, tx);
+      assert.equal(health.eligible, false);
+      assert.deepEqual(failing(health), ['crash']);
+    });
+  });
+
+  it('a low community rating alone makes a game ineligible', async (t) => {
+    if (skip(t)) return;
+    await inTx(async (tx) => {
+      const id = await seedHealthGame(tx, 'rate', { plays: GRADUATION.minPlays, stars: 1 });
+      const health = await getHealth(id, tx);
+      assert.equal(health.eligible, false);
+      assert.deepEqual(failing(health), ['rating']);
+    });
   });
 });
