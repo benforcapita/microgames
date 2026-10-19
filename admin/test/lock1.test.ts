@@ -1,13 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import {
-  runRequest,
-  testEnv,
-  basicAuth,
-  assertSecurityHeaders,
-  TEST_SECRET,
-  TEST_PASSWORD,
-} from './helpers.ts';
+import { assertSecurityHeaders, runRequest, testEnv, basicAuth, TEST_SECRET, TEST_PASSWORD } from './helpers.ts';
 
 const ENV = testEnv();
 

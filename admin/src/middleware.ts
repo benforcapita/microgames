@@ -6,7 +6,8 @@
 import type { MiddlewareHandler } from 'astro';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { loadConfig, type AdminConfig } from './lib/config';
-import { checkBasicAuth } from './lib/auth-basic';
+import { gateBasicAuth, type LockoutStore, type PasswordVerifier } from './lib/auth-basic';
+import { connect, createLockoutStore } from './lib/db';
 import { CSRF_COOKIE, CSRF_COOKIE_OPTS, CSRF_FIELD, csrfField, mintCookieValue, verifyField } from './lib/csrf';
 import { log, type LogFields } from './lib/log';
 
@@ -14,6 +15,10 @@ export type Locals = { csrfCookie?: string; csrfField?: string };
 export type Deps = {
   env?: Record<string, string | undefined>;
   log?: (fields: LogFields) => void;
+  /** Lockout store; default is the postgres.js store on ADMIN_DATABASE_URL. */
+  store?: LockoutStore;
+  /** Password verifier; default is argon2id/bcrypt per the stored hash. */
+  verify?: PasswordVerifier;
 };
 
 const SECURITY_HEADERS: Record<string, string> = {
@@ -62,11 +67,22 @@ async function csrfOk(request: Request, config: AdminConfig): Promise<boolean> {
   return typeof field === 'string' && verifyField(config.pathSecret, cookie, field);
 }
 
+// One lazily-created postgres.js client per function instance (LLD §8.2),
+// cached on the validated URL. Tests inject their own store via deps.
+let defaultStore: { url: string; store: LockoutStore } | undefined;
+function lockoutStore(databaseUrl: string): LockoutStore {
+  if (defaultStore?.url !== databaseUrl) {
+    defaultStore = { url: databaseUrl, store: createLockoutStore(connect(databaseUrl)) };
+  }
+  return defaultStore.store;
+}
+
 async function route(
   request: Request,
   locals: Locals,
   next: () => Promise<Response>,
   env: Record<string, string | undefined>,
+  deps: Deps,
   fields: LogFields,
 ): Promise<{ response: Response; setCsrfCookie?: string }> {
   const cfg = loadConfig(env);
@@ -95,13 +111,29 @@ async function route(
     return { response: notFound() };
   }
 
-  // Lock 2: basic auth. The password verify always runs so timing reveals nothing.
-  // Lockout hook (MGA-2 PR B): BEFORE checking credentials, count
-  // admin_auth_failures rows newer than 15 min; at 5+ return a plain 429 with
-  // Retry-After = remaining lock seconds (rounded up, cap 900) WITHOUT running
-  // the password verify and WITHOUT inserting a failure row. Each failed check
-  // below inserts one row; a success deletes all rows.
-  if (!(await checkBasicAuth(request.headers.get('authorization'), config))) {
+  // Lock 2: basic auth behind the DB-backed lockout (LLD §3.2, §8.3). The
+  // store is queried before any credential work: while locked nothing is
+  // verified and no row is written, so the lock cannot extend itself.
+  const auth = await gateBasicAuth(
+    request.headers.get('authorization'),
+    config,
+    deps.store ?? lockoutStore(config.databaseUrl),
+    deps.verify,
+  );
+  if (auth.kind === 'locked') {
+    fields.lock = 2;
+    return {
+      response: plain(429, 'Too many requests', {
+        'retry-after': String(auth.retryAfterSeconds),
+      }),
+    };
+  }
+  if (auth.kind === 'unavailable') {
+    fields.level = 'error';
+    fields.error = auth.code;
+    return { response: plain(503, 'Service unavailable') };
+  }
+  if (auth.kind === 'fail') {
     fields.lock = 2;
     return {
       response: plain(401, 'Unauthorized', {
@@ -141,7 +173,7 @@ export async function handleRequest(
   let response: Response;
   let setCsrfCookie: string | undefined;
   try {
-    ({ response, setCsrfCookie } = await route(request, locals, next, env, fields));
+    ({ response, setCsrfCookie } = await route(request, locals, next, env, deps, fields));
   } catch {
     // Never let a route error surface as an Astro/framework error page.
     fields.level = 'error';
