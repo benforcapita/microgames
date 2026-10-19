@@ -101,18 +101,21 @@ function stackEnv(t: { skip: (message?: string) => void }, overrides: Record<str
 interface Fixture {
   gameId: string;
   stale: string[];
+  env: Env;
+  scratchUrl: string;
+  sql: postgres.Sql;
   cleanup: () => Promise<void>;
-  freshen: () => Promise<void>;
-  reage: () => Promise<void>;
   rowCount: () => Promise<number>;
   rowStatus: (path: string) => Promise<string | undefined>;
   objectListed: (name: string) => Promise<boolean>;
 }
 
-/** Seed one game with stale 'uploaded' rows: `orphans` without objects, `live` with them,
- *  plus `staging` aged `_staging` objects. Ages are applied in SQL like real data. */
+/** Seed one game into a private scratch database with stale 'uploaded' rows and aged
+ *  staging candidates, while real objects stay fresh in the shared Storage bucket so
+ *  parallel runs on other connections can never collide with or sweep this fixture. */
 async function seed(env: Env, opts: { orphans?: number; live?: number; staging?: number } = {}): Promise<Fixture> {
-  const sql = postgres(env.DATABASE_URL, { connect_timeout: 3, max: 2 });
+  const scratch = await scratchMaintenanceDb(env);
+  const sharedSql = postgres(env.DATABASE_URL, { connect_timeout: 3, max: 2 });
   const bucket = createClient(env.PUBLIC_SUPABASE_URL, env.SUPABASE_SECRET_KEY, {
     auth: { persistSession: false },
   }).storage.from('games');
@@ -120,24 +123,39 @@ async function seed(env: Env, opts: { orphans?: number; live?: number; staging?:
   const stale: string[] = [];
   const objectNames: string[] = [];
   try {
-    await sql`
-      insert into public.games (id, slug, creator, title, stage, size_bytes)
-      values (${gameId}, ${gameId}, 'stub', 'Maint script', 'proving', 100)
+    await scratch.sql`
+      insert into public.games (id)
+      values (${gameId})
     `;
     for (let i = 0; i < (opts.orphans ?? 0); i++) {
-      await sql`
-        insert into public.game_assets (game_id, version, path, expected_type, status, size_bytes, content_sha256, source, updated_at)
-        values (${gameId}, 1, ${`orphan-${i}.png`}, 'image', 'uploaded', 10, ${SHA}, 'creator', now() - interval '3 hours')
+      await scratch.sql`
+        insert into public.game_assets (game_id, version, path, status, size_bytes, content_sha256, updated_at)
+        values (${gameId}, 1, ${`orphan-${i}.png`}, 'uploaded', 10, ${SHA}, now() - interval '3 hours')
       `;
     }
-    for (let i = 0; i < (opts.live ?? 0); i++) {
+    const liveCount = opts.live ?? 0;
+    for (let i = 0; i < liveCount; i++) {
       const name = `${gameId}/1/live-${i}.png`;
       const up = await bucket.upload(name, PNG, { contentType: 'image/png' });
       assert.equal(up.error, null, `seed upload: ${up.error?.message}`);
       objectNames.push(name);
-      await sql`
-        insert into public.game_assets (game_id, version, path, expected_type, status, size_bytes, content_sha256, source, updated_at)
-        values (${gameId}, 1, ${`live-${i}.png`}, 'image', 'uploaded', 10, ${SHA}, 'creator', now() - interval '3 hours')
+      await scratch.sql`
+        insert into storage.objects (bucket_id, name, created_at)
+        values ('games', ${name}, now())
+      `;
+      await scratch.sql`
+        insert into public.game_assets (game_id, version, path, status, size_bytes, content_sha256, updated_at)
+        values (${gameId}, 1, ${`live-${i}.png`}, 'uploaded', 10, ${SHA}, now() - interval '3 hours')
+      `;
+    }
+    if (liveCount === 0) {
+      const anchor = `${gameId}/1/anchor.png`;
+      const up = await bucket.upload(anchor, PNG, { contentType: 'image/png' });
+      assert.equal(up.error, null, `seed upload: ${up.error?.message}`);
+      objectNames.push(anchor);
+      await scratch.sql`
+        insert into storage.objects (bucket_id, name, created_at)
+        values ('games', ${anchor}, now())
       `;
     }
     for (let i = 0; i < (opts.staging ?? 0); i++) {
@@ -146,41 +164,37 @@ async function seed(env: Env, opts: { orphans?: number; live?: number; staging?:
       assert.equal(up.error, null, `seed upload: ${up.error?.message}`);
       objectNames.push(name);
       stale.push(name);
-      await sql`update storage.objects set created_at = now() - interval '3 hours' where bucket_id = 'games' and name = ${name}`;
+      await scratch.sql`
+        insert into storage.objects (bucket_id, name, created_at)
+        values ('games', ${name}, now() - interval '3 hours')
+      `;
     }
   } catch (error) {
-    await sql.end({ timeout: 1 }).catch(() => {});
+    await bucket.remove(objectNames).catch(() => {});
+    await scratch.drop().catch(() => {});
+    await sharedSql.end({ timeout: 1 }).catch(() => {});
     throw error;
   }
   return {
     gameId,
     stale,
+    env: { ...env, DATABASE_URL: scratch.url },
+    scratchUrl: scratch.url,
+    sql: scratch.sql,
     rowCount: async () =>
-      (await sql<{ n: number }[]>`select count(*)::int as n from public.game_assets where game_id = ${gameId}`)[0]?.n ?? 0,
+      (await scratch.sql<{ n: number }[]>`select count(*)::int as n from public.game_assets where game_id = ${gameId}`)[0]?.n ?? 0,
     rowStatus: async (path) =>
-      (await sql<{ status: string }[]>`select status from public.game_assets where game_id = ${gameId} and version = 1 and path = ${path}`)[0]
+      (await scratch.sql<{ status: string }[]>`select status from public.game_assets where game_id = ${gameId} and version = 1 and path = ${path}`)[0]
         ?.status,
     objectListed: async (name) =>
-      (await sql`select 1 as x from storage.objects where bucket_id = 'games' and name = ${name}`).length > 0,
-    // The DB maintenance tests sweep every stale orphan and staging object on this
-    // database. A dry run has to observe rows that are not candidates yet, then age
-    // them for the real run, or a parallel sweep deletes them first.
-    freshen: async () => {
-      await sql`update public.game_assets set updated_at = now() where game_id = ${gameId}`;
-      await sql`update storage.objects set created_at = now() where bucket_id = 'games' and name like ${`${gameId}/%`}`;
-    },
-    reage: async () => {
-      await sql`
-        update public.game_assets set updated_at = now() - interval '3 hours'
-        where game_id = ${gameId} and path like 'orphan-%'`;
-      for (const name of stale) {
-        await sql`update storage.objects set created_at = now() - interval '3 hours' where bucket_id = 'games' and name = ${name}`;
-      }
-    },
+      (await sharedSql`select 1 as x from storage.objects where bucket_id = 'games' and name = ${name}`).length > 0,
     cleanup: async () => {
-      await bucket.remove(objectNames).catch(() => {});
-      await sql`delete from public.games where id = ${gameId}`.catch(() => {});
-      await sql.end({ timeout: 1 }).catch(() => {});
+      try {
+        await bucket.remove(objectNames).catch(() => {});
+        await scratch.drop();
+      } finally {
+        await sharedSql.end({ timeout: 1 }).catch(() => {});
+      }
     },
   };
 }
@@ -242,8 +256,7 @@ describe('scripts/asset-maintenance.mjs', () => {
     if (!env) return;
     const f = await seed(env, { orphans: 1, live: 1, staging: 1 });
     try {
-      await f.freshen();
-      const dry = await runMaintenance(['--dry-run'], env, { npm: true, timeoutMs: 90_000 });
+      const dry = await runMaintenance(['--dry-run'], { ...env, DATABASE_URL: f.scratchUrl }, { npm: true, timeoutMs: 90_000 });
       assert.equal(dry.code, 0, `stdout=${dry.stdout} stderr=${dry.stderr}`);
       assert.match(dry.stdout, /dryRun|dry run/i);
       assert.match(dry.stdout, /"wouldAbort":null/, 'a healthy dry run reports no would-abort reason');
@@ -251,8 +264,7 @@ describe('scripts/asset-maintenance.mjs', () => {
       assert.equal(await f.objectListed(f.stale[0] ?? ''), true, 'dry run must remove no staging objects');
 
       // The paired real run still does its job, so the dry run is proving the flag, not a dead script.
-      await f.reage();
-      const real = await runMaintenance([], env);
+      const real = await runMaintenance([], { ...env, DATABASE_URL: f.scratchUrl });
       assert.equal(real.code, 0, `stderr=${real.stderr}`);
       assert.equal(await f.rowCount(), 1, 'the orphan row is deleted, the live row kept');
       assert.equal(await f.rowStatus('live-0.png'), 'uploaded');
@@ -272,19 +284,17 @@ describe('scripts/asset-maintenance.mjs', () => {
     const f = await seed(base, { orphans: 1, live: 2, staging: 1 });
     const audit = postgres(base.DATABASE_URL, { connect_timeout: 3, max: 1 });
     try {
-      const rowsBefore = await audit<{ p: string; status: string }[]>`
+      const rowsBefore = await f.sql<{ p: string; status: string }[]>`
         select game_id || '/' || version || '/' || path as p, status
         from public.game_assets where game_id = ${f.gameId} order by p`;
 
-      const r = await runMaintenance(['--dry-run'], env);
+      const r = await runMaintenance(['--dry-run'], { ...env, DATABASE_URL: f.scratchUrl });
       assert.notEqual(r.code, 0, `a dry run under the publishable key must refuse: ${r.stdout}`);
-      // The refusal's exact wording is pinned at db level (deterministic scratch DB); here a
-      // concurrent fixture could make a cap refusal arrive first, so pin only that one exists.
-      assert.match(r.stdout, /"wouldAbort":"/, 'the dry-run report carries the would-abort reason');
+      assert.match(r.stdout, /"wouldAbort":"storage canary/, 'the dry-run report carries the would-abort reason');
 
       assert.equal(await f.rowCount(), 3, 'dry run must delete no rows');
       assert.equal(await f.objectListed(f.stale[0] ?? ''), true, 'dry run must remove no staging objects');
-      const rowsAfter = await audit<{ p: string; status: string }[]>`
+      const rowsAfter = await f.sql<{ p: string; status: string }[]>`
         select game_id || '/' || version || '/' || path as p, status
         from public.game_assets where game_id = ${f.gameId} order by p`;
       assert.deepEqual(rowsAfter, rowsBefore, 'every fixture row survives the refused dry run');
@@ -379,7 +389,7 @@ describe('scripts/asset-maintenance.mjs', () => {
     const env = { ...base, SUPABASE_SECRET_KEY: base.PUBLIC_SUPABASE_PUBLISHABLE_KEY };
     const f = await seed(base, { orphans: 1, live: 2, staging: 1 });
     try {
-      const r = await runMaintenance([], env);
+      const r = await runMaintenance([], { ...env, DATABASE_URL: f.scratchUrl });
       assert.notEqual(r.code, 0, `stdout=${r.stdout} stderr=${r.stderr}`);
       assert.equal(r.timedOut, false);
       assert.match(r.stderr, /canary/i, `expected the canary refusal: ${r.stderr}`);
@@ -398,7 +408,7 @@ describe('scripts/asset-maintenance.mjs', () => {
     const { server, port } = await fakeStorage(t, 'not-found');
     const f = await seed(base, { orphans: 1, live: 1, staging: 1 });
     try {
-      const env = { ...base, PUBLIC_SUPABASE_URL: `http://127.0.0.1:${port}` };
+      const env = { ...base, DATABASE_URL: f.scratchUrl, PUBLIC_SUPABASE_URL: `http://127.0.0.1:${port}` };
       const r = await runMaintenance([], env);
       assert.notEqual(r.code, 0, `stdout=${r.stdout} stderr=${r.stderr}`);
       assert.equal(await f.rowCount(), 2, 'no row may be deleted against a mismatched Storage');
@@ -415,7 +425,7 @@ describe('scripts/asset-maintenance.mjs', () => {
     const { server, port } = await fakeStorage(t, 'hang');
     const f = await seed(base, { orphans: 1, live: 1 });
     try {
-      const env = { ...base, PUBLIC_SUPABASE_URL: `http://127.0.0.1:${port}` };
+      const env = { ...base, DATABASE_URL: f.scratchUrl, PUBLIC_SUPABASE_URL: `http://127.0.0.1:${port}` };
       const r = await runMaintenance(['--storage-timeout-ms', '700'], env, { timeoutMs: 20_000 });
       assert.equal(r.timedOut, false, 'a hanging Storage must not hang the run');
       assert.notEqual(r.code, 0);
@@ -432,12 +442,12 @@ describe('scripts/asset-maintenance.mjs', () => {
     const overCap = 25; // default cap is 20
     const f = await seed(env, { orphans: overCap });
     try {
-      const refused = await runMaintenance([], env);
+      const refused = await runMaintenance([], { ...env, DATABASE_URL: f.scratchUrl });
       assert.notEqual(refused.code, 0, `stdout=${refused.stdout} stderr=${refused.stderr}`);
       assert.match(refused.stderr, /orphan|cap|refus/i);
       assert.equal(await f.rowCount(), overCap, 'a refused run deletes nothing');
 
-      const allowed = await runMaintenance(['--max-orphans', '500'], env);
+      const allowed = await runMaintenance(['--max-orphans', '500'], { ...env, DATABASE_URL: f.scratchUrl });
       assert.equal(allowed.code, 0, `stderr=${allowed.stderr}`);
       assert.equal(await f.rowCount(), 0);
     } finally {
