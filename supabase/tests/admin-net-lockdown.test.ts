@@ -109,6 +109,14 @@ async function netPrivilegesHeld(tx: Sql, roles: readonly string[]): Promise<Hel
 
 const closedNetRoles: readonly string[] = ['meshgrounds_admin', 'public', 'anon', 'authenticated'];
 
+// Real-access probes every closed role must fail with 42501: read the queue,
+// enqueue into it, and call http_post.
+const netDeniedProbes: readonly string[] = [
+  'select 1 from net.http_request_queue limit 1',
+  `insert into net.http_request_queue (method, url, headers, timeout_milliseconds) values ('GET', 'http://127.0.0.1:9/', '{}'::jsonb, 1000)`,
+  `select net.http_post('http://127.0.0.1:9/', '{}'::jsonb, '{}'::jsonb, '{}'::jsonb, 1000)`,
+];
+
 async function canLogin(tx: Sql): Promise<boolean> {
   const [row] = await tx<{ rolcanlogin: boolean }[]>`
     select rolcanlogin from pg_roles where rolname = 'meshgrounds_admin'
@@ -254,6 +262,12 @@ describe('meshgrounds_admin has no pg_net access', { concurrency: false }, () =>
           assert.equal(await sqlState(tx, query), '42501', query);
         }
         await tx.unsafe('reset role');
+        // anon is refused the same way: the queue and http_post.
+        await tx.unsafe('set local role anon');
+        for (const query of netDeniedProbes) {
+          assert.equal(await sqlState(tx, query), '42501', `anon: ${query}`);
+        }
+        await tx.unsafe('reset role');
 
         // The keep set is untouched: postgres and service_role pass in the ops report.
         const report = await tx.unsafe<{ role_name: string; privilege: string; object_name: string; status: string }[]>(checkSql);
@@ -326,11 +340,7 @@ describe('meshgrounds_admin has no pg_net access', { concurrency: false }, () =>
         // Real access, not only the catalog: the queue and http_post are refused.
         for (const role of ['meshgrounds_admin', 'anon']) {
           await tx.unsafe(`set local role ${role}`);
-          for (const query of [
-            'select 1 from net.http_request_queue limit 1',
-            `insert into net.http_request_queue (method, url, headers, timeout_milliseconds) values ('GET', 'http://127.0.0.1:9/', '{}'::jsonb, 1000)`,
-            `select net.http_post('http://127.0.0.1:9/', '{}'::jsonb, '{}'::jsonb, '{}'::jsonb, 1000)`,
-          ]) {
+          for (const query of netDeniedProbes) {
             assert.equal(await sqlState(tx, query), '42501', `${role}: ${query}`);
           }
           await tx.unsafe('reset role');
