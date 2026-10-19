@@ -93,7 +93,9 @@ export async function recordGateEvent(
 }
 
 /** postgres.js adapter. Throws keep their Postgres `code` (42703, 42P01, …). */
-export function postgresSchemaClient(sql: import('postgres').Sql): SchemaInsertClient {
+export function postgresSchemaClient(
+  sql: import('postgres').Sql | import('postgres').TransactionSql,
+): SchemaInsertClient {
   return {
     from(table: string) {
       return {
@@ -103,12 +105,16 @@ export function postgresSchemaClient(sql: import('postgres').Sql): SchemaInsertC
             const gameId = String(row.game_id);
             if ('user_id' in row) {
               const userId = row.user_id == null ? null : String(row.user_id);
-              await sql`
+              const write = (db: typeof sql) => db`
                 insert into sessions (id, game_id, user_id)
                 values (${id}, ${gameId}, (select id from auth.users where id = ${userId}))
                 on conflict (id) do update
                   set user_id = coalesce(sessions.user_id, excluded.user_id)
                   where sessions.game_id = excluded.game_id`;
+              // Inside a transaction a failed statement aborts it, which would kill the
+              // missing-column retry; a savepoint confines the error instead.
+              if ('savepoint' in sql) await sql.savepoint(write);
+              else await write(sql);
             } else {
               await sql`
                 insert into sessions (id, game_id)

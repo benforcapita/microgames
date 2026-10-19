@@ -156,10 +156,10 @@ export async function listGamesByIds(ids: string[], device?: DeviceKind): Promis
  */
 export async function getGame(
   slugOrId: string,
-  { includeUnpublished = false, viewerId }: { includeUnpublished?: boolean; viewerId?: string | null } = {},
+  { includeUnpublished = false, viewerId, db = sql }: { includeUnpublished?: boolean; viewerId?: string | null; db?: GameDb } = {},
 ): Promise<Game | null> {
   const unfiltered = includeUnpublished || !!viewerId;
-  const [row] = await sql<GameRow[]>`${gameSelect()} where (g.slug = ${slugOrId} or g.id = ${slugOrId})
+  const [row] = await db<GameRow[]>`${gameSelect()} where (g.slug = ${slugOrId} or g.id = ${slugOrId})
     ${unfiltered ? sql`` : sql`and g.stage in ${sql([...PUBLIC_STAGES])}`}`;
   if (!row) return null;
   const game = toGame(row);
@@ -286,22 +286,13 @@ export async function getUserRating(gameId: string, voter: string | undefined): 
 export type TelemetryType = 'session_start' | 'first_frame' | 'start' | 'complete' | 'crash' | 'heartbeat' | 'ready';
 
 /**
- * Serializes the admit-then-write decision for one play across all telemetry events: the
- * session row is only created while holding this lock after admission passed, so an event
- * that sees the row knows it was already admitted (not a new play), and one that misses it
- * knows no admitted write is in flight. Held on a reserved connection because a
- * session-level advisory lock must be taken and released on the same backend.
+ * Serializes the admit-then-write decision for one play across all telemetry events.
+ * Transaction-scoped: released at commit on the same backend, so it stays correct behind
+ * Supabase's transaction pooler (session-level advisory locks are unsupported there —
+ * lock and unlock could land on different backends and leak).
  */
-async function withSessionLock<T>(sessionId: string, fn: (conn: postgres.ReservedSql) => Promise<T>): Promise<T> {
-  const conn = await sql.reserve();
-  try {
-    await conn`select pg_advisory_lock(hashtext(${sessionId}))`;
-    return await fn(conn);
-  } finally {
-    await conn`select pg_advisory_unlock(hashtext(${sessionId}))`.catch(() => {});
-    conn.release();
-  }
-}
+const lockSession = (tx: postgres.TransactionSql, sessionId: string) =>
+  tx`select pg_advisory_xact_lock(hashtext(${sessionId}))`;
 
 export async function recordTelemetry(
   sessionId: string,
@@ -311,37 +302,45 @@ export async function recordTelemetry(
   userId: string | null = null,
   /**
    * May a session row be created for this play? The route supplies getGame +
-   * admitSessionStart. Unset callers keep the old semantics: session_start always writes,
-   * first_frame never creates a row.
+   * admitSessionStart. It runs inside the session lock, so it must only read via `db`
+   * (the lock-holding transaction) — reaching the pool there can deadlock once every
+   * pooled connection is held. Unset callers keep the old semantics: session_start
+   * always writes, first_frame never creates a row.
    */
-  admitNewSession?: () => Promise<boolean>,
+  admitNewSession?: (db: GameDb) => Promise<boolean>,
 ) {
   const where = sql`where id = ${sessionId} and game_id = ${gameId}`;
   switch (type) {
     case 'session_start':
-      await withSessionLock(sessionId, async (conn) => {
-        const exists = await conn`select 1 from sessions where id = ${sessionId} and game_id = ${gameId}`;
-        if (!exists.length && !(admitNewSession ? await admitNewSession() : true)) return;
+      await sql.begin(async (tx) => {
+        await lockSession(tx, sessionId);
+        const exists = await tx`select 1 from sessions where id = ${sessionId} and game_id = ${gameId}`;
+        if (!exists.length && !(admitNewSession ? await admitNewSession(tx) : true)) return;
         // On conflict this only fills a null user_id: game_id and first_frame_ms keep
         // whatever an earlier first_frame already recorded (schema-rollout.ts).
-        await insertSessionStart(postgresSchemaClient(conn), { sessionId, gameId, userId });
+        await insertSessionStart(postgresSchemaClient(tx), { sessionId, gameId, userId });
       });
       return;
     case 'first_frame': {
       const ms = clampFirstFrameMs(value);
       if (ms === null) return;
-      await withSessionLock(sessionId, async (conn) => {
-        const hit = await conn`
-          update sessions set first_frame_ms = coalesce(first_frame_ms, ${ms})
-          where id = ${sessionId} and game_id = ${gameId}
+      const hit = await sql`
+        update sessions set first_frame_ms = coalesce(first_frame_ms, ${ms}) ${where}
+        returning id`;
+      if (hit.length) return;
+      await sql.begin(async (tx) => {
+        await lockSession(tx, sessionId);
+        const retry = await tx`
+          update sessions set first_frame_ms = coalesce(first_frame_ms, ${ms}) ${where}
           returning id`;
-        // Under the lock a miss means the row really is absent: no admitted write for this
-        // session can be in flight. Only an admitted first_frame may create it, and on
-        // conflict the game guard keeps a foreign session's row untouched.
-        if (!hit.length && admitNewSession && (await admitNewSession())) {
-          await conn`
+        // Under the lock a miss means the row really is absent: no admitted write for
+        // this session can be in flight. Only an admitted first_frame may create it, and
+        // on conflict the game guard keeps a foreign session's row untouched.
+        if (!retry.length && admitNewSession && (await admitNewSession(tx))) {
+          await tx`
             insert into sessions (id, game_id, first_frame_ms)
-            values (${sessionId}, ${gameId}, ${ms})
+            select ${sessionId}, ${gameId}, ${ms}
+            where exists (select 1 from games where id = ${gameId} and stage in ${sql([...PUBLIC_STAGES])})
             on conflict (id) do update
               set first_frame_ms = coalesce(sessions.first_frame_ms, excluded.first_frame_ms)
               where sessions.game_id = excluded.game_id`;
@@ -369,7 +368,8 @@ export async function recordTelemetry(
   await evaluateGraduation(gameId);
 }
 
-type GameDb = postgres.Sql | postgres.TransactionSql;
+/** A query runner that is either the shared pool or a transaction on it. */
+export type GameDb = postgres.Sql | postgres.TransactionSql;
 
 export async function getHealth(gameId: string, db: GameDb = sql): Promise<{ checks: HealthCheck[]; eligible: boolean }> {
   const G = GRADUATION;

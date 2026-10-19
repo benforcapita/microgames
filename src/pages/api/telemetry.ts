@@ -8,7 +8,7 @@ import {
   parseUid,
   telemetryByUid,
 } from '../../lib/server/abuse';
-import { getGame, recordTelemetry, type TelemetryType } from '../../lib/server/games';
+import { getGame, recordTelemetry, type GameDb, type TelemetryType } from '../../lib/server/games';
 import { hasAuthSessionCookie, sessionUserId } from '../../lib/server/session-user';
 
 const TYPES = new Set<TelemetryType>(['session_start', 'first_frame', 'start', 'complete', 'crash', 'heartbeat', 'ready']);
@@ -61,8 +61,10 @@ export const POST: APIRoute = async (context) => {
 
   // Creating a session row — by session_start, or by a first_frame that reached the DB
   // first — must pass the same admission: known game plus the session-start rate limits.
-  const admitNewSession = async () =>
-    Boolean(await getGame(gameId)) && admitSessionStart(uid, ip, gameId);
+  // It runs inside recordTelemetry's session lock, so reads must go through `db`, the
+  // lock-holding transaction — never the pool, which could be exhausted by other sessions.
+  const admitNewSession = async (db: GameDb) =>
+    Boolean(await getGame(gameId, { db })) && admitSessionStart(uid, ip, gameId);
   await recordTelemetry(sessionId, gameId, type, body?.value, userId, admitNewSession);
   return new Response(null, { status: 204 });
 };

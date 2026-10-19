@@ -283,7 +283,7 @@ describe('session telemetry ordering (db)', () => {
     }
     const [col] = await sql<{ n: number }[]>`
       select count(*)::int as n from information_schema.columns
-      where table_name = 'sessions' and column_name = 'user_id'`;
+      where table_schema = 'public' and table_name = 'sessions' and column_name = 'user_id'`;
     assert.equal(col?.n, 1, 'rollback must restore user_id');
     assert.equal(await row(sessionId), undefined);
   });
