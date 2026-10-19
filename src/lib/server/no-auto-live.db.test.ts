@@ -53,6 +53,9 @@ if (probeOk) {
 
 const run = randomUUID().replace(/-/g, '').slice(0, 8);
 const created: string[] = [];
+// Every id seeded inside a transaction: all of them must be gone at the end — any
+// survivor means a callback committed what it was supposed to roll back (QA d1/d1b/d2).
+const txSeeded: string[] = [];
 
 function skip(t: { skip: (message?: string) => void }) {
   if (!probeOk || !sql) {
@@ -72,7 +75,7 @@ type Db = postgres.Sql | postgres.TransactionSql;
 /** A proving game that already clears every health check — eligible, not yet promoted. */
 async function seedEligibleProvingGame(tag: string, db: Db = sql): Promise<string> {
   const id = `mg9${tag}${run}`;
-  if (db === sql) created.push(id);
+  (db === sql ? created : txSeeded).push(id);
   await db`
     insert into public.games (id, slug, title, creator, stage)
     values (${id}, ${id}, 'Eligible', 'mg9test', 'proving')`;
@@ -116,23 +119,28 @@ after(async () => {
     // Leak check BEFORE deleting `created`: a test that loses its rollback commits its
     // fixtures (QA mutants d1/d1b/d2). d2's game even sits inside `created`, so counting
     // first is the only deterministic catch — the delete below would hide it otherwise.
-    const leaks = await sql<{ kind: string; n: number }[]>`
-      select 'games' as kind, count(*)::int as n from public.games
-       where id like 'mg9admin%' or id like 'mg9h%' or id like 'mg9tx%'
-      union all
-      select 'sessions', count(*)::int from public.sessions
-       where game_id like 'mg9admin%' or game_id like 'mg9h%' or game_id like 'mg9tx%'
-      union all
-      select 'ratings', count(*)::int from public.ratings
-       where game_id like 'mg9admin%' or game_id like 'mg9h%' or game_id like 'mg9tx%'`;
-    const leaked = leaks.filter((x) => x.n > 0);
+    // The prefixes cover any hand-written tx insert; txSeeded covers every helper seed.
+    const ids = txSeeded.length ? txSeeded : [''];
+    const [g, s, r] = await Promise.all([
+      sql`select count(*)::int n from public.games
+          where id like 'mg9admin%' or id like 'mg9h%' or id like 'mg9tx%' or id in ${sql(ids)}`,
+      sql`select count(*)::int n from public.sessions
+          where game_id like 'mg9admin%' or game_id like 'mg9h%' or game_id like 'mg9tx%' or game_id in ${sql(ids)}`,
+      sql`select count(*)::int n from public.ratings
+          where game_id like 'mg9admin%' or game_id like 'mg9h%' or game_id like 'mg9tx%' or game_id in ${sql(ids)}`,
+    ]);
+    const leaked = { games: g[0]!.n, sessions: s[0]!.n, ratings: r[0]!.n };
     // Hygiene: drop leaked rows anyway so the stack stays clean for whatever runs next,
     // then fail. Cleaning up silently is not an option.
-    await sql`delete from public.ratings where game_id like 'mg9admin%' or game_id like 'mg9h%' or game_id like 'mg9tx%'`;
-    await sql`delete from public.sessions where game_id like 'mg9admin%' or game_id like 'mg9h%' or game_id like 'mg9tx%'`;
-    await sql`delete from public.games where id like 'mg9admin%' or id like 'mg9h%' or id like 'mg9tx%'`;
+    await sql`delete from public.ratings
+              where game_id like 'mg9admin%' or game_id like 'mg9h%' or game_id like 'mg9tx%' or game_id in ${sql(ids)}`;
+    await sql`delete from public.sessions
+              where game_id like 'mg9admin%' or game_id like 'mg9h%' or game_id like 'mg9tx%' or game_id in ${sql(ids)}`;
+    await sql`delete from public.games
+              where id like 'mg9admin%' or id like 'mg9h%' or id like 'mg9tx%' or id in ${sql(ids)}`;
     if (created.length) await sql`delete from public.games where id in ${sql(created)}`;
-    assert.deepEqual(leaked, [], 'committed mg9admin/mg9h rows survived the suite — a test lost its rollback');
+    const nonzero = Object.fromEntries(Object.entries(leaked).filter(([, n]) => n > 0));
+    assert.deepEqual(nonzero, {}, 'committed rows survived the suite — a test lost its rollback');
   } finally {
     await sql.end({ timeout: 1 }).catch(() => {});
   }
@@ -214,6 +222,7 @@ describe('MG-11: an unhealthy game is not eligible (db)', () => {
       { plays: number; crashed?: number; stars?: number; votes?: number },
   ): Promise<string> {
     const id = `mg9h${tag}${run}`;
+    txSeeded.push(id);
     await tx`
       insert into public.games (id, slug, title, creator, stage)
       values (${id}, ${id}, 'Health', 'mg9test', 'proving')`;
