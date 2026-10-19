@@ -22,8 +22,9 @@ the app fails closed — until all boot-checked settings are real values:
 `ADMIN_PATH_SECRET` (>= 32 chars of `[A-Za-z0-9_-]`), `ADMIN_USER`,
 `ADMIN_PASSWORD_HASH`, `ADMIN_DATABASE_URL`, `ADMIN_ORIGIN` (an exact
 https origin — no path, no trailing slash — that is not `meshground.app`, a
-subdomain of it, or `meshgrounds.vercel.app`), `ADMIN_USER_ID` (a UUID),
-`ADMIN_SUPABASE_URL` (https only) and `ADMIN_SUPABASE_ANON_KEY` (non-empty).
+subdomain of it, or `meshgrounds.vercel.app`), `ADMIN_USER_ID` (a UUID, stored and compared lowercase),
+`ADMIN_SUPABASE_URL` (https only) and `ADMIN_SUPABASE_ANON_KEY` (non-empty,
+rejected if it contains whitespace).
 Astro loads `.env` automatically for `dev` and `build`.
 
 ## Hashing a password

@@ -1,8 +1,9 @@
 // Boot validation, fails closed (LLD §2). Missing or invalid values are a
 // plain 503 on every request; the log names the key only
 // (`invalid_config:<KEY>`). MGA-2 checks the first five keys. MGA-2b adds
-// ADMIN_USER_ID, ADMIN_SUPABASE_URL (https only) and ADMIN_SUPABASE_ANON_KEY.
-// PREVIEW_SIGNING_SECRET is a later ticket.
+// ADMIN_USER_ID (stored lowercase), ADMIN_SUPABASE_URL (https only) and
+// ADMIN_SUPABASE_ANON_KEY (non-empty, no whitespace — a space or newline is
+// rejected rather than trimmed). PREVIEW_SIGNING_SECRET is a later ticket.
 
 export type AdminConfig = {
   pathSecret: string;
@@ -51,7 +52,9 @@ export function loadConfig(env: Env): ConfigResult {
     return { ok: false, key: 'ADMIN_SUPABASE_URL' };
   }
   const supabaseAnonKey = env.ADMIN_SUPABASE_ANON_KEY;
-  if (!supabaseAnonKey) {
+  // Whitespace is rejected, not trimmed: a key with a space or newline is not
+  // the key, and sending it would fail every Auth call.
+  if (!supabaseAnonKey || /\s/.test(supabaseAnonKey)) {
     return { ok: false, key: 'ADMIN_SUPABASE_ANON_KEY' };
   }
   return {
@@ -62,7 +65,7 @@ export function loadConfig(env: Env): ConfigResult {
       passwordHash,
       databaseUrl,
       origin,
-      adminUserId,
+      adminUserId: adminUserId.toLowerCase(),
       supabaseUrl,
       supabaseAnonKey,
     },

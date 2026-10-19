@@ -12,6 +12,14 @@ import {
   testEnv,
 } from './helpers.ts';
 import { assertLoopbackUrl } from './helpers/loopback.ts';
+import {
+  MOCK_AUTH_URL,
+  cookieHeader,
+  futureExp,
+  jwtWithClaim,
+  scriptedFetch,
+  sessionCookieValue,
+} from './helpers/mock-auth.ts';
 import { assertStrictSetCookie } from './helpers/set-cookie.ts';
 
 const ENV = testEnv();
@@ -104,6 +112,76 @@ test('lock 3: Ben at aal1 is 404 on a protected page, with or without a factor',
     assert.equal(logs[0]?.error, undefined);
     assert.equal(response.headers.get('set-cookie'), null);
   }
+});
+
+test('lock 3: malformed factors from Auth are a 404', async () => {
+  const token = jwtWithClaim({ aal: 'aal2', exp: futureExp() });
+  const cookie = cookieHeader(sessionCookieValue(token, futureExp()));
+  const { response, logs } = await runRequest(
+    new Request(PAGE, { headers: { ...AUTH, cookie } }),
+    ENV,
+    {
+      auth: (request, config) =>
+        createRequestAuth({
+          url: MOCK_AUTH_URL,
+          anonKey: config.supabaseAnonKey,
+          adminUserId: config.adminUserId,
+          request,
+          fetch: async (input) => {
+            const raw = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+            const url = new URL(raw);
+            if (url.pathname.endsWith('/auth/v1/user')) {
+              return new Response(
+                JSON.stringify({
+                  id: config.adminUserId,
+                  aud: 'authenticated',
+                  factors: { not: 'an-array' },
+                }),
+                { status: 200, headers: { 'content-type': 'application/json' } },
+              );
+            }
+            return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+          },
+        }),
+    },
+  );
+  assert.equal(response.status, 404);
+  assert.equal(await response.text(), 'Not found');
+  assert.equal(logs[0]?.lock, 3);
+  assert.equal(logs[0]?.error, 'auth_error');
+});
+
+test('lock 3: another user is signed out on the Auth server', async () => {
+  const token = jwtWithClaim({ aal: 'aal2', exp: futureExp() });
+  const cookie = cookieHeader(sessionCookieValue(token, futureExp()));
+  const logouts: string[] = [];
+  const inner = scriptedFetch({
+    userId: '99999999-9999-4999-8999-999999999999',
+    acceptedBearer: token,
+    factors: [{ id: 'factor-1', factor_type: 'totp', status: 'verified' }],
+  });
+  const { response } = await runRequest(
+    new Request(PAGE, { headers: { ...AUTH, cookie } }),
+    ENV,
+    {
+      auth: (request, config) =>
+        createRequestAuth({
+          url: MOCK_AUTH_URL,
+          anonKey: config.supabaseAnonKey,
+          adminUserId: config.adminUserId,
+          request,
+          fetch: async (input, init) => {
+            const raw = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+            const url = new URL(raw);
+            if (url.pathname.endsWith('/logout')) logouts.push(init?.method ?? 'GET');
+            return inner(input, init);
+          },
+        }),
+    },
+  );
+  assert.equal(response.status, 404);
+  assert.equal(await response.text(), 'Not found');
+  assert.deepEqual(logouts, ['POST']);
 });
 
 test('lock 3: another user is 404 and the response carries sb-* deletions', async () => {

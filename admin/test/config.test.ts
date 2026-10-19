@@ -158,7 +158,9 @@ test('config: ADMIN_USER_ID must be a UUID', () => {
   for (const bad of [undefined, '', 'not-a-uuid', '00000000-0000-0000-0000-00000000000g', '00000000000040008000000000000001']) {
     assert.deepEqual(loadConfig(testEnv({ ADMIN_USER_ID: bad })), { ok: false, key: 'ADMIN_USER_ID' });
   }
-  assert.equal(loadConfig(testEnv({ ADMIN_USER_ID: 'AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE' })).ok, true);
+  const upper = loadConfig(testEnv({ ADMIN_USER_ID: 'AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE' }));
+  assert.equal(upper.ok, true);
+  if (upper.ok) assert.equal(upper.config.adminUserId, 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
 });
 
 test('config: ADMIN_SUPABASE_URL must be an https URL', () => {
@@ -172,8 +174,8 @@ test('config: ADMIN_SUPABASE_URL must be an https URL', () => {
   assert.equal(loadConfig(testEnv({ ADMIN_SUPABASE_URL: 'https://auth.example/project' })).ok, true);
 });
 
-test('config: ADMIN_SUPABASE_ANON_KEY must be non-empty', () => {
-  for (const bad of [undefined, '']) {
+test('config: ADMIN_SUPABASE_ANON_KEY must be non-empty and contain no whitespace', () => {
+  for (const bad of [undefined, '', ' ', 'anon key', 'anon\n', '\tanon', 'anon ']) {
     assert.deepEqual(loadConfig(testEnv({ ADMIN_SUPABASE_ANON_KEY: bad })), {
       ok: false,
       key: 'ADMIN_SUPABASE_ANON_KEY',
