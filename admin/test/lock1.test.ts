@@ -1,25 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { runRequest, testEnv, basicAuth, TEST_SECRET, TEST_PASSWORD } from './helpers.ts';
+import { assertSecurityHeaders, runRequest, testEnv, basicAuth, TEST_SECRET, TEST_PASSWORD } from './helpers.ts';
 
 const ENV = testEnv();
-
-const EXPECTED_HEADERS: Record<string, string> = {
-  'content-security-policy':
-    "default-src 'none'; style-src 'self'; img-src 'self' data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; script-src 'none'",
-  'x-robots-tag': 'noindex, nofollow',
-  'referrer-policy': 'no-referrer',
-  'x-content-type-options': 'nosniff',
-  'cache-control': 'no-store',
-  'cross-origin-opener-policy': 'same-origin',
-  'strict-transport-security': 'max-age=31536000',
-};
-
-export function assertSecurityHeaders(res: Response) {
-  for (const [name, value] of Object.entries(EXPECTED_HEADERS)) {
-    assert.equal(res.headers.get(name), value, `header ${name}`);
-  }
-}
 
 test('lock 1: every path outside the secret prefix returns the same plain 404', async () => {
   const paths = [

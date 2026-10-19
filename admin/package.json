@@ -10,7 +10,8 @@
     "dev": "astro dev --port 56905",
     "build": "astro build",
     "check": "astro check",
-    "test": "node --experimental-strip-types --disable-warning=ExperimentalWarning --import ./scripts/register-ts.mjs --test \"test/*.test.ts\"",
+    "test": "node --experimental-strip-types --disable-warning=ExperimentalWarning --import ./scripts/register-ts.mjs --test \"test/!(*.db).test.ts\"",
+    "test:db": "node --experimental-strip-types --disable-warning=ExperimentalWarning --import ./scripts/register-ts.mjs --test \"test/*.db.test.ts\"",
     "hash-password": "node scripts/hash-password.mjs"
   },
   "dependencies": {

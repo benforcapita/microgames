@@ -1,5 +1,7 @@
 import argon2 from '@node-rs/argon2';
-import { handleRequest } from '../src/middleware.ts';
+import assert from 'node:assert/strict';
+import { handleRequest, type Deps } from '../src/middleware.ts';
+import type { LockoutStore } from '../src/lib/auth-basic.ts';
 import { GET as robotsGet } from '../src/pages/robots.txt.ts';
 import { GET as indexGet, POST as indexPost } from '../src/pages/[p]/index.ts';
 import { GET as cssGet } from '../src/pages/[p]/admin.css.ts';
@@ -28,17 +30,50 @@ function routeNext(request: Request, locals: Record<string, unknown>) {
 
 export type RunResult = { response: Response; locals: Record<string, unknown>; logs: LogFields[] };
 
+// Unit tests that don't exercise the lockout inject this: never locked,
+// record/clear are no-ops, so no database is needed.
+export const unlockedStore: LockoutStore = {
+  async lockSecondsRemaining() {
+    return 0;
+  },
+  async recordFailure() {},
+  async clearFailures() {},
+};
+
 export async function runRequest(
   request: Request,
   env: Record<string, string | undefined>,
+  deps: Pick<Deps, 'store' | 'verify'> & { log?: (f: LogFields) => void } = {},
 ): Promise<RunResult> {
   const locals: Record<string, unknown> = {};
   const logs: LogFields[] = [];
   const response = await handleRequest(request, locals, routeNext(request, locals), {
     env,
-    log: (f) => logs.push(f),
+    store: deps.store ?? unlockedStore,
+    verify: deps.verify,
+    log: (f) => {
+      deps.log?.(f);
+      logs.push(f);
+    },
   });
   return { response, locals, logs };
+}
+
+const EXPECTED_SECURITY_HEADERS: Record<string, string> = {
+  'content-security-policy':
+    "default-src 'none'; style-src 'self'; img-src 'self' data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; script-src 'none'",
+  'x-robots-tag': 'noindex, nofollow',
+  'referrer-policy': 'no-referrer',
+  'x-content-type-options': 'nosniff',
+  'cache-control': 'no-store',
+  'cross-origin-opener-policy': 'same-origin',
+  'strict-transport-security': 'max-age=31536000',
+};
+
+export function assertSecurityHeaders(res: Response) {
+  for (const [name, value] of Object.entries(EXPECTED_SECURITY_HEADERS)) {
+    assert.equal(res.headers.get(name), value, `header ${name}`);
+  }
 }
 
 export const TEST_PASSWORD = 'test-password-9f2c';
