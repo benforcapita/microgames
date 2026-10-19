@@ -21,3 +21,20 @@ jobs:
       - run: npm run build
       # NM-1: strict site-copy guard (no money/payment terms in user-rendered files or the built output)
       - run: npm run check:copy -- --dist
+
+  admin:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: admin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: admin/package-lock.json
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+      - run: npm run build
