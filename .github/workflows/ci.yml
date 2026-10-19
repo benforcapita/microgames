@@ -38,3 +38,30 @@ jobs:
       - run: npm run check
       - run: npm test
       - run: npm run build
+
+  db-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: supabase/setup-cli@v1
+        with:
+          version: 2.120.0
+      - run: npm ci
+      # Discard stdout: supabase start prints local anon/service keys and JWTs; errors on stderr still show.
+      # Mail (mailpit) is required for smoke and must not be excluded.
+      - name: Start local Supabase
+        run: supabase start -x vector,logflare,edge-runtime,realtime,studio,imgproxy > /dev/null
+      # Mask local keys so they are redacted from runner logs if ever logged; env vars do not carry keys.
+      - name: Mask secrets
+        run: node --input-type=module -e "import { localSupabaseEnv } from './scripts/lib/local-supabase.mjs'; const env = localSupabaseEnv(); for (const k of ['PUBLIC_SUPABASE_PUBLISHABLE_KEY', 'SUPABASE_SECRET_KEY', 'DATABASE_URL']) console.log('::add-mask::' + env[k]);"
+      - name: Smoke
+        run: npm run smoke
+      # MG-7: add e2e steps (npx playwright test) here, after Smoke and before Stop.
+      - name: Stop local Supabase
+        if: always()
+        run: supabase stop
