@@ -144,7 +144,7 @@ export const isPublicStage = (stage: string): boolean => (PUBLIC_STAGES as reado
  * but are never listed: not on the home feed, lists, tags, search, featured, related/"more from", other
  * people's profile views or the public Proving Grounds. Only their owner sees them in their own lists.
  * There is no headless runner yet, so `headlessPassed` is absent everywhere and a game can only become
- * listable by graduating to 'live' (which itself requires real-play health checks). When the runner lands,
+ * listable when a human promotes it to 'live' (health checks only compute eligibility). When the runner lands,
  * set `headlessPassed` on the game and it gates live games too; an explicit `false` already unlists.
  */
 export const LISTABLE_STAGES = ['live'] as const satisfies readonly Stage[];
