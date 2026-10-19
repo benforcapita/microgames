@@ -115,14 +115,28 @@ describe('MGA-7a migration text', () => {
     assert.equal(files.filter((name) => name.startsWith('20261019170000')).length, 1, 'no version collision');
   });
 
-  it('revokes from PUBLIC only USAGE on schema net and ALL on the queue, never touches the extension or sets LOGIN', () => {
+  it('keeps the worker and dispatch grants, revokes every net privilege from public, anon, authenticated and meshgrounds_admin', () => {
     const code = migrationSql.replace(/--.*$/gm, '');
-    assert.match(code, /revoke all on table net\.http_request_queue from public, meshgrounds_admin;/);
-    assert.match(code, /revoke usage on schema net from public, meshgrounds_admin;/);
-    assert.equal((code.match(/from public/g) ?? []).length, 2, 'exactly two PUBLIC revokes');
+    // Keep set measured against the real worker: pg_net.username, with
+    // postgres as fallback — the worker is not supabase_admin.
+    assert.match(code, /current_setting\('pg_net\.username', true\)/);
     assert.match(code, /grant usage on schema net to postgres, service_role;/);
     assert.match(code, /grant select on table net\.http_request_queue to postgres, service_role;/);
+    assert.match(code, /format\('grant select, delete on table net\.http_request_queue to %I', worker_role\)/);
+    assert.match(code, /format\('grant select, insert, delete on table net\._http_response to %I', worker_role\)/);
+    assert.match(code, /format\('grant execute on function %s to postgres, service_role', fn\)/);
+    // Uniform lockdown: the same end state as supabase/ops/pg_net_lockdown.sql.
+    assert.match(code, /revoke usage on schema net from public, anon, authenticated;/);
+    assert.match(code, /revoke all on all tables in schema net from public, anon, authenticated;/);
+    assert.match(code, /revoke all on all sequences in schema net from public, anon, authenticated;/);
+    assert.match(code, /format\('revoke execute on function %s from public, anon, authenticated', fn\)/);
+    assert.match(code, /revoke all on all tables in schema net from meshgrounds_admin;/);
+    assert.match(code, /revoke all on all sequences in schema net from meshgrounds_admin;/);
+    assert.match(code, /revoke all on all functions in schema net from meshgrounds_admin;/);
+    assert.match(code, /revoke usage on schema net from meshgrounds_admin;/);
+    // Fail closed, and the warning names the real path, not only PUBLIC.
     assert.match(code, /alter role meshgrounds_admin nologin;/);
+    assert.match(code, /through PUBLIC or a direct grant/);
     assert.doesNotMatch(code, /\bextension\b/i);
     assert.doesNotMatch(code, /\blogin\s+password\b|\bpassword\s+'/i);
     assert.doesNotMatch(code, /\bset\s+role\b/i);
@@ -200,7 +214,7 @@ describe('meshgrounds_admin has no pg_net access', { concurrency: false }, () =>
           )
           select object, privilege from checks where held order by 1, 2
         `;
-        assert.deepEqual(reachable, [], 'meshgrounds_admin still holds net privileges');
+        assert.equal(reachable.length, 0, `meshgrounds_admin still holds: ${JSON.stringify([...reachable])}`);
         const [pub] = await tx<{ usage: boolean; select: boolean; insert: boolean }[]>`
           select
             has_schema_privilege('public', 'net', 'USAGE') as usage,
@@ -337,8 +351,9 @@ function roleName(name: string): string {
 // Replays the snapshot exactly: wipe every current grant on each net object
 // (except the object's owner, whose entries our files never touch), then
 // re-grant every entry the snapshot recorded. Ran as supabase_admin so the
-// grantor column matches too.
-async function restoreNet(admin: postgres.Sql, snap: NetSnapshot): Promise<void> {
+// grantor column matches too. One transaction, so concurrent suites never
+// observe the half-restored state.
+async function restoreNet(tx: Sql, snap: NetSnapshot): Promise<void> {
   const owners = new Map(snap.objects.map((o) => [`${o.kind} ${o.object}`, o.owner]));
   const touched = new Map<string, NetObject>();
   for (const o of snap.objects) touched.set(`${o.kind} ${o.object}`, o);
@@ -347,7 +362,7 @@ async function restoreNet(admin: postgres.Sql, snap: NetSnapshot): Promise<void>
   }
   const grantees = new Set(['anon', 'authenticated', 'postgres', 'public', 'service_role', 'supabase_functions_admin', 'meshgrounds_admin']);
   for (const row of snap.acls) grantees.add(row.grantee);
-  for (const row of await netAcls(admin)) {
+  for (const row of await netAcls(tx)) {
     grantees.add(row.grantee);
     if (!touched.has(`${row.kind} ${row.object}`)) touched.set(`${row.kind} ${row.object}`, { kind: row.kind, object: row.object, owner: '' });
   }
@@ -355,13 +370,13 @@ async function restoreNet(admin: postgres.Sql, snap: NetSnapshot): Promise<void>
     const owner = obj.owner || owners.get(`${obj.kind} ${obj.object}`);
     for (const grantee of grantees) {
       if (grantee === owner) continue;
-      await admin.unsafe(`revoke all on ${netObjectRef(obj)} from ${roleName(grantee)}`);
+      await tx.unsafe(`revoke all on ${netObjectRef(obj)} from ${roleName(grantee)}`);
     }
   }
   for (const row of snap.acls) {
-    await admin.unsafe(`grant ${row.privilege} on ${netObjectRef(row)} to ${roleName(row.grantee)}${row.grantable ? ' with grant option' : ''}`);
+    await tx.unsafe(`grant ${row.privilege} on ${netObjectRef(row)} to ${roleName(row.grantee)}${row.grantable ? ' with grant option' : ''}`);
   }
-  await admin.unsafe(`alter role meshgrounds_admin ${snap.canLogin ? 'login' : 'nologin'}`);
+  await tx.unsafe(`alter role meshgrounds_admin ${snap.canLogin ? 'login' : 'nologin'}`);
 }
 
 const drainUrl = 'http://127.0.0.1:9/mga7a-drain'; // closed local port: no external calls, worker still writes an error response
@@ -446,7 +461,7 @@ describe('pg_net worker drains a real validate-game dispatch after the lockdown'
             await admin`delete from net._http_response where id = ${requestId}`.catch(() => {});
             await admin`delete from net.http_request_queue where id = ${requestId}`.catch(() => {});
           }
-          await restoreNet(admin, before);
+          await admin.begin((tx) => restoreNet(tx, before));
           assert.deepEqual(await netSnapshot(admin), before, 'net grants and rolcanlogin not restored');
         }
       } finally {
