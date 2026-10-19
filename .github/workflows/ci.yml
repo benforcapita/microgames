@@ -21,3 +21,29 @@ jobs:
       - run: npm run build
       # NM-1: strict site-copy guard (no money/payment terms in user-rendered files or the built output)
       - run: npm run check:copy -- --dist
+
+  db-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: supabase/setup-cli@v1
+        with:
+          version: 2.120.0
+      - run: npm ci
+      # Discard stdout: supabase start prints local anon/service keys and JWTs; errors on stderr still show.
+      - name: Start local Supabase
+        run: supabase start -x vector,logflare,edge-runtime,realtime,studio,imgproxy,inbucket > /dev/null
+      # Mask local keys so they are redacted from runner logs if ever logged; env vars do not carry keys.
+      - name: Mask secrets
+        run: node --input-type=module -e "import { localSupabaseEnv } from './scripts/lib/local-supabase.mjs'; const env = localSupabaseEnv(); for (const k of ['PUBLIC_SUPABASE_PUBLISHABLE_KEY', 'SUPABASE_SECRET_KEY', 'DATABASE_URL']) console.log('::add-mask::' + env[k]);"
+      - name: Smoke
+        run: npm run smoke
+      # MG-7: add e2e steps (npx playwright test) here, after Smoke and before Stop.
+      - name: Stop local Supabase
+        if: always()
+        run: supabase stop
