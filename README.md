@@ -37,7 +37,7 @@ The platform architecture separates the main portal from a dedicated, cookieless
    ```bash
    npm run seed
    ```
-   Loads the sample games into the local database and Storage bucket with **no** plays or ratings, so every stat on the site is real. Add `-- --synthetic-plays` to also create fake sessions and ratings for testing graduation locally (never on a project real players see). To replace existing seed games (this also deletes their plays and ratings), pass `-- --force`:
+   Loads the sample games into the local database and Storage bucket with **no** plays or ratings, so every stat on the site is real. Add `-- --synthetic-plays` to also create fake sessions and ratings for testing eligibility locally — a human still promotes games to live (never on a project real players see). To replace existing seed games (this also deletes their plays and ratings), pass `-- --force`:
    ```bash
    npm run seed -- --force
    ```
@@ -158,7 +158,7 @@ These are set on the Supabase side, with `supabase secrets set` or the dashboard
 │   │   ├── format.ts     # Client and server formatting helpers
 │   │   └── server/       # Server-only logic:
 │   │       ├── auth.ts       # Authentication utilities and safe redirect guard
-│   │       ├── config.ts     # Server configuration and graduation thresholds
+│   │       ├── config.ts     # Server configuration and eligibility thresholds
 │   │       ├── db.ts         # PostgreSQL database connection pool via postgres.js
 │   │       ├── games.ts      # Game catalog queries, uploads, and health checks
 │   │       ├── profiles.ts   # User profile queries and handle validation
