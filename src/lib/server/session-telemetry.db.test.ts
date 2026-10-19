@@ -26,6 +26,7 @@ if (isLocal) {
   process.env.PUBLIC_SUPABASE_URL ??= 'http://127.0.0.1:54321';
   process.env.PUBLIC_SUPABASE_PUBLISHABLE_KEY ??= 'test';
   process.env.SUPABASE_SECRET_KEY ??= 'test';
+  process.env.MG_IP_HASH_SECRET ??= 'test';
 }
 
 let probeOk = false;

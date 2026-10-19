@@ -18,10 +18,14 @@ import {
   ratingGuard,
   ratingWritesByUser,
   secureCookie,
+  sessionIpSubject,
   sessionStartByIp,
   sessionStartByUid,
   telemetryByUid,
 } from './abuse.ts';
+
+const TEST_SECRET = 'mg8b-a-test';
+process.env.MG_IP_HASH_SECRET = TEST_SECRET;
 
 describe('session_start limiter', () => {
   it('allows repeated session_start from same uid+game within window once (simulate 50 hits -> 1 allowed)', () => {
@@ -215,6 +219,54 @@ describe('secureCookie', () => {
     assert.equal(secureCookie('http:', false, true), true);
     assert.equal(secureCookie('https:', false, false), true);
     assert.equal(secureCookie('http:', false, false), false);
+  });
+});
+
+describe('sessionIpSubject', () => {
+  const ip = '203.0.113.44';
+  const noon = new Date(Date.UTC(2026, 9, 19, 12));
+
+  it('is stable within a UTC day and rotates across UTC days', () => {
+    const day = sessionIpSubject(ip, 's1', noon);
+    assert.equal(sessionIpSubject(ip, 's1', new Date(Date.UTC(2026, 9, 19, 23, 59))), day);
+    assert.notEqual(sessionIpSubject(ip, 's1', new Date(Date.UTC(2026, 9, 20, 0, 30))), day);
+  });
+
+  it('differs per ip and per secret, is 64-hex, and never exposes the ip', () => {
+    const a = sessionIpSubject(ip, 's1', noon);
+    assert.match(a, /^[0-9a-f]{64}$/);
+    assert.notEqual(sessionIpSubject('198.51.100.9', 's1', noon), a);
+    assert.notEqual(sessionIpSubject(ip, 's2', noon), a);
+    assert.equal(a.includes(ip), false);
+  });
+});
+
+describe('admitSessionStart ip keys', () => {
+  it('spends the ip budget under the hashed subject, never the raw ip', () => {
+    const byIp = createLimiter({ windowMs: 60_000, max: 1 });
+    const byUid = createLimiter({ windowMs: 60_000, max: 1 });
+    const devA = '00000000-0000-4000-8000-0000000000aa';
+    const devB = '00000000-0000-4000-8000-0000000000bb';
+    assert.equal(admitSessionStart(devA, '203.0.113.7', 'g', byUid, byIp), true);
+    assert.equal(byIp.check('203.0.113.7:g'), true, 'raw ip must not be a limiter key');
+    assert.equal(
+      admitSessionStart(devB, '203.0.113.7', 'g', byUid, byIp),
+      false,
+      'the same ip still dedupes through the hashed subject',
+    );
+  });
+
+  it('fails closed when MG_IP_HASH_SECRET is unset', () => {
+    const prev = process.env.MG_IP_HASH_SECRET;
+    delete process.env.MG_IP_HASH_SECRET;
+    try {
+      assert.throws(
+        () => admitSessionStart('00000000-0000-4000-8000-0000000000aa', '203.0.113.7', 'g'),
+        /MG_IP_HASH_SECRET/,
+      );
+    } finally {
+      process.env.MG_IP_HASH_SECRET = prev ?? TEST_SECRET;
+    }
   });
 });
 
