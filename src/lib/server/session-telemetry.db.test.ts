@@ -87,8 +87,19 @@ const row = async (id: string) =>
  * (same minimal-context convention as google-route.test.ts). `claimsSub` simulates a
  * signed-in player: Supabase Auth is the production boundary, so only getClaims is stubbed.
  */
+const b64 = (s: string) => Buffer.from(s, 'utf8').toString('base64url');
+// A well-formed sb-*-auth-token cookie in the `base64-` format @supabase/ssr writes —
+// the route only calls getClaims when the session cookie parses (MG-14).
+const SIGNED_IN_COOKIE = `sb-test-auth-token=base64-${b64(
+  JSON.stringify({
+    access_token: `${b64(JSON.stringify({ alg: 'HS256', typ: 'JWT' }))}.${b64(JSON.stringify({ sub: '00000000-0000-4000-8000-000000000000' }))}.${b64('sig')}`,
+    refresh_token: 'rt',
+    expires_at: 4_000_000_000,
+  }),
+)}`;
+
 function post(uid: string, ip: string, body: Record<string, unknown>, claimsSub?: string) {
-  const cookie = `${MG_UID_COOKIE}=${uid}` + (claimsSub ? '; sb-test-auth-token=x' : '');
+  const cookie = `${MG_UID_COOKIE}=${uid}` + (claimsSub ? `; ${SIGNED_IN_COOKIE}` : '');
   const request = new Request('http://127.0.0.1/api/telemetry', {
     method: 'POST',
     headers: { 'content-type': 'application/json', cookie },
