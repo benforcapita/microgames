@@ -138,7 +138,16 @@ export async function handleRequest(
   const emit = deps.log ?? ((fields: LogFields) => log(fields));
   const start = performance.now();
   const fields: LogFields = {};
-  const { response, setCsrfCookie } = await route(request, locals, next, env, fields);
+  let response: Response;
+  let setCsrfCookie: string | undefined;
+  try {
+    ({ response, setCsrfCookie } = await route(request, locals, next, env, fields));
+  } catch {
+    // Never let a route error surface as an Astro/framework error page.
+    fields.level = 'error';
+    fields.error = 'unhandled';
+    response = plain(500, 'Internal server error');
+  }
   if (setCsrfCookie) {
     response.headers.append('set-cookie', `${CSRF_COOKIE}=${setCsrfCookie}; ${CSRF_COOKIE_OPTS}`);
   }
