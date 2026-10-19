@@ -1,4 +1,5 @@
 import argon2 from '@node-rs/argon2';
+import assert from 'node:assert/strict';
 import { handleRequest } from '../src/middleware.ts';
 import { GET as robotsGet } from '../src/pages/robots.txt.ts';
 import { GET as indexGet, POST as indexPost } from '../src/pages/[p]/index.ts';
@@ -68,4 +69,21 @@ export function testEnv(overrides: Record<string, string | undefined> = {}): Rec
 
 export function basicAuth(user: string, password: string): string {
   return 'Basic ' + Buffer.from(`${user}:${password}`).toString('base64');
+}
+
+const EXPECTED_HEADERS: Record<string, string> = {
+  'content-security-policy':
+    "default-src 'none'; style-src 'self'; img-src 'self' data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; script-src 'none'",
+  'x-robots-tag': 'noindex, nofollow',
+  'referrer-policy': 'no-referrer',
+  'x-content-type-options': 'nosniff',
+  'cache-control': 'no-store',
+  'cross-origin-opener-policy': 'same-origin',
+  'strict-transport-security': 'max-age=31536000',
+};
+
+export function assertSecurityHeaders(res: Response) {
+  for (const [name, value] of Object.entries(EXPECTED_HEADERS)) {
+    assert.equal(res.headers.get(name), value, `header ${name}`);
+  }
 }
