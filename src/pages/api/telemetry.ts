@@ -9,7 +9,7 @@ import {
   telemetryByUid,
 } from '../../lib/server/abuse';
 import { getGame, recordTelemetry, type GameDb, type TelemetryType } from '../../lib/server/games';
-import { hasAuthSessionCookie, sessionUserId } from '../../lib/server/session-user';
+import { parseableAuthCookie, sessionUserId } from '../../lib/server/session-user';
 
 const TYPES = new Set<TelemetryType>(['session_start', 'first_frame', 'start', 'complete', 'crash', 'heartbeat', 'ready']);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -53,8 +53,8 @@ export const POST: APIRoute = async (context) => {
 
   let userId: string | null = null;
   // Identity is resolved only here. Heartbeats stay on the anonymous hot path.
-  // No auth cookie means anonymous: skip getClaims and store a null user id.
-  if (type === 'session_start' && hasAuthSessionCookie(request.headers.get('cookie'))) {
+  // An unparseable auth cookie means anonymous: skip getClaims and store a null user id.
+  if (type === 'session_start' && parseableAuthCookie(request.headers.get('cookie'))) {
     const { data } = await locals.supabase.auth.getClaims();
     userId = sessionUserId(data?.claims?.sub);
   }
