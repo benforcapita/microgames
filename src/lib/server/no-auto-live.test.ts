@@ -6,10 +6,14 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { describe, it } from 'node:test';
+import { LIVE_STAGE_WRITE_PATTERNS } from './live-stage-writes.ts';
 
 const ROOT = process.cwd();
-const SCAN_DIRS = ['src', 'supabase'];
+const SCAN_DIRS = ['src', 'supabase', 'admin'];
 const SCAN_EXTS = new Set(['.ts', '.mts', '.cts', '.tsx', '.astro', '.sql', '.js', '.mjs', '.cjs']);
+
+// Dependencies and generated output are never scanned.
+const SKIP_DIRS = new Set(['node_modules', 'dist', '.astro', '.vercel', '.output', 'coverage']);
 
 // Migrations are history: versions at or below the cutoff are already applied everywhere and
 // cannot change. A NEW migration (any version above the cutoff) that writes 'live' IS scanned.
@@ -18,52 +22,29 @@ const MIGRATION_CUTOFF = '20261018140000';
 // Tests seed live games directly to set up fixtures; they are not a runtime path.
 const TEST_FILE = /(?:\.(?:test|spec)\.|_test\.)[^/\\]*$/;
 
-// Runtime files allowed to write stage 'live'. The future admin action goes here, by exact
-// repo-relative path, each entry with a one-line reason.
+// Runtime files allowed to write stage 'live'. Stays EMPTY until MGA-5 lands the admin
+// promote action; then it goes here, by exact repo-relative path, with a one-line reason.
 const ALLOWLIST: { file: string; reason: string }[] = [];
 
-interface Pattern {
-  name: string;
-  re: RegExp;
-}
-
-// Each matcher targets a write shape only. Comparisons (`where stage = 'live'`,
-// `game.stage === 'live'`, `stage in ('proving','live')`), type unions and read options
-// (`listGames({ stage: 'live' })`) must not match — the self-test below pins that down.
-const PATTERNS: Pattern[] = [
-  {
-    name: "SQL update … set stage = 'live'",
-    // A set clause whose column list reaches stage = 'live' (first or later column). The
-    // column-list shape keeps `where stage = 'live'` and `set x = '…' where stage = 'live'`
-    // from matching.
-    re: /\bset\s+(?:[\w.]+\s*=\s*[^,;=]+,\s*)*stage\s*=\s*'live'/i,
-  },
-  {
-    name: "SQL update … set (… stage …) = (… 'live' …)",
-    // Row-value assignment: a parenthesised column list containing stage whose value list
-    // contains 'live'. Position-insensitive on purpose — 'live' in any slot of a row-value
-    // write that touches stage is suspect. `set (stage, reviewed_at) = ('proving', now())`
-    // does not match.
-    re: /\bset\s*\(\s*[\w.,\s]*\bstage\b[\w.,\s]*\)\s*=\s*\((?:[^();]|\([^()]*\))*'live'/i,
-  },
-  {
-    name: "insert into games … 'live'",
-    // Any literal 'live' inside an insert into the games table (column-list or select form).
-    re: /\binsert\s+into\s+(?:public\.)?games\b[^;]*'live'/i,
-  },
-  {
-    name: "supabase-js .update/.insert/.upsert({ … stage: 'live' })",
-    re: /\.(?:update|insert|upsert)\s*\(\s*\{[^{}]*\bstage\s*:\s*'live'/i,
-  },
-];
+const PATTERNS = LIVE_STAGE_WRITE_PATTERNS;
 
 function walk(dir: string): string[] {
   const abs = path.join(ROOT, dir);
   if (!fs.existsSync(abs)) return [];
-  return fs
-    .readdirSync(abs, { recursive: true, withFileTypes: true })
-    .filter((d) => d.isFile() && SCAN_EXTS.has(path.extname(d.name)))
-    .map((d) => path.relative(ROOT, path.join(d.parentPath, d.name)).split(path.sep).join('/'));
+  const out: string[] = [];
+  const stack = [abs];
+  while (stack.length) {
+    const cur = stack.pop()!;
+    for (const d of fs.readdirSync(cur, { withFileTypes: true })) {
+      const full = path.join(cur, d.name);
+      if (d.isDirectory()) {
+        if (!SKIP_DIRS.has(d.name)) stack.push(full);
+      } else if (d.isFile() && SCAN_EXTS.has(path.extname(d.name))) {
+        out.push(path.relative(ROOT, full).split(path.sep).join('/'));
+      }
+    }
+  }
+  return out;
 }
 
 function isScanned(rel: string): boolean {
@@ -160,6 +141,7 @@ describe('MG-11 no-auto-live guard', () => {
     for (const file of scanned) {
       const src = fs.readFileSync(path.join(ROOT, file), 'utf8');
       for (const p of PATTERNS) {
+        if (p.sqlOnly && !file.endsWith('.sql')) continue;
         if (p.re.test(src)) hits.push(`${file}: ${p.name}`);
       }
     }
