@@ -69,10 +69,15 @@ const nextIp = () => `10.30.${Math.floor(ipCounter / 250) + 1}.${(ipCounter++ % 
  * A real POST /api/telemetry call with the request surface the route reads
  * (same minimal-context convention as session-telemetry.db.test.ts). Only
  * getClaims is stubbed — Supabase Auth is the production boundary; `claims`
- * is what the stub would return, and getClaimsCalls records whether the
- * route invoked it at all.
+ * and `claimsError` are what the stub returns, and getClaimsCalls records
+ * whether the route invoked it at all.
  */
-async function post(body: Record<string, unknown>, authCookie: string | null, claims: { sub: string } | null) {
+async function post(
+  body: Record<string, unknown>,
+  authCookie: string | null,
+  claims: { sub?: string } | null,
+  claimsError: Error | null = null,
+) {
   const uid = randomUUID();
   const request = new Request('http://127.0.0.1/api/telemetry', {
     method: 'POST',
@@ -87,7 +92,9 @@ async function post(body: Record<string, unknown>, authCookie: string | null, cl
     auth: {
       getClaims: async () => {
         getClaimsCalls += 1;
-        return { data: claims ? { claims } : null, error: null };
+        return claimsError
+          ? { data: null, error: claimsError }
+          : { data: claims ? { claims } : null, error: null };
       },
     },
   };
@@ -197,6 +204,33 @@ describe('telemetry session_start auth-cookie gate (db)', () => {
       { sessionId, gameId: GAME, type: 'session_start', value: 0 },
       `sb-test-auth-token=${sessionCookie(jwt({ sub: userId }))}`,
       null,
+    );
+    assert.equal(r.status, 204);
+    assert.equal(r.getClaimsCalls, 1);
+    assert.equal((await sessionRow(sessionId))?.user_id, null);
+  });
+
+  it('getClaims error under a well-formed cookie: user_id stays null', async (t) => {
+    if (skip(t)) return;
+    const sessionId = nextSession();
+    const r = await post(
+      { sessionId, gameId: GAME, type: 'session_start', value: 0 },
+      `sb-mg14r-auth-token=${sessionCookie(jwt({ sub: userId }))}`,
+      null,
+      new Error('invalid JWT: unable to parse or verify signature'),
+    );
+    assert.equal(r.status, 204);
+    assert.equal(r.getClaimsCalls, 1);
+    assert.equal((await sessionRow(sessionId))?.user_id, null);
+  });
+
+  it('claims without a sub under a well-formed cookie: user_id stays null', async (t) => {
+    if (skip(t)) return;
+    const sessionId = nextSession();
+    const r = await post(
+      { sessionId, gameId: GAME, type: 'session_start', value: 0 },
+      `sb-mg14r-auth-token=${sessionCookie(jwt({ sub: userId }))}`,
+      {},
     );
     assert.equal(r.status, 204);
     assert.equal(r.getClaimsCalls, 1);
