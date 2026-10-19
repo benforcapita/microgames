@@ -52,18 +52,17 @@ export const POST: APIRoute = async (context) => {
   if (type === 'session_start' && !(await getGame(gameId))) return new Response('Unknown game', { status: 404 });
 
   let userId: string | null = null;
-  if (type === 'session_start') {
-    if (!admitSessionStart(uid, ip, gameId)) {
-      return new Response(null, { status: 204 });
-    }
-    // Identity is resolved only here. Heartbeats stay on the anonymous hot path.
-    // No auth cookie means anonymous: skip getClaims and store a null user id.
-    if (hasAuthSessionCookie(request.headers.get('cookie'))) {
-      const { data } = await locals.supabase.auth.getClaims();
-      userId = sessionUserId(data?.claims?.sub);
-    }
+  // Identity is resolved only here. Heartbeats stay on the anonymous hot path.
+  // No auth cookie means anonymous: skip getClaims and store a null user id.
+  if (type === 'session_start' && hasAuthSessionCookie(request.headers.get('cookie'))) {
+    const { data } = await locals.supabase.auth.getClaims();
+    userId = sessionUserId(data?.claims?.sub);
   }
 
-  await recordTelemetry(sessionId, gameId, type, body?.value, userId);
+  // Creating a session row — by session_start, or by a first_frame that reached the DB
+  // first — must pass the same admission: known game plus the session-start rate limits.
+  const admitNewSession = async () =>
+    Boolean(await getGame(gameId)) && admitSessionStart(uid, ip, gameId);
+  await recordTelemetry(sessionId, gameId, type, body?.value, userId, admitNewSession);
   return new Response(null, { status: 204 });
 };

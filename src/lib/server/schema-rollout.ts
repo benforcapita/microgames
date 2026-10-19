@@ -106,7 +106,9 @@ export function postgresSchemaClient(sql: import('postgres').Sql): SchemaInsertC
               await sql`
                 insert into sessions (id, game_id, user_id)
                 values (${id}, ${gameId}, (select id from auth.users where id = ${userId}))
-                on conflict do nothing`;
+                on conflict (id) do update
+                  set user_id = coalesce(sessions.user_id, excluded.user_id)
+                  where sessions.game_id = excluded.game_id`;
             } else {
               await sql`
                 insert into sessions (id, game_id)

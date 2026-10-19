@@ -285,23 +285,68 @@ export async function getUserRating(gameId: string, voter: string | undefined): 
 
 export type TelemetryType = 'session_start' | 'first_frame' | 'start' | 'complete' | 'crash' | 'heartbeat' | 'ready';
 
+/**
+ * Serializes the admit-then-write decision for one play across all telemetry events: the
+ * session row is only created while holding this lock after admission passed, so an event
+ * that sees the row knows it was already admitted (not a new play), and one that misses it
+ * knows no admitted write is in flight. Held on a reserved connection because a
+ * session-level advisory lock must be taken and released on the same backend.
+ */
+async function withSessionLock<T>(sessionId: string, fn: (conn: postgres.ReservedSql) => Promise<T>): Promise<T> {
+  const conn = await sql.reserve();
+  try {
+    await conn`select pg_advisory_lock(hashtext(${sessionId}))`;
+    return await fn(conn);
+  } finally {
+    await conn`select pg_advisory_unlock(hashtext(${sessionId}))`.catch(() => {});
+    conn.release();
+  }
+}
+
 export async function recordTelemetry(
   sessionId: string,
   gameId: string,
   type: TelemetryType,
   value: unknown = 0,
   userId: string | null = null,
+  /**
+   * May a session row be created for this play? The route supplies getGame +
+   * admitSessionStart. Unset callers keep the old semantics: session_start always writes,
+   * first_frame never creates a row.
+   */
+  admitNewSession?: () => Promise<boolean>,
 ) {
   const where = sql`where id = ${sessionId} and game_id = ${gameId}`;
   switch (type) {
     case 'session_start':
-      await insertSessionStart(postgresSchemaClient(sql), { sessionId, gameId, userId });
+      await withSessionLock(sessionId, async (conn) => {
+        const exists = await conn`select 1 from sessions where id = ${sessionId} and game_id = ${gameId}`;
+        if (!exists.length && !(admitNewSession ? await admitNewSession() : true)) return;
+        // On conflict this only fills a null user_id: game_id and first_frame_ms keep
+        // whatever an earlier first_frame already recorded (schema-rollout.ts).
+        await insertSessionStart(postgresSchemaClient(conn), { sessionId, gameId, userId });
+      });
       return;
     case 'first_frame': {
       const ms = clampFirstFrameMs(value);
-      if (ms !== null) {
-        await sql`update sessions set first_frame_ms = ${ms} ${where} and first_frame_ms is null`;
-      }
+      if (ms === null) return;
+      await withSessionLock(sessionId, async (conn) => {
+        const hit = await conn`
+          update sessions set first_frame_ms = coalesce(first_frame_ms, ${ms})
+          where id = ${sessionId} and game_id = ${gameId}
+          returning id`;
+        // Under the lock a miss means the row really is absent: no admitted write for this
+        // session can be in flight. Only an admitted first_frame may create it, and on
+        // conflict the game guard keeps a foreign session's row untouched.
+        if (!hit.length && admitNewSession && (await admitNewSession())) {
+          await conn`
+            insert into sessions (id, game_id, first_frame_ms)
+            values (${sessionId}, ${gameId}, ${ms})
+            on conflict (id) do update
+              set first_frame_ms = coalesce(sessions.first_frame_ms, excluded.first_frame_ms)
+              where sessions.game_id = excluded.game_id`;
+        }
+      });
       return;
     }
     case 'ready':
