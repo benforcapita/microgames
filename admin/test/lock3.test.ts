@@ -171,7 +171,9 @@ test('lock 3: another user is signed out on the Auth server', async () => {
           fetch: async (input, init) => {
             const raw = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
             const url = new URL(raw);
-            if (url.pathname.endsWith('/logout')) logouts.push(init?.method ?? 'GET');
+            if (url.pathname.endsWith('/logout')) {
+              logouts.push(`${init?.method ?? 'GET'} ${url.pathname}${url.search}`);
+            }
             return inner(input, init);
           },
         }),
@@ -179,7 +181,7 @@ test('lock 3: another user is signed out on the Auth server', async () => {
   );
   assert.equal(response.status, 404);
   assert.equal(await response.text(), 'Not found');
-  assert.deepEqual(logouts, ['POST']);
+  assert.deepEqual(logouts, ['POST /auth/v1/logout?scope=global']);
 });
 
 test('lock 3: another user is 404 and the response carries sb-* deletions', async () => {

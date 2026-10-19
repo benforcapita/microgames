@@ -106,15 +106,19 @@ test('auth: Ben at aal2 without a verified TOTP factor is not ok', async () => {
 });
 
 test('auth: Ben matches an uppercase ADMIN_USER_ID', async () => {
-  const { token, cookie } = live('aal2');
+  const benId = 'abcdef01-2345-4abc-8def-0123456789ab';
+  const configured = benId.toUpperCase();
+  assert.notEqual(configured, benId);
+  const token = jwtWithClaim({ aal: 'aal2', exp: futureExp() });
+  const cookie = cookieHeader(sessionCookieValue(token, futureExp()));
   const headers = new Headers();
   headers.set('cookie', cookie);
   const auth = createRequestAuth({
     url: MOCK_AUTH_URL,
     anonKey: TEST_ANON_KEY,
-    adminUserId: TEST_ADMIN_ID.toUpperCase(),
+    adminUserId: configured,
     request: new Request('http://localhost/admin', { headers }),
-    fetch: scriptedFetch({ userId: TEST_ADMIN_ID, acceptedBearer: token, factors: [TOTP] }),
+    fetch: scriptedFetch({ userId: benId, acceptedBearer: token, factors: [TOTP] }),
   });
   assert.deepEqual(await auth.classify(), { kind: 'ok' });
 });
