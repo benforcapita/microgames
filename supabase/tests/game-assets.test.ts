@@ -129,7 +129,8 @@ describe('game_assets schema', () => {
 
       const [rls] = await sql<{ relrowsecurity: boolean; policies: number }[]>`
         select c.relrowsecurity,
-               (select count(*)::int from pg_policy p where p.polrelid = c.oid) as policies
+               -- MGA-1 admin_read (meshgrounds_admin) is the only sanctioned policy.
+               (select count(*)::int from pg_policy p where p.polrelid = c.oid and p.polname <> 'admin_read') as policies
         from pg_class c
         join pg_namespace n on n.oid = c.relnamespace
         where n.nspname = 'public' and c.relname = 'game_assets'
