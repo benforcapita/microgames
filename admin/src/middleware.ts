@@ -50,7 +50,7 @@ function parseCookies(header: string | null): Record<string, string> {
 }
 
 async function csrfOk(request: Request, config: AdminConfig): Promise<boolean> {
-  if (!config.origin || request.headers.get('origin') !== config.origin) return false;
+  if (request.headers.get('origin') !== config.origin) return false;
   const cookie = parseCookies(request.headers.get('cookie'))[CSRF_COOKIE];
   if (!cookie) return false;
   let field: unknown;
