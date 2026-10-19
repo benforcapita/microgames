@@ -1,0 +1,28 @@
+{
+  "name": "meshgrounds-admin",
+  "type": "module",
+  "version": "0.0.0",
+  "private": true,
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "dev": "astro dev --port 56905",
+    "build": "astro build",
+    "check": "astro check",
+    "test": "node --experimental-strip-types --disable-warning=ExperimentalWarning --import ./scripts/register-ts.mjs --test \"test/*.test.ts\"",
+    "hash-password": "node scripts/hash-password.mjs"
+  },
+  "dependencies": {
+    "@astrojs/vercel": "11.0.14",
+    "@node-rs/argon2": "2.2.2",
+    "astro": "7.3.5",
+    "bcryptjs": "3.0.3",
+    "postgres": "3.4.9"
+  },
+  "devDependencies": {
+    "@astrojs/check": "0.9.10",
+    "@types/node": "24.19.1",
+    "typescript": "6.0.3"
+  }
+}
