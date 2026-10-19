@@ -168,7 +168,8 @@ export function createRequestAuth(options: CreateRequestAuthOptions): RequestAut
         }
         const user = data.user;
         if (!user?.id) return { kind: 'none' };
-        if (user.id !== options.adminUserId) return { kind: 'other-user' };
+        // Auth returns lowercase ids. An uppercase ADMIN_USER_ID still matches.
+        if (user.id.toLowerCase() !== options.adminUserId.toLowerCase()) return { kind: 'other-user' };
         const token = validatedToken;
         if (!token) return { kind: 'error' };
         const { data: assurance, error: assuranceError } =
