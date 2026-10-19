@@ -56,11 +56,13 @@ jobs:
       # Mail (mailpit) is required for smoke and must not be excluded.
       - name: Start local Supabase
         run: supabase start -x vector,logflare,edge-runtime,realtime,studio,imgproxy > /dev/null
-      # Mask local keys so they are redacted from runner logs if ever logged; env vars do not carry keys.
-      - name: Mask secrets
-        run: node --input-type=module -e "import { localSupabaseEnv } from './scripts/lib/local-supabase.mjs'; const env = localSupabaseEnv(); for (const k of ['PUBLIC_SUPABASE_PUBLISHABLE_KEY', 'SUPABASE_SECRET_KEY', 'DATABASE_URL']) console.log('::add-mask::' + env[k]);"
+      # Masks are registered before export; values come only from supabase status via the loopback guard, never from repo secrets.
+      - name: Export local Supabase env (masked)
+        run: node --input-type=module -e "import fs from 'node:fs'; import { localSupabaseEnv } from './scripts/lib/local-supabase.mjs'; const env = localSupabaseEnv(); for (const k of ['PUBLIC_SUPABASE_URL', 'PUBLIC_SUPABASE_PUBLISHABLE_KEY', 'SUPABASE_SECRET_KEY', 'DATABASE_URL', 'MAILPIT_URL']) { const v = env[k]; if (!v) continue; if (['PUBLIC_SUPABASE_PUBLISHABLE_KEY', 'SUPABASE_SECRET_KEY', 'DATABASE_URL'].includes(k)) console.log('::add-mask::' + v); fs.appendFileSync(process.env.GITHUB_ENV, k + '=' + v + '\n'); }"
       - name: Smoke
         run: npm run smoke
+      - name: DB tests
+        run: npm test
       # MG-7: add e2e steps (npx playwright test) here, after Smoke and before Stop.
       - name: Stop local Supabase
         if: always()
