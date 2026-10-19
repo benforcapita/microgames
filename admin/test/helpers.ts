@@ -43,7 +43,10 @@ export async function runRequest(
 
 export const TEST_PASSWORD = 'test-password-9f2c';
 export const TEST_SECRET = 'test_path-secret_0123456789abcdef0123456789';
-export const TEST_ORIGIN = 'http://localhost:56905';
+// ADMIN_ORIGIN is boot-checked: https only, exact origin, never the public
+// site (see config.test.ts). The request URL stays http://localhost — the
+// Origin check is an exact string match against the header.
+export const TEST_ORIGIN = 'https://mga-admin-test.example';
 
 // Generated at runtime; never committed or printed.
 export const TEST_HASH = await argon2.hash(TEST_PASSWORD, {

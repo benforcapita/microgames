@@ -70,7 +70,7 @@ test('csrf: POST from another Origin → 403', async () => {
   }
 });
 
-test('csrf: POST with no Origin → 403; ADMIN_ORIGIN unset → 403', async () => {
+test('csrf: POST with no Origin → 403', async () => {
   const cookie = mintCookieValue();
   const field = csrfField(TEST_SECRET, cookie);
   const noOrigin = await runRequest(
@@ -78,12 +78,17 @@ test('csrf: POST with no Origin → 403; ADMIN_ORIGIN unset → 403', async () =
     ENV,
   );
   assert.equal(noOrigin.response.status, 403);
+});
+
+test('csrf: ADMIN_ORIGIN unset → 503, not a CSRF 403 (boot validation)', async () => {
+  const cookie = mintCookieValue();
+  const field = csrfField(TEST_SECRET, cookie);
   const envNoOrigin = testEnv({ ADMIN_ORIGIN: undefined });
   const { response } = await runRequest(
     authedPost({ origin: TEST_ORIGIN, cookie: `${CSRF_COOKIE}=${cookie}` }, `csrf=${field}`),
     envNoOrigin,
   );
-  assert.equal(response.status, 403);
+  assert.equal(response.status, 503);
 });
 
 test('csrf: valid POST passes the middleware to the route', async () => {
