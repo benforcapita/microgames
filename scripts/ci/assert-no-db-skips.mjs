@@ -47,11 +47,14 @@ export function checkTap(content, allowlist = ALLOWLIST) {
   }
 
   for (const rawLine of content.split('\n')) {
-    const line = rawLine.trim();
-    if (!/# SKIP\b/.test(line)) continue;
-    const m = line.match(/^(?:(?:not )?ok(?:\s+\d+)?\s*-\s*)?(.*?)\s*# SKIP\b\s*(.*)$/);
-    const name = m && m[1] ? m[1].trim() : '(unnamed)';
-    const reason = m && m[2] ? m[2].trim() : '';
+    const line = rawLine.replace(/\r$/, '').trimStart();
+    if (!/^(not )?ok \d+ - /.test(line)) continue;
+
+    const m = line.match(/^(?:not )?ok \d+ - (.*?)(?<!\\)#\s*SKIP\b\s*(.*)$/i);
+    if (!m) continue;
+
+    const name = m[1].replace(/\\([#\\])/g, '$1').trim() || '(unnamed)';
+    const reason = m[2].trim();
 
     const entry = allowlist.find((e) => e.name === name);
     if (entry && (allowed.get(entry.name) ?? 0) < entry.max) {

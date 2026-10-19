@@ -85,12 +85,45 @@ describe('assert-no-db-skips guard', () => {
     assert.equal(res.stderr, '');
   });
 
-  it('unallowed skip: a DB test "rateGame keeps an eligible game proving # SKIP local supabase is not running" -> exit 1, stderr names it', () => {
+  it('unallowed skip: a DB test with skip directive stating local supabase is not running -> exit 1, stderr names it', () => {
     const tap = [
       'TAP version 13',
       'ok 1 - some test',
-      'rateGame keeps an eligible game proving # SKIP local supabase is not running',
+      'ok 2 - rateGame keeps an eligible game proving # SKIP local supabase is not running',
       '# tests 2',
+    ].join('\n');
+
+    const res = runFixture(tap);
+    assert.equal(res.status, 1);
+    assert.match(res.stderr, /rateGame keeps an eligible game proving/);
+    assert.match(res.stderr, /local supabase is not running/);
+  });
+
+  it('passing test with escaped skip in name and a subtest comment line with skip text -> exit 0', () => {
+    const tap = [
+      'TAP version 13',
+      '# Subtest: unallowed skip: a DB test "rateGame keeps an eligible game proving # SKIP local supabase is not running" -> exit 1, stderr names it',
+      'ok 1 - unallowed skip: a DB test "rateGame keeps an eligible game proving \\# SKIP local supabase is not running" -> exit 1, stderr names it',
+      '# tests 1',
+      '# pass 1',
+    ].join('\n');
+
+    const res = runFixture(tap);
+    assert.equal(res.status, 0);
+    assert.match(res.stdout, /^OK: 1 tests; allowed skips: /);
+    assert.equal(res.stderr, '');
+  });
+
+  it('nested subtest indented with 4 spaces containing unallowed skip -> exit 1 and stderr names the test', () => {
+    const tap = [
+      'TAP version 13',
+      '    # Subtest: nested db suite',
+      '    ok 1 - some db setup',
+      '    ok 2 - check table exists',
+      '    ok 3 - rateGame keeps an eligible game proving # SKIP local supabase is not running',
+      '    # tests 3',
+      'ok 1 - nested db suite',
+      '# tests 4',
     ].join('\n');
 
     const res = runFixture(tap);
