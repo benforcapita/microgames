@@ -24,8 +24,8 @@ export function uploadOutcome(enabled = true): string {
 
 export function homeCreatorSentence(enabled = true): string {
   return enabled
-    ? 'Upload one HTML file. After review it enters the Proving Grounds, and if it clears that it graduates to the main arcade.'
-    : 'Upload one HTML file and it goes live right away. Pass the Proving Grounds and your game graduates to the main arcade.';
+    ? 'Upload one HTML file. After review it enters the Proving Grounds; clear the bar there and the Meshground team promotes it to the main arcade.'
+    : 'Upload one HTML file and it goes live right away. Clear the Proving Grounds bar and the Meshground team promotes it to the main arcade.';
 }
 
 export function creatorsLiveStep(enabled = true): { title: string; body: string } {

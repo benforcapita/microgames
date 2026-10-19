@@ -128,7 +128,7 @@ You can also run the portal and CDN independently:
 | `MG_CDN_ORIGIN` | Optional | Public origin URL of the dedicated cookieless game CDN serving uploaded game bundles |
 | `MG_CDN_PORT` | Optional | Port number for the game CDN HTTP server |
 | `CDN_PREVIEW_SECRET` | Optional (portal + CDN) | Shared HMAC secret. The CDN serves `pending`/`rejected` bundles only with a portal-minted token (game id + ≤10 min expiry), and the portal mints one only for the owner's `/play`. If it's unset, those bundles are never served. Never commit it. |
-| `MG_MIN_PLAYS` | Optional | Minimum number of plays required before a game can graduate out of the Proving Grounds |
+| `MG_MIN_PLAYS` | Optional | Minimum number of plays for a game to show as eligible in its health checks (promotion to live is manual) |
 | `PUBLIC_ADSENSE_CLIENT` | Optional | Google AdSense H5 Games client identifier (uses a mock ad overlay if omitted) |
 
 ### Edge Function secrets (`validate-game`)
@@ -160,7 +160,7 @@ These are set on the Supabase side, with `supabase secrets set` or the dashboard
 │   │       ├── auth.ts       # Authentication utilities and safe redirect guard
 │   │       ├── config.ts     # Server configuration and graduation thresholds
 │   │       ├── db.ts         # PostgreSQL database connection pool via postgres.js
-│   │       ├── games.ts      # Game catalog queries, uploads, and graduation logic
+│   │       ├── games.ts      # Game catalog queries, uploads, and health checks
 │   │       ├── profiles.ts   # User profile queries and handle validation
 │   │       ├── saves.ts      # Cloud save persistence and validation
 │   │       └── supabase.ts   # Request-scoped Supabase client and service-role admin client
