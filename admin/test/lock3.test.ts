@@ -5,6 +5,7 @@ import type { Deps } from '../src/middleware.ts';
 import {
   assertSecurityHeaders,
   basicAuth,
+  deniedAuth,
   runRequest,
   TEST_PASSWORD,
   TEST_SECRET,
@@ -22,6 +23,7 @@ function session(classify: RequestAuth['classify'], signOut?: () => Promise<void
     classify,
     signOut: signOut ?? (async () => {}),
     setCookies: () => cookies,
+    ...deniedAuth,
   };
 }
 
@@ -152,17 +154,22 @@ test('lock 3: auth routes and the stylesheet skip the session check', async () =
   const css = await runRequest(new Request(`${PAGE}/admin.css`, { headers: AUTH }), ENV, { auth });
   assert.equal(css.response.status, 200);
   assert.equal(calls, 0);
-  for (const suffix of ['/auth/signin', '/auth/mfa', '/auth/mfa/enroll', '/auth/signout']) {
+  for (const suffix of ['/auth/signin', '/auth/signout']) {
     const { response, logs } = await runRequest(new Request(PAGE + suffix, { headers: AUTH }), ENV, { auth });
-    assert.equal(response.status, 404, suffix);
-    assert.equal(await response.text(), 'Not found', suffix);
+    assert.equal(response.status, 200, suffix);
     assert.equal(logs[0]?.lock, undefined, suffix);
   }
-  assert.equal(calls, 0);
+  for (const suffix of ['/auth/mfa', '/auth/mfa/enroll']) {
+    const { response, logs } = await runRequest(new Request(PAGE + suffix, { headers: AUTH }), ENV, { auth });
+    assert.equal(response.status, 303, suffix);
+    assert.equal(response.headers.get('location'), `/${TEST_SECRET}/auth/signin`, suffix);
+    assert.equal(logs[0]?.lock, undefined, suffix);
+  }
+  assert.equal(calls, 2);
   const nested = await runRequest(new Request(`${PAGE}/auth/signin/extra`, { headers: AUTH }), ENV, { auth });
   assert.equal(nested.response.status, 404);
   assert.equal(nested.logs[0]?.lock, 3);
-  assert.equal(calls, 1);
+  assert.equal(calls, 3);
   const trailed = await runRequest(new Request(`${PAGE}/auth/mfa/`, { headers: AUTH }), ENV, { auth });
   assert.equal(trailed.logs[0]?.lock, 3);
 });

@@ -23,6 +23,27 @@ button {
   font: inherit;
   padding: 0.5rem 1rem;
 }
+label, input {
+  display: block;
+}
+input {
+  margin: 0.25rem 0 1rem;
+  padding: 0.4rem;
+  font: inherit;
+  max-width: 24rem;
+}
+p.error {
+  color: #ffb4a8;
+}
+img.qr {
+  width: 12rem;
+  height: auto;
+  background: #fff;
+  padding: 0.5rem;
+}
+code {
+  font-family: ui-monospace, monospace;
+}
 `;
 
 export const GET: APIRoute = () =>
