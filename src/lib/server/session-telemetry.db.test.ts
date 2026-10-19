@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { after, before, describe, it, mock } from 'node:test';
 import postgres from 'postgres';
 import { MG_UID_COOKIE, admitSessionStart } from './abuse.ts';
+import type { TelemetryType } from './games.ts';
 import {
   insertSessionStart,
   postgresSchemaClient,
@@ -124,6 +125,56 @@ function skip(t: { skip: (message?: string) => void }) {
   return false;
 }
 
+/**
+ * The five events that may arrive before session_start. `applied` asserts the
+ * event left its value on its own session row; `untouched` asserts another
+ * game's row kept the column defaults — the markers the unpublished-game,
+ * cross-game and admission tests assert per event.
+ */
+const EVENTS: {
+  type: TelemetryType;
+  value: number;
+  applied: (r: SessionRow | undefined) => void;
+  untouched: (r: SessionRow | undefined) => void;
+}[] = [
+  {
+    type: 'first_frame',
+    value: 640,
+    applied: (r) => assert.equal(r?.first_frame_ms, 640),
+    untouched: (r) => assert.equal(r?.first_frame_ms, null),
+  },
+  {
+    type: 'start',
+    value: 0,
+    applied: (r) => assert.equal(r?.started, true),
+    untouched: (r) => assert.equal(r?.started, false),
+  },
+  {
+    type: 'complete',
+    value: 0,
+    applied: (r) => {
+      assert.equal(r?.completed, true);
+      assert.equal(r?.started, true);
+    },
+    untouched: (r) => {
+      assert.equal(r?.completed, false);
+      assert.equal(r?.started, false);
+    },
+  },
+  {
+    type: 'crash',
+    value: 0,
+    applied: (r) => assert.equal(r?.crashed, true),
+    untouched: (r) => assert.equal(r?.crashed, false),
+  },
+  {
+    type: 'heartbeat',
+    value: 9000,
+    applied: (r) => assert.equal(r?.duration_ms, 9000),
+    untouched: (r) => assert.equal(r?.duration_ms, 0),
+  },
+];
+
 describe('session telemetry ordering (db)', () => {
   before(async () => {
     if (!probeOk || !sql) return;
@@ -228,30 +279,6 @@ describe('session telemetry ordering (db)', () => {
     assert.equal(await row(sessionId), undefined);
   });
 
-  it('first_frame naming a different game cannot touch another game\u2019s session row', async (t) => {
-    if (skip(t)) return;
-    const sessionId = nextSession();
-    const uid = randomUUID();
-    const ip = nextIp();
-    await post(uid, ip, { sessionId, gameId: GAME, type: 'session_start', value: 0 });
-    assert.equal((await post(uid, ip, { sessionId, gameId: GAME2, type: 'first_frame', value: 321 })).status, 204);
-    const r = await row(sessionId);
-    assert.equal(r?.game_id, GAME);
-    assert.equal(r?.first_frame_ms, null);
-  });
-
-  it('first_frame-created rows stay bound by session-start admission (one per uid+game)', async (t) => {
-    if (skip(t)) return;
-    const uid = randomUUID();
-    const ip = nextIp();
-    const a = nextSession();
-    const b = nextSession();
-    assert.equal((await post(uid, ip, { sessionId: a, gameId: GAME, type: 'first_frame', value: 210 })).status, 204);
-    assert.equal((await post(uid, ip, { sessionId: b, gameId: GAME, type: 'first_frame', value: 220 })).status, 204);
-    assert.equal((await row(a))?.first_frame_ms, 210);
-    assert.equal(await row(b), undefined, 'second admitted attempt must not create a row');
-  });
-
   it('a session_start from another signed-in user cannot take over a start-created session row', async (t) => {
     if (skip(t)) return;
     const sessionId = nextSession();
@@ -293,23 +320,6 @@ describe('session telemetry ordering (db)', () => {
     assert.equal((await row(sessionId))?.user_id, null);
     assert.equal((await post(uid, nextIp(), { sessionId, gameId: GAME, type: 'session_start', value: 0 }, userId)).status, 204);
     assert.equal((await row(sessionId))?.user_id, userId);
-  });
-
-  it('first_frame on an unpublished game creates no session row even when admission allows', async (t) => {
-    if (skip(t)) return;
-    const rejected = nextGame();
-    await sql`insert into public.games (id, slug, creator, title, stage)
-              values (${rejected}, ${rejected}, 'mg10', 'MG10 Rejected', 'rejected')`;
-    // Reach the insert guard itself: admission always allows, so only the
-    // public-stage EXISTS in the first_frame insert can stop the row. The route
-    // would 404 earlier on getGame; the DB must not depend on that.
-    const admit = async () => true;
-    const denied = nextSession();
-    await recordTelemetry(denied, rejected, 'first_frame', 300, null, admit);
-    assert.equal(await row(denied), undefined, 'first_frame created a session row for an unpublished game');
-    const allowed = nextSession();
-    await recordTelemetry(allowed, GAME, 'first_frame', 300, null, admit);
-    assert.equal((await row(allowed))?.first_frame_ms, 300, 'same admitted call creates the row on a live game');
   });
 
   // ---- MG-13: the same race for crash, complete, start and heartbeat ----
@@ -416,49 +426,57 @@ describe('session telemetry ordering (db)', () => {
     assert.equal(await row(sessionId), undefined);
   });
 
-  it('crash and heartbeat on an unpublished game create no session row even when admission allows', async (t) => {
-    if (skip(t)) return;
-    const rejected = nextGame();
-    await sql`insert into public.games (id, slug, creator, title, stage)
-              values (${rejected}, ${rejected}, 'mg10', 'MG13 Rejected', 'rejected')`;
-    // Reach the insert guard itself: admission always allows, so only the
-    // public-stage EXISTS in the event insert can stop the row. The route
-    // would 404 earlier on getGame; the DB must not depend on that.
-    const admit = async () => true;
-    const deniedCrash = nextSession();
-    await recordTelemetry(deniedCrash, rejected, 'crash', 0, null, admit);
-    assert.equal(await row(deniedCrash), undefined, 'crash created a session row for an unpublished game');
-    const deniedBeat = nextSession();
-    await recordTelemetry(deniedBeat, rejected, 'heartbeat', 5000, null, admit);
-    assert.equal(await row(deniedBeat), undefined, 'heartbeat created a session row for an unpublished game');
-    const allowed = nextSession();
-    await recordTelemetry(allowed, GAME, 'crash', 0, null, admit);
-    assert.equal((await row(allowed))?.crashed, true, 'same admitted call creates the row on a live game');
-  });
+  for (const e of EVENTS) {
+    it(`${e.type} on an unpublished game creates no session row even when admission allows`, async (t) => {
+      if (skip(t)) return;
+      const rejected = nextGame();
+      await sql`insert into public.games (id, slug, creator, title, stage)
+                values (${rejected}, ${rejected}, 'mg10', 'MG13 Rejected', 'rejected')`;
+      // Reach the insert guard itself: admission always allows, so only the
+      // public-stage EXISTS in the event insert can stop the row. The route
+      // would 404 earlier on getGame; the DB must not depend on that.
+      const admit = async () => true;
+      const denied = nextSession();
+      await recordTelemetry(denied, rejected, e.type, e.value, null, admit);
+      assert.equal(await row(denied), undefined, `${e.type} created a session row for an unpublished game`);
+      const allowed = nextSession();
+      await recordTelemetry(allowed, GAME, e.type, e.value, null, admit);
+      const r = await row(allowed);
+      assert.ok(r, 'same admitted call creates the row on a live game');
+      e.applied(r);
+    });
+  }
 
-  it('crash naming a different game cannot touch another game’s session row', async (t) => {
-    if (skip(t)) return;
-    const sessionId = nextSession();
-    const uid = randomUUID();
-    const ip = nextIp();
-    await post(uid, ip, { sessionId, gameId: GAME, type: 'session_start', value: 0 });
-    assert.equal((await post(uid, ip, { sessionId, gameId: GAME2, type: 'crash', value: 0 })).status, 204);
-    const r = await row(sessionId);
-    assert.equal(r?.game_id, GAME);
-    assert.equal(r?.crashed, false);
-  });
+  for (const e of EVENTS) {
+    // The session row belongs to GAME; the event names GAME2. Both UPDATE paths
+    // miss on game_id, so only the INSERT's ON CONFLICT game guard protects the
+    // foreign row — the path these parametrized tests pin.
+    it(`${e.type} naming a different game cannot touch another game’s session row`, async (t) => {
+      if (skip(t)) return;
+      const sessionId = nextSession();
+      const uid = randomUUID();
+      const ip = nextIp();
+      await post(uid, ip, { sessionId, gameId: GAME, type: 'session_start', value: 0 });
+      assert.equal((await post(uid, ip, { sessionId, gameId: GAME2, type: e.type, value: e.value })).status, 204);
+      const r = await row(sessionId);
+      assert.equal(r?.game_id, GAME);
+      e.untouched(r);
+    });
+  }
 
-  it('crash-created rows stay bound by session-start admission (one per uid+game)', async (t) => {
-    if (skip(t)) return;
-    const uid = randomUUID();
-    const ip = nextIp();
-    const a = nextSession();
-    const b = nextSession();
-    assert.equal((await post(uid, ip, { sessionId: a, gameId: GAME, type: 'crash', value: 0 })).status, 204);
-    assert.equal((await post(uid, ip, { sessionId: b, gameId: GAME, type: 'crash', value: 0 })).status, 204);
-    assert.equal((await row(a))?.crashed, true);
-    assert.equal(await row(b), undefined, 'second admitted attempt must not create a row');
-  });
+  for (const e of EVENTS) {
+    it(`${e.type}-created rows stay bound by session-start admission (one per uid+game)`, async (t) => {
+      if (skip(t)) return;
+      const uid = randomUUID();
+      const ip = nextIp();
+      const a = nextSession();
+      const b = nextSession();
+      assert.equal((await post(uid, ip, { sessionId: a, gameId: GAME, type: e.type, value: e.value })).status, 204);
+      assert.equal((await post(uid, ip, { sessionId: b, gameId: GAME, type: e.type, value: e.value })).status, 204);
+      e.applied(await row(a));
+      assert.equal(await row(b), undefined, 'second admitted attempt must not create a row');
+    });
+  }
 
   it('a session_start from another signed-in user cannot take over a crash-created row once claimed', async (t) => {
     if (skip(t)) return;
