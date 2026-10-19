@@ -160,7 +160,7 @@ These are set on the Supabase side, with `supabase secrets set` or the dashboard
 │   │       ├── auth.ts       # Authentication utilities and safe redirect guard
 │   │       ├── config.ts     # Server configuration and graduation thresholds
 │   │       ├── db.ts         # PostgreSQL database connection pool via postgres.js
-│   │       ├── games.ts      # Game catalog queries, uploads, and graduation logic
+│   │       ├── games.ts      # Game catalog queries, uploads, and health checks
 │   │       ├── profiles.ts   # User profile queries and handle validation
 │   │       ├── saves.ts      # Cloud save persistence and validation
 │   │       └── supabase.ts   # Request-scoped Supabase client and service-role admin client
