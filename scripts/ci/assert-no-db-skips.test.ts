@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { ALLOWLIST } from './assert-no-db-skips.mjs';
+import { ALLOWLIST, checkPlaywrightJson } from './assert-no-db-skips.mjs';
 
 const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url));
 const GUARD_URL = pathToFileURL(path.join(REPO_ROOT, 'scripts/ci/assert-no-db-skips.mjs')).href;
@@ -14,6 +14,59 @@ interface CliResult {
   status: number | null;
   stdout: string;
   stderr: string;
+}
+
+interface PlaywrightResultFixture {
+  workerIndex?: number;
+  status: 'passed' | 'failed' | 'timedOut' | 'skipped' | 'interrupted';
+  duration?: number;
+  errors?: unknown[];
+}
+
+interface PlaywrightAnnotationFixture {
+  type: string;
+  description?: string;
+}
+
+interface PlaywrightTestFixture {
+  timeout?: number;
+  annotations?: PlaywrightAnnotationFixture[];
+  expectedStatus?: string;
+  projectId?: string;
+  projectName?: string;
+  results?: PlaywrightResultFixture[];
+  status: 'expected' | 'unexpected' | 'flaky' | 'skipped';
+}
+
+interface PlaywrightSpecFixture {
+  title: string;
+  ok?: boolean;
+  tests: PlaywrightTestFixture[];
+}
+
+interface PlaywrightSuiteFixture {
+  title: string;
+  file?: string;
+  suites?: PlaywrightSuiteFixture[];
+  specs?: PlaywrightSpecFixture[];
+}
+
+interface PlaywrightReportFixture {
+  config: {
+    rootDir: string;
+    configFile: string;
+    workers?: number;
+  };
+  suites: PlaywrightSuiteFixture[];
+  errors: unknown[];
+  stats: {
+    startTime: string;
+    duration: number;
+    expected: number;
+    skipped: number;
+    unexpected: number;
+    flaky: number;
+  };
 }
 
 let tempDir: string;
@@ -47,24 +100,107 @@ function runFixture(tapContent: string): CliResult {
   return runCli([fixturePath]);
 }
 
+function runJsonFixture(content: string | PlaywrightReportFixture): CliResult {
+  const fixturePath = path.join(tempDir, `fixture-${++fixtureIndex}.json`);
+  const raw = typeof content === 'string' ? content : JSON.stringify(content, null, 2);
+  fs.writeFileSync(fixturePath, raw, 'utf8');
+  return runCli([fixturePath]);
+}
+
+function createPlaywrightReport(suites: PlaywrightSuiteFixture[]): PlaywrightReportFixture {
+  return {
+    config: {
+      rootDir: REPO_ROOT,
+      configFile: 'playwright.config.ts',
+      workers: 1,
+    },
+    suites,
+    errors: [],
+    stats: {
+      startTime: '2026-10-20T10:00:00.000Z',
+      duration: 1200,
+      expected: 0,
+      skipped: 0,
+      unexpected: 0,
+      flaky: 0,
+    },
+  };
+}
+
+function createExpectedTest(): PlaywrightTestFixture {
+  return {
+    timeout: 30000,
+    annotations: [],
+    expectedStatus: 'passed',
+    projectId: 'chromium',
+    projectName: 'chromium',
+    results: [
+      {
+        workerIndex: 0,
+        status: 'passed',
+        duration: 100,
+        errors: [],
+      },
+    ],
+    status: 'expected',
+  };
+}
+
+function createSkippedTest(reason = 'skipped'): PlaywrightTestFixture {
+  return {
+    timeout: 30000,
+    annotations: [{ type: 'skip', description: reason }],
+    expectedStatus: 'skipped',
+    projectId: 'chromium',
+    projectName: 'chromium',
+    results: [
+      {
+        workerIndex: 0,
+        status: 'skipped',
+        duration: 0,
+        errors: [],
+      },
+    ],
+    status: 'skipped',
+  };
+}
+
+function createUnexpectedTest(): PlaywrightTestFixture {
+  return {
+    timeout: 30000,
+    annotations: [],
+    expectedStatus: 'passed',
+    projectId: 'chromium',
+    projectName: 'chromium',
+    results: [
+      {
+        workerIndex: 0,
+        status: 'failed',
+        duration: 50,
+        errors: [{ message: 'Assertion failed' }],
+      },
+    ],
+    status: 'unexpected',
+  };
+}
+
 describe('assert-no-db-skips guard', () => {
-  it('clean run: summary "# tests 5", the 3 allowlisted skips by exact name, rest ok -> exit 0', () => {
+  it('clean run: summary "# tests 4", the 2 allowlisted skips by exact name, rest ok -> exit 0', () => {
     const tap = [
       'TAP version 13',
       `ok 1 - ${ALLOWLIST[0].name} # SKIP CI=true: strict timing`,
       `ok 2 - ${ALLOWLIST[1].name} # SKIP CI=true: strict timing`,
-      `ok 3 - ${ALLOWLIST[2].name} # SKIP no Playwright Chromium available`,
-      'ok 4 - some regular test passing',
-      'ok 5 - another regular test passing',
-      '# tests 5',
+      'ok 3 - some regular test passing',
+      'ok 4 - another regular test passing',
+      '# tests 4',
       '# pass 2',
       '# fail 0',
-      '# skipped 3',
+      '# skipped 2',
     ].join('\n');
 
     const res = runFixture(tap);
     assert.equal(res.status, 0);
-    assert.match(res.stdout, /^OK: 5 tests; allowed skips: /);
+    assert.match(res.stdout, /^OK: 4 tests; allowed skips: /);
     assert.equal(res.stderr, '');
   });
 
@@ -271,7 +407,6 @@ console.log(JSON.stringify({ ok }));`;
       const expectedPairs: [string, number][] = [
         ['byte-budget input is fully analysed with median < 0.75 x AST_BUDGET.ms (450 ms)', 1],
         ['a 3x linear slowdown is caught (relative, machine-speed independent)', 1],
-        ['AS-5 game loads its own assets under the enforced CSP (Chromium)', 1],
       ];
       assert.deepStrictEqual(actualPairs, expectedPairs);
     });
@@ -330,13 +465,26 @@ console.log(JSON.stringify({ ok }));`;
       assert.match(res.stderr, /unallowed test with lowercase directive/);
     });
 
-    it('(c) AS-5 name "AS-5 game loads its own assets under the enforced CSP (Chromium)" skipped twice exits 1', () => {
+    it('(c) a still-allowlisted name skipped twice exits 1', () => {
+      const allowlistedName = ALLOWLIST[0].name;
+      const tap = [
+        'TAP version 13',
+        `ok 1 - ${allowlistedName} # SKIP reason one`,
+        `ok 2 - ${allowlistedName} # SKIP reason two`,
+        '# tests 2',
+      ].join('\n');
+
+      const res = runFixture(tap);
+      assert.equal(res.status, 1);
+      assert.match(res.stderr, new RegExp(allowlistedName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    });
+
+    it('AS-5 name "AS-5 game loads its own assets under the enforced CSP (Chromium)" skipped exits 1', () => {
       const as5Name = 'AS-5 game loads its own assets under the enforced CSP (Chromium)';
       const tap = [
         'TAP version 13',
-        `ok 1 - ${as5Name} # SKIP reason one`,
-        `ok 2 - ${as5Name} # SKIP reason two`,
-        '# tests 2',
+        `ok 1 - ${as5Name} # SKIP no Playwright Chromium available`,
+        '# tests 1',
       ].join('\n');
 
       const res = runFixture(tap);
@@ -395,6 +543,248 @@ console.log(JSON.stringify({ ok }));`;
       const res = runFixture(tap);
       assert.equal(res.status, 1);
       assert.match(res.stderr, /\bx\b/);
+    });
+  });
+
+  describe('Playwright JSON report guard', () => {
+    it('all expected -> exit 0 with the count printed', () => {
+      const report = createPlaywrightReport([
+        {
+          title: 'e2e/db-sessions.spec.mjs',
+          suites: [
+            {
+              title: 'session suite',
+              specs: [
+                {
+                  title: 'session creates and reads back',
+                  tests: [createExpectedTest()],
+                },
+                {
+                  title: 'session deletes on logout',
+                  tests: [createExpectedTest()],
+                },
+              ],
+            },
+          ],
+        },
+      ]);
+
+      const res = runJsonFixture(report);
+      assert.equal(res.status, 0);
+      assert.match(res.stdout, /^OK: 2 tests; allowed skips: /);
+      assert.equal(res.stderr, '');
+    });
+
+    it('one skipped spec -> exit 1 and stderr names its title', () => {
+      const specTitle = 'unallowed skipped spec in e2e';
+      const report = createPlaywrightReport([
+        {
+          title: 'e2e/db-sessions.spec.mjs',
+          suites: [
+            {
+              title: 'session suite',
+              specs: [
+                {
+                  title: specTitle,
+                  tests: [createSkippedTest('local db unavailable')],
+                },
+              ],
+            },
+          ],
+        },
+      ]);
+
+      const res = runJsonFixture(report);
+      assert.equal(res.status, 1);
+      assert.match(res.stderr, new RegExp(specTitle));
+    });
+
+    it('a skipped spec nested 2 suites deep -> exit 1', () => {
+      const deepSpecTitle = 'spec nested two suites deep';
+      const report = createPlaywrightReport([
+        {
+          title: 'top suite',
+          suites: [
+            {
+              title: 'middle suite',
+              suites: [
+                {
+                  title: 'innermost suite',
+                  specs: [
+                    {
+                      title: deepSpecTitle,
+                      tests: [createSkippedTest('deep skip reason')],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ]);
+
+      const res = runJsonFixture(report);
+      assert.equal(res.status, 1);
+      assert.match(res.stderr, new RegExp(deepSpecTitle));
+    });
+
+    it('an empty suites array / zero tests -> exit 1', () => {
+      const report = createPlaywrightReport([]);
+
+      const res = runJsonFixture(report);
+      assert.equal(res.status, 1);
+      assert.match(res.stderr, /No tests found in Playwright JSON report/);
+    });
+
+    it('an unexpected (failed) test -> exit 1', () => {
+      const failingSpecTitle = 'failing e2e test';
+      const report = createPlaywrightReport([
+        {
+          title: 'e2e/db-sessions.spec.mjs',
+          suites: [
+            {
+              title: 'session suite',
+              specs: [
+                {
+                  title: failingSpecTitle,
+                  tests: [createUnexpectedTest()],
+                },
+              ],
+            },
+          ],
+        },
+      ]);
+
+      const res = runJsonFixture(report);
+      assert.equal(res.status, 1);
+      assert.match(res.stderr, new RegExp(failingSpecTitle));
+      assert.match(res.stderr, /unexpected/);
+    });
+
+    it('a skipped spec whose title is an allowlisted name skipped once -> exit 0, and twice -> exit 1', () => {
+      const allowlistedName = ALLOWLIST[0].name;
+
+      const reportOnce = createPlaywrightReport([
+        {
+          title: 'e2e/timing.spec.mjs',
+          suites: [
+            {
+              title: 'timing suite',
+              specs: [
+                {
+                  title: allowlistedName,
+                  tests: [createSkippedTest('CI strict timing')],
+                },
+              ],
+            },
+          ],
+        },
+      ]);
+
+      const resOnce = runJsonFixture(reportOnce);
+      assert.equal(resOnce.status, 0);
+      assert.match(resOnce.stdout, /^OK: 1 tests; allowed skips: /);
+      assert.equal(resOnce.stderr, '');
+
+      const reportTwice = createPlaywrightReport([
+        {
+          title: 'e2e/timing.spec.mjs',
+          suites: [
+            {
+              title: 'timing suite',
+              specs: [
+                {
+                  title: allowlistedName,
+                  tests: [createSkippedTest('CI strict timing 1')],
+                },
+                {
+                  title: allowlistedName,
+                  tests: [createSkippedTest('CI strict timing 2')],
+                },
+              ],
+            },
+          ],
+        },
+      ]);
+
+      const resTwice = runJsonFixture(reportTwice);
+      assert.equal(resTwice.status, 1);
+      assert.match(resTwice.stderr, new RegExp(allowlistedName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    });
+
+    it('malformed JSON that starts with "{" -> exit 1 (do not fall back to treating it as passing TAP)', () => {
+      const malformed = '{\n  "suites": [ broken JSON';
+
+      const resJson = runJsonFixture(malformed);
+      assert.equal(resJson.status, 1);
+      assert.match(resJson.stderr, /Failed to parse Playwright JSON/);
+
+      // Even if saved in a .tap file, starting with "{" must be treated as JSON and exit 1
+      const resTap = runFixture(malformed);
+      assert.equal(resTap.status, 1);
+      assert.match(resTap.stderr, /Failed to parse Playwright JSON/);
+    });
+
+    it('test whose last result status is skipped is treated as skipped -> exit 1', () => {
+      const specTitle = 'test with last result status skipped';
+      const report = createPlaywrightReport([
+        {
+          title: 'e2e/db-sessions.spec.mjs',
+          suites: [
+            {
+              title: 'session suite',
+              specs: [
+                {
+                  title: specTitle,
+                  tests: [
+                    {
+                      timeout: 30000,
+                      annotations: [],
+                      expectedStatus: 'passed',
+                      status: 'expected',
+                      results: [
+                        {
+                          status: 'skipped',
+                        },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ]);
+
+      const res = runJsonFixture(report);
+      assert.equal(res.status, 1);
+      assert.match(res.stderr, new RegExp(specTitle));
+    });
+
+    it('checkPlaywrightJson pure function returns expected shape and allowed map', () => {
+      const allowlistedName = ALLOWLIST[0].name;
+      const report = createPlaywrightReport([
+        {
+          title: 'e2e/timing.spec.mjs',
+          suites: [
+            {
+              title: 'suite',
+              specs: [
+                {
+                  title: allowlistedName,
+                  tests: [createSkippedTest('reason')],
+                },
+              ],
+            },
+          ],
+        },
+      ]);
+
+      const result = checkPlaywrightJson(JSON.stringify(report));
+      assert.equal(result.ok, true);
+      assert.equal(result.totalTests, 1);
+      assert.equal(result.errors.length, 0);
+      assert.equal(result.allowed.get(allowlistedName), 1);
     });
   });
 });
