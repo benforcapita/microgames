@@ -11,9 +11,11 @@ const CDN = `http://127.0.0.1:${CDN_PORT}`;
 // Owner previews of pending games need a CDN preview secret shared by the portal and the CDN.
 // A throwaway one per run (set on process.env so workers inherit the same value); never written to disk.
 process.env.CDN_PREVIEW_SECRET ||= randomBytes(32).toString('hex');
+process.env.MG_IP_HASH_SECRET ||= randomBytes(32).toString('hex');
 const env = {
   ...localSupabaseEnv(),
   CDN_PREVIEW_SECRET: process.env.CDN_PREVIEW_SECRET,
+  MG_IP_HASH_SECRET: process.env.MG_IP_HASH_SECRET,
   SITE_URL: WEB,
   HOST: '127.0.0.1',
   PORT: String(WEB_PORT),
