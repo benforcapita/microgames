@@ -70,6 +70,22 @@ describe('session_admissions lockdown', () => {
     }
   });
 
+  it('anon, authenticated and PUBLIC hold no USAGE or SELECT on the identity sequence', async (t) => {
+    const sql = await connect(t);
+    if (!sql) return;
+    try {
+      const held = await sql<{ role: string; privilege: string }[]>`
+        select r.role, p.privilege
+        from unnest(${['anon', 'authenticated', 'public']}::text[]) as r(role)
+        cross join (values ('USAGE'), ('SELECT')) as p(privilege)
+        where has_sequence_privilege(r.role, 'public.session_admissions_id_seq', p.privilege)
+        order by 1, 2`;
+      assert.equal(held.length, 0, `privileges still held: ${JSON.stringify(held)}`);
+    } finally {
+      await sql.end({ timeout: 1 });
+    }
+  });
+
   it('as anon and authenticated, select and insert are refused with 42501', async (t) => {
     const sql = await connect(t);
     if (!sql) return;

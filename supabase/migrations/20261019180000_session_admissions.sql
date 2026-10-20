@@ -9,6 +9,7 @@ create index session_admissions_window_idx
   on public.session_admissions (kind, subject, game_id, created_at);
 create index session_admissions_created_idx on public.session_admissions (created_at);
 alter table public.session_admissions enable row level security;
-revoke all on public.session_admissions from anon, authenticated;
+revoke all on public.session_admissions from public, anon, authenticated;
+revoke all on sequence public.session_admissions_id_seq from public, anon, authenticated;
 comment on column public.session_admissions.subject is
   'Device uid, or daily-rotating HMAC-SHA256(ip). Never a raw IP address.';
