@@ -4,11 +4,15 @@ import hashlib
 import re
 import secrets
 from collections.abc import Sequence
-from typing import Literal, Protocol
+from typing import Literal, NamedTuple, Protocol
 
-_FILE_CAP = 4_194_304
-_TOTAL_CAP = 20_971_520
-_MAX_FILES = 64
+
+class _Caps(NamedTuple):
+    total_bytes: int
+    max_files: int
+
+
+_CAPS = _Caps(total_bytes=4 * 1024 * 1024, max_files=200)
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _PATH = re.compile(r"(^/|\.\.|\\)")
 
@@ -73,9 +77,11 @@ class DownloadFailure:
 def download_files(
     files: Sequence[FileRequest],
     transport: Transport,
+    *,
+    bundle_sha256: str | None = None,
 ) -> DownloadOk | DownloadFailure:
     snapshot = tuple(files)
-    if len(snapshot) > _MAX_FILES:
+    if len(snapshot) > _CAPS.max_files:
         return DownloadFailure(code="bundle_file_count")
     for item in snapshot:
         if not _path_ok(item.path):
@@ -84,19 +90,32 @@ def download_files(
         digest = item.content_sha256
         if digest is not None and _SHA256.fullmatch(digest) is None:
             return DownloadFailure(code="bundle_mismatch")
+    if bundle_sha256 is not None and _SHA256.fullmatch(bundle_sha256) is None:
+        return DownloadFailure(code="bundle_mismatch")
+    if bundle_sha256 is not None and not any(item.path == "index.html" for item in snapshot):
+        return DownloadFailure(code="bundle_mismatch")
     accepted: list[DownloadedFile] = []
     total = 0
     for item in snapshot:
-        limit = min(_FILE_CAP, _TOTAL_CAP - total)
+        limit = _CAPS.total_bytes - total
         body = _read_limited(transport.open(item.path), limit)
         if body is None:
             return DownloadFailure(code="bundle_too_large")
         digest = item.content_sha256
-        if digest is not None and not secrets.compare_digest(hashlib.sha256(body).hexdigest(), digest):
-            return DownloadFailure(code="bundle_mismatch")
+        check_bundle = bundle_sha256 is not None and item.path == "index.html"
+        if digest is not None or check_bundle:
+            actual = hashlib.sha256(body).hexdigest()
+            if digest is not None and not _same_hash(actual, digest):
+                return DownloadFailure(code="bundle_mismatch")
+            if check_bundle and bundle_sha256 is not None and not _same_hash(actual, bundle_sha256):
+                return DownloadFailure(code="bundle_mismatch")
         total += len(body)
         accepted.append(DownloadedFile(path=item.path, body=body))
     return DownloadOk(files=tuple(accepted))
+
+
+def _same_hash(actual: str, expected: str) -> bool:
+    return secrets.compare_digest(actual, expected)
 
 
 def _path_ok(path: str) -> bool:
