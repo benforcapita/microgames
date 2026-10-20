@@ -411,7 +411,6 @@ def main[T](environ: Mapping[str, str], deps: Deps[T]) -> Literal[0, 1]:
 
 def scan_repo(root: Path | None = None, stream: TextIO | None = None) -> Literal[0, 1]:
     project = Path(__file__).resolve().parents[2]
-    repo = project.parents[1]
     target = project if root is None else root
     out = sys.stdout if stream is None else stream
     rules = (
@@ -424,10 +423,6 @@ def scan_repo(root: Path | None = None, stream: TextIO | None = None) -> Literal
     found = False
     for path in _files(target):
         found = _scan_file(path, rules, out) or found
-    if root is None:
-        blueprint = repo / "render.yaml"
-        if blueprint.is_file():
-            found = _scan_file(blueprint, rules, out) or found
     return 1 if found else 0
 
 

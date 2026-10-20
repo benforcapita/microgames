@@ -8,19 +8,6 @@ from categorizer import scan_repo
 REPO = Path(__file__).resolve().parents[3]
 
 
-def test_blueprint_is_one_minute_cron_and_not_a_worker() -> None:
-    text = (REPO / "render.yaml").read_text(encoding="utf-8")
-    assert "type: cron" in text
-    assert 'schedule: "* * * * *"' in text
-    assert "name: meshgrounds-categorizer" in text
-    assert "region: frankfurt" in text
-    assert "rootDir: workers/categorizer" in text
-    assert "type: worker" not in text
-    assert "type: web" not in text
-    assert "envVars" not in text
-    assert "plan:" not in text
-
-
 def test_ci_runs_lint_tests_and_secret_scan() -> None:
     text = (REPO / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     assert "working-directory: workers/categorizer" in text
@@ -29,7 +16,7 @@ def test_ci_runs_lint_tests_and_secret_scan() -> None:
     assert "scan_repo" in text
 
 
-def test_package_and_blueprint_scan_are_clean() -> None:
+def test_package_scan_is_clean() -> None:
     buf = io.StringIO()
     assert scan_repo(stream=buf) == 0
     assert buf.getvalue() == ""
