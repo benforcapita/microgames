@@ -2,6 +2,7 @@
 import Layout from '../../layouts/Layout.astro';
 import AssetWarnings from '../../components/AssetWarnings.astro';
 import { summarizeAssets, type AssetInputItem } from '../../lib/asset-limits';
+import { isAdmin } from '../../lib/server/profiles';
 import { loadAssetSummaryInput, sqlSubmissionStore } from '../../lib/server/submissions-db';
 import {
   isSubmissionPreview,
@@ -19,7 +20,7 @@ if (!preview && !Astro.locals.user) {
 
 const result = preview
   ? { status: 200 as const, view: previewSubmissionView() }
-  : await readSubmission({ userId: Astro.locals.user!.id, gameId: id, store: sqlSubmissionStore });
+  : await readSubmission({ userId: Astro.locals.user!.id, gameId: id, store: sqlSubmissionStore, reviewer: isAdmin(Astro.locals.profile) });
 
 if (result.status === 401) return Astro.redirect(`/login?next=${encodeURIComponent(Astro.url.pathname)}`);
 if (result.status !== 200) return Astro.rewrite('/404');
@@ -81,7 +82,7 @@ const awaitingReview = view.game.stage === 'pending' && view.validation?.status 
     )}
     {view.phase === 'failed' && (
       <p class="row">
-        <a class="btn" href="/upload">Upload a fixed version</a>
+        <a class="btn" href="/me#upload">Upload a fixed version</a>
       </p>
     )}
 

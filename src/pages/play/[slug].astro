@@ -3,19 +3,22 @@ import Layout from '../../layouts/Layout.astro';
 import Rate from '../../components/Rate.astro';
 import GameCard from '../../components/GameCard.astro';
 import GameThumb from '../../components/GameThumb.astro';
+import ReviewActions from '../../components/ReviewActions.astro';
 import { ratingLabel } from '../../lib/rating';
 import { getGame, getHealth, getUserRating, listGames, ownerReviewMarks } from '../../lib/server/games';
 import { CDN_ORIGIN, GRADUATION } from '../../lib/server/config';
 import { isListable } from '../../lib/server/game-rules';
-import { ownerPreviewToken } from '../../lib/server/owner-preview';
+import { ownerPreviewToken, reviewerPreviewToken } from '../../lib/server/owner-preview';
+import { isAdmin } from '../../lib/server/profiles';
 import { ago, compact, count, formatCheck, kb } from '../../lib/format';
 import { desktopOnlyNotice, forkParentLinked, playSurface } from '../../lib/server/device';
 
-const { user } = Astro.locals;
+const { user, profile } = Astro.locals;
 const device = Astro.locals.device;
+const admin = isAdmin(profile);
 
-// Owners can open their own pending/rejected game; everyone else gets a 404 (canViewGame).
-const game = await getGame(Astro.params.slug ?? '', { viewerId: Astro.locals.user?.id });
+// Owners can open their own pending/rejected game, admins any game (to review it); everyone else gets a 404 (canViewGame).
+const game = await getGame(Astro.params.slug ?? '', { viewerId: Astro.locals.user?.id, includeUnpublished: admin });
 if (!game) return Astro.rewrite('/404');
 if (Astro.params.slug !== game.slug) return Astro.redirect(`/play/${game.slug}`, 301);
 
@@ -36,7 +39,7 @@ const isOwner = !!user && user.id === game.ownerId;
 const ownerMark = isOwner ? (await ownerReviewMarks([game.id])).get(game.id) : undefined;
 const awaitingReview = isOwner && game.stage === 'pending' && ownerMark?.latestStatus === 'passed';
 // SP-6: the CDN serves pending/rejected bundles only with a short-lived token, minted only for the owner here.
-const previewToken = ownerPreviewToken(game, user?.id);
+const previewToken = ownerPreviewToken(game, user?.id) ?? reviewerPreviewToken(game, admin);
 const ptQuery = previewToken ? `&pt=${encodeURIComponent(previewToken)}` : '';
 const remixable = game.license !== 'All rights reserved';
 const live = game.stage === 'live';
@@ -65,6 +68,18 @@ const uploaded = Astro.url.searchParams.has('uploaded');
     {
       isOwner && game.stage === 'rejected' && game.reviewNote && (
         <div class="notice panel" id="review-note">{game.reviewNote}</div>
+      )
+    }
+    {
+      admin && !isOwner && (
+        <div class="notice panel reviewer spread" id="reviewer">
+          <span>
+            <b>Reviewing as admin.</b> Stage: <span class:list={['badge', game.stage]}>{game.stage}</span>
+            {game.reviewNote && <span class="muted"> · note: {game.reviewNote}</span>}
+            {' '}<a href="/admin">Back to queue</a>
+          </span>
+          <ReviewActions game={game} next="/admin" />
+        </div>
       )
     }
     {
@@ -173,6 +188,8 @@ const uploaded = Astro.url.searchParams.has('uploaded');
 <style>
   .play { padding-top: 1.5rem; }
   .notice { margin-bottom: 1rem; border-color: #c4ff3d55; }
+  .reviewer { border-color: #ffb34055; gap: 1rem; }
+  .reviewer a { color: var(--accent); }
   .stage {
     position: relative;
     aspect-ratio: 16 / 9;

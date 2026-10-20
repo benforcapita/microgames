@@ -1,0 +1,153 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import AdminGameRow from '../../components/AdminGameRow.astro';
+import { adminOverview, dailyActivity, listAdminGames, recentErrors, reviewQueue } from '../../lib/server/admin';
+import { requireAdmin } from '../../lib/server/admin-page';
+import { readManualReview } from '../../lib/server/manual-review';
+import { ago, compact, pct, stars } from '../../lib/format';
+
+const gate = await requireAdmin(Astro);
+if (gate) return gate;
+
+const [overview, days, queue, top, errors, manualReview] = await Promise.all([
+  adminOverview(),
+  dailyActivity(14),
+  reviewQueue(),
+  listAdminGames({ sort: 'plays7d', limit: 8 }),
+  recentErrors(12),
+  readManualReview(),
+]);
+const peak = Math.max(1, ...days.map((d) => d.plays));
+const error = Astro.url.searchParams.get('error');
+const reviewed = Astro.url.searchParams.get('reviewed');
+const to = Astro.url.searchParams.get('to');
+const cards: { label: string; value: string; sub?: string }[] = [
+  { label: 'Awaiting review', value: compact(overview.awaitingReview), sub: manualReview ? 'manual review on' : 'manual review OFF (auto-publish)' },
+  { label: 'Plays · 24h', value: compact(overview.plays.last24h), sub: `${compact(overview.plays.last7d)} this week · ${compact(overview.plays.total)} all time` },
+  { label: 'Signed-in plays · 7d', value: pct(overview.plays.last7d ? overview.plays.signedIn7d / overview.plays.last7d : null), sub: `${compact(overview.plays.signedIn7d)} of ${compact(overview.plays.last7d)}` },
+  { label: 'Users', value: compact(overview.users), sub: `+${compact(overview.signups7d)} this week` },
+  { label: 'Live games', value: compact(overview.games.live), sub: `${overview.games.proving} proving · ${overview.games.pending} pending · ${overview.games.rejected} rejected` },
+  { label: 'Ratings', value: compact(overview.ratings), sub: `avg ★ ${stars(overview.avgRating)}` },
+  { label: 'Game launches · 7d', value: compact(overview.gameLaunches7d) },
+  { label: 'Portal errors · 7d', value: compact(overview.errors7d) },
+];
+---
+
+<Layout title="Admin" noindex>
+  <section class="section wrap">
+    <div class="spread">
+      <div>
+        <span class="eyebrow">Admin</span>
+        <h1>Overview</h1>
+      </div>
+      <nav class="row tabs mono">
+        <a href="/admin" aria-current="page">Overview</a>
+        <a href="/admin/games">All games</a>
+        <a href="/admin/games?stage=pending">Pending ({overview.games.pending})</a>
+      </nav>
+    </div>
+    {error && <p class="panel notice bad" role="alert">{error}</p>}
+    {reviewed && <p class="panel notice">Game <code>{reviewed}</code> is now <b>{to}</b>.</p>}
+
+    <div class="cards">
+      {cards.map((c) => (
+        <div class="panel card">
+          <span class="muted mono label">{c.label}</span>
+          <strong>{c.value}</strong>
+          {c.sub && <span class="muted sub">{c.sub}</span>}
+        </div>
+      ))}
+    </div>
+
+    <div class="panel chart">
+      <div class="spread head"><h2>Plays per day</h2><span class="muted mono">last 14 days · peak {compact(peak)}</span></div>
+      <ol class="bars" aria-label="Plays per day">
+        {days.map((d) => (
+          <li title={`${d.day}: ${d.plays} plays, ${d.signups} sign-ups`}>
+            <span class="bar" style={`height:${Math.max(2, Math.round((d.plays / peak) * 100))}%`}></span>
+            <span class="n mono">{d.plays}</span>
+            <span class="d mono muted">{d.day.slice(5)}</span>
+          </li>
+        ))}
+      </ol>
+    </div>
+  </section>
+
+  <section class="section wrap" id="queue">
+    <div class="spread head">
+      <h2>Review queue <span class="muted">({queue.length})</span></h2>
+      <span class="muted">Passed validation and waiting on a person. Play it, then approve or reject with a note.</span>
+    </div>
+    {
+      queue.length ? (
+        <ul class="list">{queue.map((g) => <AdminGameRow game={g} next="/admin#queue" />)}</ul>
+      ) : (
+        <p class="panel empty muted">Nothing waiting. Held games appear here as soon as validation passes.</p>
+      )
+    }
+  </section>
+
+  <section class="section wrap two">
+    <div>
+      <div class="spread head"><h2>Most played this week</h2><a href="/admin/games?sort=plays7d" class="muted">All →</a></div>
+      <table class="panel table mono">
+        <thead><tr><th>Game</th><th>Stage</th><th>7d</th><th>Total</th><th>★</th><th>Crash</th></tr></thead>
+        <tbody>
+          {top.map((g) => (
+            <tr>
+              <td><a href={`/play/${g.slug}`}>{g.title}</a> <span class="muted">@{g.creator}</span></td>
+              <td><span class:list={['badge', g.stage]}>{g.stage}</span></td>
+              <td>{g.plays7d}</td><td>{compact(g.plays)}</td><td>{stars(g.avgRating)}</td><td>{pct(g.crashRate)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+    <div>
+      <div class="spread head"><h2>Recent portal errors</h2></div>
+      {
+        errors.length ? (
+          <ul class="panel errors mono">
+            {errors.map((e) => (
+              <li><span class="muted">{ago(e.at)}</span> <span class="muted">{e.path}</span> {e.message}</li>
+            ))}
+          </ul>
+        ) : (
+          <p class="panel empty muted">No errors logged.</p>
+        )
+      }
+    </div>
+  </section>
+</Layout>
+
+<style>
+  .tabs a { text-decoration: none; color: var(--muted); font-size: 0.85rem; }
+  .tabs a[aria-current='page'], .tabs a:hover { color: var(--text); }
+  .notice { margin-top: 1rem; border-color: #c4ff3d55; }
+  .notice.bad { border-color: #ff5d5d66; color: #ffb3b3; }
+  .cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.75rem; margin-top: 1.5rem; }
+  .card { display: grid; gap: 0.2rem; padding: 1rem 1.1rem; }
+  .card .label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.1em; }
+  .card strong { font-size: 1.8rem; line-height: 1.1; }
+  .card .sub { font-size: 0.78rem; }
+  .chart { margin-top: 0.75rem; padding: 1.1rem 1.25rem 0.75rem; }
+  .head { margin-bottom: 1rem; }
+  .head h2 { margin: 0; }
+  .bars { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(14, 1fr); gap: 0.4rem; height: 160px; align-items: end; }
+  .bars li { display: grid; grid-template-rows: 1fr auto auto; height: 100%; align-items: end; justify-items: center; gap: 0.2rem; }
+  .bar { display: block; width: 100%; background: var(--accent); border-radius: 4px 4px 0 0; opacity: 0.85; }
+  .bars .n { font-size: 0.7rem; }
+  .bars .d { font-size: 0.62rem; }
+  .list { list-style: none; padding: 0; margin: 0; display: grid; gap: 0.75rem; }
+  .empty { padding: 2rem; text-align: center; }
+  .two { display: grid; grid-template-columns: 1.3fr 1fr; gap: 2rem; }
+  .table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+  .table th, .table td { text-align: left; padding: 0.5rem 0.75rem; border-top: 1px solid var(--line); }
+  .table th { color: var(--muted); font-weight: 600; border-top: 0; }
+  .table a { text-decoration: none; }
+  .errors { list-style: none; margin: 0; padding: 0.75rem 1rem; display: grid; gap: 0.4rem; font-size: 0.75rem; overflow-wrap: anywhere; }
+  @media (max-width: 900px) {
+    .cards { grid-template-columns: repeat(2, 1fr); }
+    .two { grid-template-columns: 1fr; }
+  }
+</style>

@@ -126,6 +126,26 @@ export async function validateThumb(file: File): Promise<{ error: string } | { t
   return { thumb: { bytes, ext, type: file.type } };
 }
 
+/** Presence, extension and size checks for the game file. */
+export function gameFileErrors(file: FormDataEntryValue | null): string[] {
+  if (!(file instanceof File) || file.size === 0) return ['Attach your game as a single .html file.'];
+  if (!/\.html?$/i.test(file.name)) return ['Game file must be .html.'];
+  if (file.size > UPLOAD.maxHtmlBytes) return [GAME_SIZE_LIMIT];
+  return [];
+}
+
+/** Reads a game file that passed `gameFileErrors`: it must be UTF-8 and look like HTML. */
+export async function readGameHtml(file: File): Promise<{ html: Uint8Array; error?: string }> {
+  const html = new Uint8Array(await file.arrayBuffer());
+  try {
+    const src = new TextDecoder('utf-8', { fatal: true }).decode(html);
+    if (!/<(script|canvas|html|body)\b/i.test(src)) return { html, error: 'That file does not look like an HTML game.' };
+  } catch {
+    return { html, error: 'Game file must be UTF-8 text.' };
+  }
+  return { html };
+}
+
 /** Checks an upload form. `findGame` resolves `forkOf`; nothing here touches storage or Postgres. */
 export async function validateGameUpload(
   form: FormData,
@@ -144,9 +164,7 @@ export async function validateGameUpload(
   if (form.get('agree') !== 'on') errors.push('You must confirm the content rules.');
   if (forkOf && !forked) errors.push('The game you are forking no longer exists.');
   if (forked && forked.license === 'All rights reserved') errors.push('That game is not licensed for remixing.');
-  if (!(file instanceof File) || file.size === 0) errors.push('Attach your game as a single .html file.');
-  else if (!/\.html?$/i.test(file.name)) errors.push('Game file must be .html.');
-  else if (file.size > UPLOAD.maxHtmlBytes) errors.push(GAME_SIZE_LIMIT);
+  errors.push(...gameFileErrors(file));
 
   let thumb: ValidatedGameUpload['thumb'] | undefined;
   if (!(thumbFile instanceof File) || thumbFile.size === 0) errors.push(THUMB_REQUIRED);
@@ -158,13 +176,9 @@ export async function validateGameUpload(
 
   let html: Uint8Array | undefined;
   if (!errors.length && file instanceof File) {
-    html = new Uint8Array(await file.arrayBuffer());
-    try {
-      const src = new TextDecoder('utf-8', { fatal: true }).decode(html);
-      if (!/<(script|canvas|html|body)\b/i.test(src)) errors.push('That file does not look like an HTML game.');
-    } catch {
-      errors.push('Game file must be UTF-8 text.');
-    }
+    const read = await readGameHtml(file);
+    html = read.html;
+    if (read.error) errors.push(read.error);
   }
 
   if (errors.length || !html || !thumb) return { errors, upload: null };

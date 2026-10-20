@@ -12,3 +12,12 @@ export function ownerPreviewToken(game: Pick<Game, 'id' | 'ownerId' | 'stage'>, 
   if (!userId || game.ownerId !== userId || isPublicStage(game.stage)) return null;
   return mintPreviewToken(CDN_PREVIEW_SECRET, game.id);
 }
+
+/**
+ * AD-1: a reviewer needs to play a held game before approving it. Same token, same lifetime;
+ * the caller must have checked isAdmin(). Public games get null like everyone else.
+ */
+export function reviewerPreviewToken(game: Pick<Game, 'id' | 'stage'>, admin: boolean): string | null {
+  if (!admin || isPublicStage(game.stage)) return null;
+  return mintPreviewToken(CDN_PREVIEW_SECRET, game.id);
+}

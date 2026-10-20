@@ -7,8 +7,9 @@ import { isSubmissionPreviewPath } from './lib/server/submissions';
 
 const AD_FRAMES = ADSENSE_CLIENT ? ' https://*.googlesyndication.com https://*.doubleclick.net https://*.google.com' : '';
 const CSP = `frame-src ${CDN_ORIGIN}${AD_FRAMES}; frame-ancestors 'self'; object-src 'none'; base-uri 'self'`;
-// The upload page previews the chosen file in a blob iframe so boot.js can capture a thumbnail.
+// The upload form (on the creator dashboard) previews the chosen file in a blob iframe so boot.js can capture a thumbnail.
 const UPLOAD_CSP = `frame-src ${CDN_ORIGIN} blob:${AD_FRAMES}; frame-ancestors 'self'; object-src 'none'; base-uri 'self'`;
+const UPLOAD_PAGES = new Set(['/me', '/upload']);
 // UP-2b: the Files page PUTs assets to the signed URL the sign endpoint mints, which lives on the
 // configured Supabase origin (its /storage/v1 routes). Self covers the sign/finalize JSON calls;
 // nothing broader — every other page keeps the default connect-src.
@@ -18,6 +19,8 @@ const isAssetsPage = (pathname: string) => /^\/games\/[^/]+\/assets$/.test(pathn
 
 // Routes that don't need the visitor's identity (hot path: called every few seconds by every player).
 const ANONYMOUS = new Set(['/api/telemetry']);
+// MCP-1: the token API authenticates with a Bearer token only, never with the session cookie.
+const isTokenApi = (pathname: string) => pathname.startsWith('/api/v1/');
 // Routes a signed-in user without a handle may still visit.
 const ONBOARDING_OK = /^\/(onboarding|auth\/|api\/auth\/|api\/profile)/;
 
@@ -31,8 +34,8 @@ export const onRequest = defineMiddleware(async (ctx, next) => {
 
   if (isSubmissionPreviewPath(pathname)) {
     ctx.locals.user = { id: 'preview-owner', email: 'preview@meshground.local' };
-    ctx.locals.profile = { id: 'preview-owner', handle: 'preview' };
-  } else if (!ANONYMOUS.has(pathname)) {
+    ctx.locals.profile = { id: 'preview-owner', handle: 'preview', role: 'user' };
+  } else if (!ANONYMOUS.has(pathname) && !isTokenApi(pathname)) {
     const { data } = await ctx.locals.supabase.auth.getClaims();
     const claims = data?.claims;
     if (claims?.sub) {
@@ -46,7 +49,7 @@ export const onRequest = defineMiddleware(async (ctx, next) => {
 
   const res = await next();
   authHeaders.forEach((v, k) => res.headers.set(k, v));
-  res.headers.set('Content-Security-Policy', pathname === '/upload' ? UPLOAD_CSP : isAssetsPage(pathname) ? ASSETS_CSP : CSP);
+  res.headers.set('Content-Security-Policy', UPLOAD_PAGES.has(pathname) ? UPLOAD_CSP : isAssetsPage(pathname) ? ASSETS_CSP : CSP);
   res.headers.set('X-Content-Type-Options', 'nosniff');
   res.headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
   applyDeviceHeaders(res.headers, pathname);
