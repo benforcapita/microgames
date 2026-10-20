@@ -60,10 +60,10 @@ async function insertGame(sql: Sql, id: string): Promise<void> {
   await sql`insert into public.games (id, slug, creator, title) values (${id}, ${id}, 'stub', 'CAT-1')`;
 }
 
-function insertTag(sql: Sql, gameId: string, category: string, status: string, applies: boolean | null, bundle = shaA) {
+function insertTag(sql: Sql, gameId: string, category: string, status: string, applies: boolean | null, bundle = shaA, confidence = 0.9) {
   return sql`
     insert into public.game_tags (game_id, bundle_sha256, category_slug, status, applies, confidence, model, version)
-    values (${gameId}, ${bundle}, ${category}, ${status}, ${applies}, 0.9, 'jev-1.13.0', 'v1')
+    values (${gameId}, ${bundle}, ${category}, ${status}, ${applies}, ${confidence}, 'jev-1.13.0', 'v1')
   `;
 }
 
@@ -99,6 +99,23 @@ describe('categories and game_tags (CAT-1)', () => {
             confirm_threshold: 0.8,
             reject_threshold: 0.05,
           },
+        ],
+      );
+    } finally {
+      await sql.end({ timeout: 1 });
+    }
+  });
+
+  it('seeds exactly the nsfw and kid_safe categories and nothing else', async (t) => {
+    const sql = await connect(t);
+    if (!sql) return;
+    try {
+      const rows = await sql`select slug, status from public.categories order by slug`;
+      assert.deepEqual(
+        rows.map((r) => ({ ...r })),
+        [
+          { slug: 'kid_safe', status: 'approved' },
+          { slug: 'nsfw', status: 'approved' },
         ],
       );
     } finally {
@@ -180,6 +197,42 @@ describe('categories and game_tags (CAT-1)', () => {
     }
   });
 
+  it('accepts proposed/approved/retired and refuses draft or any other category status', async (t) => {
+    const sql = await connect(t);
+    if (!sql) return;
+    try {
+      await rollback(sql, async (tx) => {
+        for (const status of ['draft', 'hidden']) {
+          await assert.rejects(
+            tx.savepoint(
+              (sp) => sp`
+                insert into public.categories (slug, description, status)
+                values (${'cat_' + status}, 'x', ${status})
+              `,
+            ),
+            refused('23514', 'categories_status_check'),
+            `status ${status}`,
+          );
+        }
+        for (const status of ['proposed', 'approved', 'retired']) {
+          await tx`
+            insert into public.categories (slug, description, status)
+            values (${'cat_' + status}, 'x', ${status})
+          `;
+        }
+        const rows = await tx`
+          select status from public.categories where slug like 'cat\_%' order by slug
+        `;
+        assert.deepEqual(
+          rows.map((r) => r.status),
+          ['approved', 'proposed', 'retired'],
+        );
+      });
+    } finally {
+      await sql.end({ timeout: 1 });
+    }
+  });
+
   it('accepts confirmed applies=true, rejected applies=false, needs_review applies=null, appealed and overridden verdicts', async (t) => {
     const sql = await connect(t);
     if (!sql) return;
@@ -236,6 +289,33 @@ describe('categories and game_tags (CAT-1)', () => {
     }
   });
 
+  it('accepts confidence 0 and 1 and refuses anything outside the range', async (t) => {
+    const sql = await connect(t);
+    if (!sql) return;
+    const id = gid();
+    try {
+      await rollback(sql, async (tx) => {
+        await insertGame(tx, id);
+        await insertTag(tx, id, 'nsfw', 'needs_review', null, shaA, 0);
+        await insertTag(tx, id, 'nsfw', 'needs_review', null, shaB, 1);
+        const bad: [string, number][] = [
+          ['cc'.repeat(32), -0.01],
+          ['dd'.repeat(32), 1.01],
+          ['ee'.repeat(32), 50],
+        ];
+        for (const [bundle, confidence] of bad) {
+          await assert.rejects(
+            tx.savepoint((sp) => insertTag(sp, id, 'nsfw', 'needs_review', null, bundle, confidence)),
+            refused('23514', 'game_tags_confidence_check'),
+            `confidence ${confidence}`,
+          );
+        }
+      });
+    } finally {
+      await sql.end({ timeout: 1 });
+    }
+  });
+
   it('refuses a short, non-hex, or uppercase bundle hash', async (t) => {
     const sql = await connect(t);
     if (!sql) return;
@@ -274,6 +354,48 @@ describe('categories and game_tags (CAT-1)', () => {
           tx.savepoint((sp) => insertTag(sp, id, 'nosuch', 'confirmed', true, 'cc'.repeat(32))),
           refused('23503'),
         );
+      });
+    } finally {
+      await sql.end({ timeout: 1 });
+    }
+  });
+
+  it('removes a game\'s game_tags rows when the game is deleted', async (t) => {
+    const sql = await connect(t);
+    if (!sql) return;
+    const id = gid();
+    try {
+      await rollback(sql, async (tx) => {
+        await insertGame(tx, id);
+        await insertTag(tx, id, 'nsfw', 'confirmed', true);
+        await insertTag(tx, id, 'kid_safe', 'rejected', false, shaB);
+        await tx`delete from public.games where id = ${id}`;
+        const remaining = await tx`select id from public.game_tags where game_id = ${id}`;
+        assert.equal(remaining.length, 0);
+        const orphans = await tx`select id from public.game_tags where game_id is null`;
+        assert.equal(orphans.length, 0);
+      });
+    } finally {
+      await sql.end({ timeout: 1 });
+    }
+  });
+
+  it('refuses to delete a category that still has game_tags', async (t) => {
+    const sql = await connect(t);
+    if (!sql) return;
+    const id = gid();
+    try {
+      await rollback(sql, async (tx) => {
+        await insertGame(tx, id);
+        await insertTag(tx, id, 'nsfw', 'confirmed', true);
+        await assert.rejects(
+          tx.savepoint((sp) => sp`delete from public.categories where slug = 'nsfw'`),
+          refused('23503', 'game_tags_category_slug_fkey'),
+        );
+        const rows = await tx`
+          select id from public.game_tags where game_id = ${id} and category_slug = 'nsfw'
+        `;
+        assert.equal(rows.length, 1);
       });
     } finally {
       await sql.end({ timeout: 1 });
