@@ -11,8 +11,8 @@ from categorizer.fetch import (
     download_files,
 )
 
-_FILE_CAP = 4_194_304
-_TOTAL_CAP = 20_971_520
+_TOTAL = 4 * 1024 * 1024
+_MAX_FILES = 200
 
 
 def _sha(data: bytes) -> str:
@@ -66,6 +66,24 @@ def test_matching_files_return_bodies_in_request_order() -> None:
     assert transport.opened == ["index.html", "notes.txt"]
 
 
+def test_matching_bundle_hash_keeps_index_html() -> None:
+    body = b"alpha"
+    transport = _MapTransport({"index.html": body, "notes.txt": b"beta"})
+    result = download_files(
+        (
+            FileRequest(path="index.html"),
+            FileRequest(path="notes.txt"),
+        ),
+        transport,
+        bundle_sha256=_sha(body),
+    )
+    assert isinstance(result, DownloadOk)
+    assert [(item.path, item.body) for item in result.files] == [
+        ("index.html", body),
+        ("notes.txt", b"beta"),
+    ]
+
+
 def test_empty_request_returns_no_files_and_opens_nothing() -> None:
     transport = _MapTransport({})
     result = download_files((), transport)
@@ -103,6 +121,45 @@ def test_hash_mismatch_is_bundle_mismatch_and_stops() -> None:
     assert transport.opened == ["index.html"]
 
 
+def _flip_last_hex(digest: str) -> str:
+    return digest[:-1] + ("0" if digest[-1] != "0" else "1")
+
+
+def test_bundle_hash_mismatch_is_bundle_mismatch_and_stops() -> None:
+    transport = _MapTransport({"index.html": b"alpha", "notes.txt": b"beta"})
+    result = download_files(
+        (
+            FileRequest(path="index.html"),
+            FileRequest(path="notes.txt"),
+        ),
+        transport,
+        bundle_sha256=_sha(b"other"),
+    )
+    assert isinstance(result, DownloadFailure)
+    assert result.code == "bundle_mismatch"
+    assert transport.opened == ["index.html"]
+
+
+def test_bundle_hash_last_hex_character_is_bundle_mismatch() -> None:
+    body = b"alpha"
+    actual = _sha(body)
+    expected = _flip_last_hex(actual)
+    assert expected[:8] == actual[:8]
+    assert expected[-1] != actual[-1]
+    transport = _MapTransport({"index.html": body, "notes.txt": b"beta"})
+    result = download_files(
+        (
+            FileRequest(path="index.html"),
+            FileRequest(path="notes.txt"),
+        ),
+        transport,
+        bundle_sha256=expected,
+    )
+    assert isinstance(result, DownloadFailure)
+    assert result.code == "bundle_mismatch"
+    assert transport.opened == ["index.html"]
+
+
 @pytest.mark.parametrize("digest", ["A" * 64, "ab", ""])
 def test_malformed_hash_is_bundle_mismatch_before_open(digest: str) -> None:
     transport = _MapTransport({"ok.txt": b"alpha"})
@@ -112,8 +169,33 @@ def test_malformed_hash_is_bundle_mismatch_before_open(digest: str) -> None:
     assert transport.opened == []
 
 
-def test_sixty_five_files_is_bundle_file_count_before_open() -> None:
-    files = tuple(FileRequest(path=f"f{index}.txt") for index in range(65))
+@pytest.mark.parametrize("digest", ["A" * 64, "ab", ""])
+def test_malformed_bundle_hash_is_bundle_mismatch_before_open(digest: str) -> None:
+    transport = _MapTransport({"index.html": b"alpha"})
+    result = download_files(
+        (FileRequest(path="index.html"),),
+        transport,
+        bundle_sha256=digest,
+    )
+    assert isinstance(result, DownloadFailure)
+    assert result.code == "bundle_mismatch"
+    assert transport.opened == []
+
+
+def test_bundle_hash_without_index_html_is_bundle_mismatch_before_open() -> None:
+    transport = _MapTransport({"notes.txt": b"beta"})
+    result = download_files(
+        (FileRequest(path="notes.txt"),),
+        transport,
+        bundle_sha256=_sha(b"beta"),
+    )
+    assert isinstance(result, DownloadFailure)
+    assert result.code == "bundle_mismatch"
+    assert transport.opened == []
+
+
+def test_two_hundred_one_files_is_bundle_file_count_before_open() -> None:
+    files = tuple(FileRequest(path=f"f{index}.txt") for index in range(_MAX_FILES + 1))
     transport = _MapTransport({item.path: b"x" for item in files})
     result = download_files(files, transport)
     assert isinstance(result, DownloadFailure)
@@ -121,9 +203,9 @@ def test_sixty_five_files_is_bundle_file_count_before_open() -> None:
     assert transport.opened == []
 
 
-def test_sixty_five_files_with_a_bad_path_is_still_file_count() -> None:
+def test_two_hundred_one_files_with_a_bad_path_is_still_file_count() -> None:
     transport = _MapTransport({})
-    files = tuple(FileRequest(path=f"f{index}.txt") for index in range(64))
+    files = tuple(FileRequest(path=f"f{index}.txt") for index in range(_MAX_FILES))
     files = (*files, FileRequest(path="../secret"))
     result = download_files(files, transport)
     assert isinstance(result, DownloadFailure)
@@ -131,13 +213,13 @@ def test_sixty_five_files_with_a_bad_path_is_still_file_count() -> None:
     assert transport.opened == []
 
 
-def test_sixty_four_files_are_accepted() -> None:
-    bodies = {f"f{index}.txt": b"x" for index in range(64)}
+def test_two_hundred_files_are_accepted() -> None:
+    bodies = {f"f{index}.txt": b"x" for index in range(_MAX_FILES)}
     transport = _MapTransport(bodies)
     files = tuple(FileRequest(path=path, content_sha256=_sha(b"x")) for path in bodies)
     result = download_files(files, transport)
     assert isinstance(result, DownloadOk)
-    assert len(result.files) == 64
+    assert len(result.files) == _MAX_FILES
     assert transport.opened == list(bodies)
 
 
@@ -187,51 +269,45 @@ def test_dot_slash_segment_is_kept() -> None:
     assert result.files[0].path == "foo/./bar.txt"
 
 
-def test_one_byte_over_file_cap_is_bundle_too_large() -> None:
-    payload = b"x" * (_FILE_CAP + 1 + 100)
-    transport = _MapTransport({"index.html": payload})
-    result = download_files(
-        (FileRequest(path="index.html", content_sha256=_sha(b"other")),),
-        transport,
-    )
-    assert isinstance(result, DownloadFailure)
-    assert result.code == "bundle_too_large"
-    assert transport.opened == ["index.html"]
-    assert transport.cursors[0].pulled == _FILE_CAP + 1
-
-
-def test_exact_file_cap_is_accepted() -> None:
-    payload = b"y" * _FILE_CAP
+def test_exact_four_mib_is_accepted() -> None:
+    payload = b"y" * _TOTAL
     transport = _MapTransport({"index.html": payload})
     result = download_files(
         (FileRequest(path="index.html", content_sha256=_sha(payload)),),
         transport,
+        bundle_sha256=_sha(payload),
     )
     assert isinstance(result, DownloadOk)
     assert result.files[0].body == payload
-    assert transport.cursors[0].pulled == _FILE_CAP
+    assert transport.cursors[0].pulled == _TOTAL
 
 
-def test_exact_total_is_accepted_and_one_more_byte_is_bundle_too_large() -> None:
-    chunk = b"z" * _FILE_CAP
-    names = [f"part-{index}.bin" for index in range(5)]
-    transport = _MapTransport({name: chunk for name in names})
+def test_one_byte_over_four_mib_is_bundle_too_large() -> None:
+    payload = b"x" * (_TOTAL + 1)
+    transport = _MapTransport({"index.html": payload})
     result = download_files(
-        tuple(FileRequest(path=name, content_sha256=_sha(chunk)) for name in names),
+        (FileRequest(path="index.html", content_sha256=_sha(payload)),),
+        transport,
+        bundle_sha256=_sha(payload),
+    )
+    assert isinstance(result, DownloadFailure)
+    assert result.code == "bundle_too_large"
+    assert transport.opened == ["index.html"]
+    assert transport.cursors[0].pulled == _TOTAL + 1
+
+
+def test_two_files_that_sum_over_the_total_are_bundle_too_large() -> None:
+    first = b"a" * (_TOTAL // 2 + 1)
+    second = b"b" * (_TOTAL // 2 + 1)
+    transport = _MapTransport({"a.bin": first, "b.bin": second})
+    result = download_files(
+        (
+            FileRequest(path="a.bin", content_sha256=_sha(first)),
+            FileRequest(path="b.bin", content_sha256=_sha(second)),
+        ),
         transport,
     )
-    assert isinstance(result, DownloadOk)
-    assert sum(len(item.body) for item in result.files) == _TOTAL_CAP
-
-    extra = _MapTransport({**{name: chunk for name in names}, "extra.bin": b"!"})
-    over = download_files(
-        (
-            *tuple(FileRequest(path=name, content_sha256=_sha(chunk)) for name in names),
-            FileRequest(path="extra.bin", content_sha256=_sha(b"!")),
-        ),
-        extra,
-    )
-    assert isinstance(over, DownloadFailure)
-    assert over.code == "bundle_too_large"
-    assert extra.opened == [*names, "extra.bin"]
-    assert extra.cursors[-1].pulled == 1
+    assert isinstance(result, DownloadFailure)
+    assert result.code == "bundle_too_large"
+    assert transport.opened == ["a.bin", "b.bin"]
+    assert transport.cursors[1].pulled == _TOTAL - len(first) + 1
