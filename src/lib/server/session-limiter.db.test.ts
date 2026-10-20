@@ -429,4 +429,25 @@ describe('shared session-start limiter (db)', () => {
       process.env.MG_IP_HASH_SECRET = prev ?? 'mg8b-b-test-secret-0000000000000';
     }
   });
+
+  it('fails closed on a whitespace-only secret of at least 32 chars', async (t) => {
+    if (skip(t)) return;
+    const prev = process.env.MG_IP_HASH_SECRET;
+    try {
+      for (const v of [' '.repeat(40), ' \t\n'.repeat(12)]) {
+        process.env.MG_IP_HASH_SECRET = v;
+        const [before] = await sqlA<{ n: number }[]>`
+          select count(*)::int as n from public.session_admissions where game_id = ${GAME}`;
+        await assert.rejects(
+          () => admit(sqlA, { uid: randomUUID(), ip: nextIp() }),
+          /MG_IP_HASH_SECRET/,
+        );
+        const [afterRows] = await sqlA<{ n: number }[]>`
+          select count(*)::int as n from public.session_admissions where game_id = ${GAME}`;
+        assert.equal(afterRows?.n, before?.n, 'no row may be written when the secret is unusable');
+      }
+    } finally {
+      process.env.MG_IP_HASH_SECRET = prev ?? 'mg8b-b-test-secret-0000000000000';
+    }
+  });
 });
