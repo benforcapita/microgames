@@ -125,7 +125,7 @@ try {
   console.log('--- signed-out guards');
   await check('/me (signed out)', `${WEB}/me`, 302, { auth: false, verify: async (r) => (await expectLoc(/^\/login/)(r)) || expectCacheControl('private, no-store')(r) });
   await check('/onboarding', `${WEB}/onboarding`, 302, { auth: false, verify: expectLoc(/^\/login/) });
-  await check('/upload', `${WEB}/upload`, 302, { auth: false, verify: expectLoc(/^\/login/) });
+  await check('/upload', `${WEB}/upload`, 302, { auth: false, verify: expectLoc(/^\/login\?mode=signup/) });
   await check(`/api/saves/${game.id}`, `${WEB}/api/saves/${game.id}`, 401, { auth: false });
   await check(`/api/games/${game.id}/rate`, `${WEB}/api/games/${game.id}/rate`, 401, { method: 'POST', json: { stars: 5 }, auth: false });
 
@@ -135,7 +135,7 @@ try {
   await check('/me (no handle -> onboarding)', `${WEB}/me`, 302, { verify: expectLoc(/^\/onboarding/) });
   await check('/api/profile (pick handle)', `${WEB}/api/profile`, 303, { method: 'POST', form: { handle, next: '/me' }, verify: expectLoc(/^\/me$/) });
   await check('/me', `${WEB}/me`, 200, { verify: expectCacheControl('private, no-store') });
-  await check('/upload', `${WEB}/upload`, 200);
+  await check('/upload (alias)', `${WEB}/upload`, 302, { verify: expectLoc(/^\/me#upload$/) });
   await check(`/u/${handle} (no games yet)`, `${WEB}/u/${handle}`, 404);
   await check('/api/auth/logout', `${WEB}/api/auth/logout`, 303, { method: 'POST', verify: expectLoc(/^\/$/) });
   await check('/me (after logout)', `${WEB}/me`, 302, { verify: expectLoc(/^\/login/) });

@@ -1,0 +1,53 @@
+---
+// Phone-only "install as an app" banner. Hidden until src/client/install-prompt.ts decides to show it.
+---
+
+<aside class="install-banner" data-install-banner hidden role="dialog" aria-label="Install Meshground">
+  <img src="/icons/icon-192.png" alt="" width="44" height="44" />
+  <div class="copy">
+    <strong>Get the Meshground app</strong>
+    <span class="android-only">Install it on your home screen for full-screen play.</span>
+    <span class="ios-only">Tap <svg class="share" viewBox="0 0 24 24" aria-label="Share" role="img"><path d="M12 3v12M7 8l5-5 5 5M5 12v8h14v-8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /></svg> Share, then <b>Add to Home Screen</b>.</span>
+  </div>
+  <div class="actions">
+    <button type="button" class="btn sm android-only" data-install-accept>Install</button>
+    <button type="button" class="dismiss" data-install-dismiss aria-label="Not now">✕</button>
+  </div>
+</aside>
+
+<script>
+  import { installPwa } from '../client/install-prompt';
+  installPwa();
+</script>
+
+<style>
+  .install-banner {
+    position: fixed;
+    left: 0.75rem;
+    right: 0.75rem;
+    bottom: calc(0.75rem + env(safe-area-inset-bottom));
+    z-index: 800;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.75rem 0.75rem 0.75rem 0.85rem;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    box-shadow: 0 12px 40px #000a;
+    max-width: 520px;
+    margin: 0 auto;
+  }
+  .install-banner[hidden] { display: none; }
+  .install-banner img { border-radius: 10px; flex-shrink: 0; }
+  .copy { display: flex; flex-direction: column; min-width: 0; flex: 1; font-size: 0.85rem; line-height: 1.35; }
+  .copy strong { font-size: 0.95rem; }
+  .copy span { color: var(--muted); }
+  .copy b { color: var(--text); }
+  .share { width: 1.05em; height: 1.05em; vertical-align: -0.15em; color: var(--accent); }
+  .actions { display: flex; align-items: center; gap: 0.35rem; flex-shrink: 0; }
+  .dismiss { background: none; border: 0; color: var(--muted); font-size: 1rem; width: 36px; height: 36px; cursor: pointer; border-radius: 999px; }
+  .dismiss:hover { color: var(--text); }
+  .install-banner[data-mode='ios'] .android-only,
+  .install-banner[data-mode='android'] .ios-only { display: none; }
+</style>

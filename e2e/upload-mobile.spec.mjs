@@ -18,14 +18,14 @@ const overflow = (page) => page.evaluate(() => {
 test('upload page has no horizontal overflow at 360, 390 and 430 px', async ({ page }) => {
   test.setTimeout(120_000);
   const stamp = Date.now().toString(36);
-  await page.goto('/login?mode=signup&next=/upload');
+  await page.goto('/login?mode=signup&next=/me');
   await page.locator('input[name="email"]').fill(`mob1-${stamp}@example.com`);
   await page.locator('input[name="password"]').fill('testpass1');
   await page.getByRole('button', { name: 'Sign up' }).click();
   await page.waitForURL(/\/onboarding/);
   await page.locator('input[name="handle"]').fill(`mob1${stamp}`.slice(0, 32));
   await page.getByRole('button', { name: 'Claim handle' }).click();
-  await page.waitForURL(/\/upload$/);
+  await page.waitForURL(/\/me(#upload)?$/);
 
   const viewport = await page.locator('meta[name="viewport"]').getAttribute('content');
   expect(viewport).toContain('maximum-scale=1');
@@ -33,7 +33,7 @@ test('upload page has no horizontal overflow at 360, 390 and 430 px', async ({ p
 
   for (const width of [360, 390, 430]) {
     await page.setViewportSize({ width, height: 800 });
-    await page.goto('/upload');
+    await page.goto('/me#upload');
     const before = await overflow(page);
     expect(before.scrollWidth, `${width}px before pick: ${before.culprits.join(' | ')}`).toBeLessThanOrEqual(before.clientWidth);
     await page.locator('input[name="game"]').setInputFiles({ name: 'g.html', mimeType: 'text/html', buffer: Buffer.from(game) });

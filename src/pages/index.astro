@@ -2,15 +2,12 @@
 import Layout from '../layouts/Layout.astro';
 import GameCard from '../components/GameCard.astro';
 import GameThumb from '../components/GameThumb.astro';
-import { homeCreatorSentence } from '../lib/manual-review';
-import { readManualReview } from '../lib/server/manual-review';
 import { listGames, platformStats } from '../lib/server/games';
 import { compact } from '../lib/format';
 import { getContent, getFeatured } from '../lib/server/content';
 
 // PV-1: only listable games (isListable in game-rules.ts) appear here; proving games are share-by-link only.
 const device = Astro.locals.device;
-const manualReview = await readManualReview();
 const [live, stats, copy, banner, featured] = await Promise.all([
   listGames({ stage: 'live', sort: 'top', limit: 8, device }),
   platformStats(device),
@@ -34,6 +31,33 @@ const loggedIn = !!Astro.locals.user;
       </aside>
     )
   }
+
+  {
+    featured.length > 0 && (
+      <section class="section wrap games-top" aria-labelledby="featured-title">
+        <div class="spread head">
+          <h2 id="featured-title">Featured</h2>
+        </div>
+        <div class="grid">
+          {featured.map((f) => (
+            <div class="featured-item">
+              {f.label && <span class="eyebrow">{f.label}</span>}
+              <GameCard game={f.game} />
+            </div>
+          ))}
+        </div>
+      </section>
+    )
+  }
+
+  <section class="section wrap games-top">
+    <div class="spread head">
+      <h2>Top games</h2>
+      <a href="/games" class="muted">All games →</a>
+    </div>
+    {live.length ? <div class="grid">{live.map((g) => <GameCard game={g} />)}</div> : <p class="muted">No graduated games yet.</p>}
+  </section>
+
   <section class="hero wrap">
     <div class="copy">
       <span class="eyebrow">{copy.eyebrow}</span>
@@ -88,52 +112,6 @@ const loggedIn = !!Astro.locals.user;
     )
   }
 
-  {
-    featured.length > 0 && (
-      <section class="section wrap" aria-labelledby="featured-title">
-        <div class="spread head">
-          <h2 id="featured-title">Featured</h2>
-        </div>
-        <div class="grid">
-          {featured.map((f) => (
-            <div class="featured-item">
-              {f.label && <span class="eyebrow">{f.label}</span>}
-              <GameCard game={f.game} />
-            </div>
-          ))}
-        </div>
-      </section>
-    )
-  }
-
-  <section class="section wrap">
-    <div class="spread head">
-      <h2>Top games</h2>
-      <a href="/games" class="muted">All games →</a>
-    </div>
-    {live.length ? <div class="grid">{live.map((g) => <GameCard game={g} />)}</div> : <p class="muted">No graduated games yet.</p>}
-  </section>
-
-  <section class="section wrap">
-    <div class="creators panel">
-      <div>
-        <span class="eyebrow">For creators</span>
-        <h2>Built it with Claude, Cursor or by hand? Ship it here.</h2>
-        <p class="muted">
-          {homeCreatorSentence(manualReview)}
-        </p>
-        <div class="row">
-          <a class="btn" href="/upload">Upload a game</a>
-          <a class="btn ghost" href="/creators">How it works</a>
-        </div>
-      </div>
-      <ol class="steps">
-        <li><b>Build</b><span class="muted">Any tool, any AI. Three.js, Canvas, WebGPU, as long as it's one self-contained file.</span></li>
-        <li><b>Drop</b><span class="muted">Upload the .html. We sandbox it, add telemetry, and handle pause and saves automatically.</span></li>
-        <li><b>Graduate</b><span class="muted">Players and real telemetry decide eligibility. Clear the bar and our team promotes your game — then others can fork it.</span></li>
-      </ol>
-    </div>
-  </section>
 </Layout>
 
 <style>
@@ -144,6 +122,9 @@ const loggedIn = !!Astro.locals.user;
     align-items: center;
     padding-block: 4rem 2rem;
   }
+  /* Games lead the page; the first grid sits right under the header, the hero follows. */
+  .games-top { padding-block: 2rem 0.5rem; }
+  .games-top + .hero { padding-block: 3rem 2rem; }
   .lede { font-size: 1.12rem; max-width: 36rem; }
   .stats { display: flex; gap: 2.5rem; margin: 2.5rem 0 0; }
   .stats dt { color: var(--muted); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.12em; }
@@ -187,22 +168,13 @@ const loggedIn = !!Astro.locals.user;
   .featured-item { display: grid; gap: 0.4rem; }
   .head h2 { margin: 0; }
   .head a { text-decoration: none; }
-  .creators { display: grid; grid-template-columns: 1fr 1fr; gap: 2.5rem; padding: 2.5rem; }
-  .steps { list-style: none; counter-reset: s; margin: 0; padding: 0; display: grid; gap: 1.25rem; }
-  .steps li { counter-increment: s; display: grid; grid-template-columns: 2.5rem 1fr; column-gap: 0.75rem; }
-  .steps li::before {
-    content: counter(s, decimal-leading-zero);
-    grid-row: span 2;
-    font: 700 1.1rem var(--mono);
-    color: var(--accent);
-  }
   .signup { display: grid; grid-template-columns: 1fr 1fr; gap: 2.5rem; padding: 2.5rem; border-color: #c4ff3d55; }
   .signup h2 { margin: 0.4rem 0 0.6rem; }
   .perks { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem; }
   .perks li { display: grid; gap: 0.25rem; align-content: start; }
   @media (max-width: 860px) {
     .perks { grid-template-columns: 1fr; }
-    .hero, .creators, .signup { grid-template-columns: 1fr; }
+    .hero, .signup { grid-template-columns: 1fr; }
     .feature { transform: none; }
   }
 </style>

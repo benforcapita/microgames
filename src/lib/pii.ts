@@ -54,13 +54,14 @@ export function isIPv6(s: string): boolean {
   return halves.length === 2 ? units <= 7 : units === 8;
 }
 
-const EMAIL = /[^\s@"'<>()[\]{},;:]+@[^\s@"'<>()[\]{},;:]+\.[^\s@"'<>()[\]{},;:.]{2,}/u;
+// Negative lookbehinds anchor match attempts to token start, rejecting failing mid-run positions in O(1) to prevent O(n^2) backtracking on long CJK/letter sequences.
+const EMAIL = /(?<![^\s@"'<>()[\]{},;:])[^\s@"'<>()[\]{},;:]+@[^\s@"'<>()[\]{},;:]+\.[^\s@"'<>()[\]{},;:.]{2,}/u;
 // Obfuscated "@". Bracketed forms ("ben[at]example.com", "(at)", "{at}", "<at>") match any domain.
 // A bare " at " also appears in stack traces ("at main.js:3"), so it needs " dot " or a common email TLD.
 const DOT = String.raw`(?:\s*\.\s*|\s+dot\s+|\s*[[({<]\s*dot\s*[\])}>]\s*)`;
-const EMAIL_BRACKET_AT = new RegExp(String.raw`[\p{L}\p{N}._%+-]+\s*[[({<]\s*at\s*[\])}>]\s*[\p{L}\p{N}-]+(?:${DOT}[\p{L}\p{N}-]+)+`, 'iu');
+const EMAIL_BRACKET_AT = new RegExp(String.raw`(?<![\p{L}\p{N}._%+-])[\p{L}\p{N}._%+-]+\s*[[({<]\s*at\s*[\])}>]\s*[\p{L}\p{N}-]+(?:${DOT}[\p{L}\p{N}-]+)+`, 'iu');
 const EMAIL_WORD_AT = new RegExp(
-  String.raw`[\p{L}\p{N}._%+-]+\s+at\s+[\p{L}\p{N}-]+(?:\s+dot\s+[\p{L}\p{N}-]+|(?:${DOT}[\p{L}\p{N}-]+)*\.(?:com|net|org|io|co|me|dev|app|ai|edu|gov|info|biz|il|uk|de|fr|es|it|nl|ru|in|jp|ca|au|us|br)\b)`,
+  String.raw`(?<![\p{L}\p{N}._%+-])[\p{L}\p{N}._%+-]+\s+at\s+[\p{L}\p{N}-]+(?:\s+dot\s+[\p{L}\p{N}-]+|(?:${DOT}[\p{L}\p{N}-]+)*\.(?:com|net|org|io|co|me|dev|app|ai|edu|gov|info|biz|il|uk|de|fr|es|it|nl|ru|in|jp|ca|au|us|br)\b)`,
   'iu',
 );
 const IPV4_DOTTED = /(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])/;

@@ -4,8 +4,8 @@ A signed-in creator uploads a single-file HTML game with a thumbnail, lands on t
 
 ## Sub-features
 
-- `upload-guard` `/upload` 302s to `/login` when signed out.
-- `upload-form` `/upload` form: `game` (html), `title`, `license`, `thumb` (or `Use this preview` canvas capture), `agree`, `Submit for validation`.
+- `upload-guard` `/upload` 302s to `/login?mode=signup` when signed out; signed in it 302s to `/me#upload` (the form lives on the creator dashboard).
+- `upload-form` `/me#upload` form (`src/components/UploadSection.astro`): `game` (html), `title`, `license`, `thumb` (or `Use this preview` canvas capture), `agree`, `Submit for validation`.
 - `upload-pending` POST `/api/games` 303s to `/submissions/<id>`; badge `Pending`; `/api/submissions/<id>` returns `game.stage = "pending"`.
 - `upload-preview` owner preview of pending bundles via a `pt=` token on the CDN (needs `CDN_PREVIEW_SECRET`, set by `vmg.sh`).
 - `upload-proving` validation moves `pending → proving` (or `rejected`); proving is playable by direct link only.
@@ -14,8 +14,8 @@ A signed-in creator uploads a single-file HTML game with a thumbnail, lands on t
 
 ## How to get to it (user POV)
 
-- Header button `Upload a game` (→ `/upload`, login first).
-- `Fork` on a game page (→ `/upload?fork=<slug>`, title prefilled `… Remix`).
+- Header button `Upload a game` (→ `/me#upload` when signed in, `/upload` → signup otherwise).
+- `Fork` on a game page (→ `/upload?fork=<slug>` → `/me?fork=<slug>#upload`, title prefilled `… Remix`).
 - `/me` lists the creator's submissions with their stage.
 
 ## Driving it with vmg.sh

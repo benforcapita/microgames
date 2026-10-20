@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#090a0f" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <title>Offline · Meshground</title>
+    <style>
+      html, body { margin: 0; height: 100%; }
+      body { display: grid; place-items: center; background: #090a0f; color: #e9ecf5; font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif; text-align: center; padding: 1.5rem; box-sizing: border-box; }
+      img { width: 64px; height: 64px; margin: 0 auto 1rem; display: block; }
+      h1 { font-size: 1.6rem; margin: 0 0 0.5rem; }
+      p { color: #8c92a8; margin: 0 0 1.25rem; }
+      button { font: 700 0.95rem inherit; background: #c4ff3d; color: #0b0f00; border: 0; border-radius: 999px; padding: 0.7rem 1.4rem; cursor: pointer; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <img src="/icons/icon-192.png" alt="" />
+      <h1>You're offline</h1>
+      <p>Meshground needs a connection to load games. Check your network and try again.</p>
+      <button type="button" onclick="location.reload()">Try again</button>
+    </main>
+  </body>
+</html>

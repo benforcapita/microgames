@@ -28,3 +28,6 @@ window.addEventListener('message', (e) => {
 
 Optional helpers (available when running on Meshground): `window.Meshground?.ready?.()` once the first playable frame is showing, and `await window.Meshground?.requestRewardAd()` which resolves `true`/`false`.
 Games written before the rename keep working: `window.Meshgrounds` is an alias of `window.Meshground`, the `meshgrounds:input-support` meta tag and `meshgrounds:pause` / `meshgrounds:resume` events are still supported. New games should use the `Meshground` names.
+
+## Publishing
+If you have the Meshground MCP tools (`publish_game`, `list_my_games`, `update_game`), publish the finished file with `publish_game`. First confirm the license and the content rules with the user. Then use `list_my_games` with the game id to read the validation checks, and fix failures with `update_game`. Otherwise the creator uploads the `.html` on their dashboard.

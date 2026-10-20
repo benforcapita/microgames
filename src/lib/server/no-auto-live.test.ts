@@ -151,7 +151,12 @@ describe('MG-11 no-auto-live guard', () => {
 
 // Known limits (deliberate): regex/static analysis only. It misses dynamic SQL,
 // parameterised stage values (`set stage = ${x}`, `set stage = nxt`), string concatenation,
-// and 'live' passed through variables or helpers. It reads src/, supabase/ and admin/, so
+// and 'live' passed through variables or helpers. Whole-record assignment in plpgsql —
+// `new := jsonb_populate_record(new, …)`, and the same via `new := row(…)`,
+// `new := populate_record(…)` or `select … into new` — is missed too, by both the static
+// regexes here and the catalog regexes in no-auto-live.db.test.ts: the stage write is
+// smuggled inside a record value, so no stage-shaped assignment appears in the text.
+// It reads src/, supabase/ and admin/, so
 // scripts/ (e.g. scripts/seed.mjs — local only), e2e/, cdn/, docs/ and launch/ are not
 // scanned, and DB state already on hosted Supabase is out of reach entirely
 // (no-auto-live.db.test.ts checks the local catalog instead).
