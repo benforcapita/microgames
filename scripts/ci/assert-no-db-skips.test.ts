@@ -252,16 +252,32 @@ describe('assert-no-db-skips guard', () => {
   });
 
   it('a DB test that copies an allowlisted REASON but has a different name -> exit 1 (proves name matching)', () => {
+    const timingReason = 'CI=true: strict absolute timing vs AST_BUDGET is not meaningful on shared CI runners; runs locally on idle boxes';
     const tap = [
       'TAP version 13',
       'ok 1 - some passing test',
-      'ok 2 - rateGame keeps an eligible game proving # SKIP no Playwright Chromium available',
+      `ok 2 - rateGame keeps an eligible game proving # SKIP ${timingReason}`,
       '# tests 2',
     ].join('\n');
 
     const res = runFixture(tap);
     assert.equal(res.status, 1);
-    assert.match(res.stderr, /rateGame keeps an eligible game proving: no Playwright Chromium available/);
+    assert.match(res.stderr, /rateGame keeps an eligible game proving/);
+    assert.match(res.stderr, new RegExp(timingReason.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  });
+
+  it('a DB test whose skip reason contains every ALLOWLIST why text on a non-allowlisted name -> exit 1', () => {
+    const allWhyReason = ALLOWLIST.map((e) => e.why).join('; ');
+    const tap = [
+      'TAP version 13',
+      'ok 1 - some passing test',
+      `ok 2 - rateGame keeps an eligible game proving # SKIP ${allWhyReason}`,
+      '# tests 2',
+    ].join('\n');
+
+    const res = runFixture(tap);
+    assert.equal(res.status, 1);
+    assert.match(res.stderr, /rateGame keeps an eligible game proving/);
   });
 
   it('more allowed skips than permitted: the strict-timing test name appearing twice -> exit 1', () => {
@@ -391,13 +407,13 @@ console.log(JSON.stringify({ ok }));`;
     it('missing file path -> exit 1', () => {
       const res = runCli([path.join(tempDir, 'non-existent-file.tap')]);
       assert.equal(res.status, 1);
-      assert.match(res.stderr, /Cannot read TAP file/);
+      assert.match(res.stderr, /Cannot read test output file \(TAP or JSON report\)/);
     });
 
     it('no argument -> exit 1', () => {
       const res = runCli([]);
       assert.equal(res.status, 1);
-      assert.match(res.stderr, /TAP file path is required/);
+      assert.match(res.stderr, /test output file \(TAP or JSON report\) path is required/);
     });
   });
 
@@ -633,7 +649,175 @@ console.log(JSON.stringify({ ok }));`;
 
       const res = runJsonFixture(report);
       assert.equal(res.status, 1);
-      assert.match(res.stderr, /No tests found in Playwright JSON report/);
+      assert.match(res.stderr, /No tests found in JSON report/);
+    });
+
+    it('empty .json file -> exit 1 and stderr says "JSON report"', () => {
+      const res = runJsonFixture('');
+      assert.equal(res.status, 1);
+      assert.match(res.stderr, /JSON report/);
+      assert.match(res.stderr, /JSON report is empty/);
+    });
+
+    it('a Playwright test that copies an allowlisted REASON but has a different name -> exit 1 (proves name matching)', () => {
+      const timingReason = 'CI=true: strict absolute timing vs AST_BUDGET is not meaningful on shared CI runners; runs locally on idle boxes';
+      const specTitle = 'rateGame keeps an eligible game proving';
+      const report = createPlaywrightReport([
+        {
+          title: 'e2e/timing.spec.mjs',
+          suites: [
+            {
+              title: 'timing suite',
+              specs: [
+                {
+                  title: specTitle,
+                  tests: [createSkippedTest(timingReason)],
+                },
+              ],
+            },
+          ],
+        },
+      ]);
+
+      const res = runJsonFixture(report);
+      assert.equal(res.status, 1);
+      assert.match(res.stderr, new RegExp(specTitle));
+      assert.match(res.stderr, new RegExp(timingReason.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    });
+
+    it('a Playwright test whose skip reason contains every ALLOWLIST why text on a non-allowlisted name -> exit 1', () => {
+      const allWhyReason = ALLOWLIST.map((e) => e.why).join('; ');
+      const specTitle = 'rateGame keeps an eligible game proving';
+      const report = createPlaywrightReport([
+        {
+          title: 'e2e/timing.spec.mjs',
+          suites: [
+            {
+              title: 'timing suite',
+              specs: [
+                {
+                  title: specTitle,
+                  tests: [createSkippedTest(allWhyReason)],
+                },
+              ],
+            },
+          ],
+        },
+      ]);
+
+      const res = runJsonFixture(report);
+      assert.equal(res.status, 1);
+      assert.match(res.stderr, new RegExp(specTitle));
+    });
+
+    it('results [failed, passed], status "flaky" -> exit 1', () => {
+      const specTitle = 'flaky test that passed after retry';
+      const report = createPlaywrightReport([
+        {
+          title: 'e2e/flaky.spec.mjs',
+          suites: [
+            {
+              title: 'flaky suite',
+              specs: [
+                {
+                  title: specTitle,
+                  tests: [
+                    {
+                      timeout: 30000,
+                      annotations: [],
+                      expectedStatus: 'passed',
+                      status: 'flaky',
+                      results: [
+                        { status: 'failed' },
+                        { status: 'passed' },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ]);
+
+      const res = runJsonFixture(report);
+      assert.equal(res.status, 1);
+      assert.match(res.stderr, new RegExp(specTitle));
+      assert.match(res.stderr, /flaky/);
+    });
+
+    it('a test with status "skipped" and an empty results array -> exit 1', () => {
+      const specTitle = 'skipped test with empty results array';
+      const report = createPlaywrightReport([
+        {
+          title: 'e2e/skipped.spec.mjs',
+          suites: [
+            {
+              title: 'suite',
+              specs: [
+                {
+                  title: specTitle,
+                  tests: [
+                    {
+                      timeout: 30000,
+                      annotations: [],
+                      expectedStatus: 'skipped',
+                      status: 'skipped',
+                      results: [],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ]);
+
+      const res = runJsonFixture(report);
+      assert.equal(res.status, 1);
+      assert.match(res.stderr, new RegExp(specTitle));
+    });
+
+    it('multiple retry results where the first is "passed" and the LAST is "skipped", while test.status is "expected" -> exit 1', () => {
+      const specTitle = 'test with first passed and last skipped result';
+      const report = createPlaywrightReport([
+        {
+          title: 'e2e/retry.spec.mjs',
+          suites: [
+            {
+              title: 'suite',
+              specs: [
+                {
+                  title: specTitle,
+                  tests: [
+                    {
+                      timeout: 30000,
+                      annotations: [],
+                      expectedStatus: 'passed',
+                      status: 'expected',
+                      results: [
+                        { status: 'passed' },
+                        { status: 'skipped' },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ]);
+
+      const res = runJsonFixture(report);
+      assert.equal(res.status, 1);
+      assert.match(res.stderr, new RegExp(specTitle));
+    });
+
+    it('a report with no "suites" key -> exit 1 with a clear message mentioning "suites" and no TypeError', () => {
+      const res = runJsonFixture('{"config":{},"stats":{"expected":0}}');
+      assert.equal(res.status, 1);
+      assert.match(res.stderr, /suites/);
+      assert.doesNotMatch(res.stderr, /TypeError/);
     });
 
     it('an unexpected (failed) test -> exit 1', () => {
@@ -717,12 +901,12 @@ console.log(JSON.stringify({ ok }));`;
 
       const resJson = runJsonFixture(malformed);
       assert.equal(resJson.status, 1);
-      assert.match(resJson.stderr, /Failed to parse Playwright JSON/);
+      assert.match(resJson.stderr, /Failed to parse JSON report/);
 
       // Even if saved in a .tap file, starting with "{" must be treated as JSON and exit 1
       const resTap = runFixture(malformed);
       assert.equal(resTap.status, 1);
-      assert.match(resTap.stderr, /Failed to parse Playwright JSON/);
+      assert.match(resTap.stderr, /Failed to parse JSON report/);
     });
 
     it('test whose last result status is skipped is treated as skipped -> exit 1', () => {

@@ -84,7 +84,7 @@ export function checkPlaywrightJson(content, allowlist = ALLOWLIST) {
     return {
       ok: false,
       totalTests: 0,
-      errors: ['Error: Playwright JSON file is empty'],
+      errors: ['Error: JSON report is empty'],
       allowed,
     };
   }
@@ -95,7 +95,7 @@ export function checkPlaywrightJson(content, allowlist = ALLOWLIST) {
       return {
         ok: false,
         totalTests: 0,
-        errors: ['Error: Playwright JSON file is empty'],
+        errors: ['Error: JSON report is empty'],
         allowed,
       };
     }
@@ -105,7 +105,7 @@ export function checkPlaywrightJson(content, allowlist = ALLOWLIST) {
       return {
         ok: false,
         totalTests: 0,
-        errors: [`Error: Failed to parse Playwright JSON: ${err.message}`],
+        errors: [`Error: Failed to parse JSON report: ${err.message}`],
         allowed,
       };
     }
@@ -117,7 +117,7 @@ export function checkPlaywrightJson(content, allowlist = ALLOWLIST) {
     return {
       ok: false,
       totalTests: 0,
-      errors: ['Error: Invalid Playwright JSON report: missing "suites" array'],
+      errors: ['Error: Invalid JSON report: missing "suites" array'],
       allowed,
     };
   }
@@ -146,6 +146,9 @@ export function checkPlaywrightJson(content, allowlist = ALLOWLIST) {
             if (test.status === 'unexpected') {
               errors.push(`${name}: unexpected`);
             }
+            if (test.status === 'flaky') {
+              errors.push(`${name}: flaky`);
+            }
             if (isSkipped) {
               const skipAnnotation = Array.isArray(test.annotations)
                 ? test.annotations.find((a) => a?.type === 'skip' || a?.type === 'fixme')
@@ -167,7 +170,7 @@ export function checkPlaywrightJson(content, allowlist = ALLOWLIST) {
   }
 
   if (totalTests <= 0) {
-    errors.push('Error: No tests found in Playwright JSON report');
+    errors.push('Error: No tests found in JSON report');
   }
 
   return {
@@ -181,7 +184,7 @@ export function checkPlaywrightJson(content, allowlist = ALLOWLIST) {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const file = process.argv[2];
   if (!file) {
-    console.error('Error: TAP file path is required');
+    console.error('Error: test output file (TAP or JSON report) path is required');
     process.exit(1);
   }
 
@@ -189,7 +192,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   try {
     content = fs.readFileSync(file, 'utf8');
   } catch (err) {
-    console.error(`Error: Cannot read TAP file: ${err.message}`);
+    console.error(`Error: Cannot read test output file (TAP or JSON report): ${err.message}`);
     process.exit(1);
   }
 
