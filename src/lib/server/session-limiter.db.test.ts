@@ -95,7 +95,9 @@ describe('shared session-start limiter (db)', () => {
 
   it('resets the uid window after 30 minutes and the ip window after 60 on the injected clock', async (t) => {
     if (skip(t)) return;
-    const t0 = Date.UTC(2026, 9, 19, 12, 0, 0);
+    const now = Date.now();
+    const dayStart = Math.floor(now / 86_400_000) * 86_400_000;
+    const t0 = Math.min(Math.max(now - 30 * 60_000, dayStart + 60_000), dayStart + 86_400_000 - 62 * 60_000);
     const ip = nextIp();
     const u = randomUUID();
     assert.equal(await admit(sqlA, { uid: u, ip, now: t0 }), true);

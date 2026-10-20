@@ -381,7 +381,7 @@ async function upsertSessionEvent(
   sessionId: string,
   gameId: string,
   columns: SessionEventColumn[],
-  admitNewSession?: (db: GameDb) => Promise<boolean>,
+  admitNewSession?: (db: postgres.TransactionSql) => Promise<boolean>,
 ) {
   const where = sql`where id = ${sessionId} and game_id = ${gameId}`;
   const update = comma(columns.map((c) => sql`${sql(c.col)} = ${c.merge(sql`${sql(c.col)}`, c.value)}`));
