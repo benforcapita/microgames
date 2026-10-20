@@ -1,6 +1,7 @@
 ---
 import '../styles/global.css';
 import { ADSENSE_CLIENT } from '../lib/server/config';
+import InstallPrompt from '../components/InstallPrompt.astro';
 
 interface Props {
   title?: string;
@@ -33,6 +34,16 @@ const nav = [
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+    <meta name="theme-color" content="#090a0f" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="Meshground" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black" />
+    <script is:inline>
+      addEventListener('beforeinstallprompt', function (e) { e.preventDefault(); window.__mgInstallEvent = e; }, { once: true });
+    </script>
     <title>{fullTitle}</title>
     <meta name="description" content={description} />
     {noindex && <meta name="robots" content="noindex, nofollow" />}
@@ -89,6 +100,7 @@ const nav = [
         </span>
       </div>
     </footer>
+    <InstallPrompt />
     <script>
       import { installPortalErrors } from '../client/site-events';
       installPortalErrors();
