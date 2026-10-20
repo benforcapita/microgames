@@ -5,27 +5,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { ALLOWLIST } from './assert-no-db-skips.mjs';
 
 const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url));
 const GUARD_URL = pathToFileURL(path.join(REPO_ROOT, 'scripts/ci/assert-no-db-skips.mjs')).href;
-
-const ALLOWLIST = [
-  {
-    name: 'byte-budget input is fully analysed with median < 0.75 x AST_BUDGET.ms (450 ms)',
-    max: 1,
-    why: 'CI-T2 strict timing on shared runners',
-  },
-  {
-    name: 'a 3x linear slowdown is caught (relative, machine-speed independent)',
-    max: 1,
-    why: 'CI-T2 strict timing on shared runners',
-  },
-  {
-    name: 'AS-5 game loads its own assets under the enforced CSP (Chromium)',
-    max: 1,
-    why: 'non-DB browser suite, no Chromium on the runner; Engineering Lead approved keeping it until #98 lands',
-  },
-];
 
 interface CliResult {
   status: number | null;
@@ -279,6 +262,139 @@ console.log(JSON.stringify({ ok }));`;
       const res = runCli([]);
       assert.equal(res.status, 1);
       assert.match(res.stderr, /TAP file path is required/);
+    });
+  });
+
+  describe('ALLOWLIST contract and name matching mutants', () => {
+    it('(d) ALLOWLIST matches exact literal expected [name, max] pairs', () => {
+      const actualPairs: [string, number][] = ALLOWLIST.map((e) => [e.name, e.max]);
+      const expectedPairs: [string, number][] = [
+        ['byte-budget input is fully analysed with median < 0.75 x AST_BUDGET.ms (450 ms)', 1],
+        ['a 3x linear slowdown is caught (relative, machine-speed independent)', 1],
+        ['AS-5 game loads its own assets under the enforced CSP (Chromium)', 1],
+      ];
+      assert.deepStrictEqual(actualPairs, expectedPairs);
+    });
+
+    it('(a1) an allowlisted name with " extra" appended, skipped exits 1', () => {
+      const baseName = ALLOWLIST[0].name;
+      const mutatedName = `${baseName} extra`;
+      const tap = [
+        'TAP version 13',
+        `ok 1 - ${mutatedName} # SKIP some reason`,
+        '# tests 1',
+      ].join('\n');
+
+      const res = runFixture(tap);
+      assert.equal(res.status, 1);
+      assert.match(res.stderr, new RegExp(mutatedName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    });
+
+    it('(a2) a strict prefix of an allowlisted name (cut off before the end), skipped exits 1', () => {
+      const baseName = ALLOWLIST[0].name;
+      const prefixName = baseName.slice(0, -6);
+      const tap = [
+        'TAP version 13',
+        `ok 1 - ${prefixName} # SKIP some reason`,
+        '# tests 1',
+      ].join('\n');
+
+      const res = runFixture(tap);
+      assert.equal(res.status, 1);
+      assert.match(res.stderr, new RegExp(prefixName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    });
+
+    it('(a3) a substring from the middle of an allowlisted name, skipped exits 1', () => {
+      const baseName = ALLOWLIST[0].name;
+      const middleName = baseName.slice(5, 35);
+      const tap = [
+        'TAP version 13',
+        `ok 1 - ${middleName} # SKIP some reason`,
+        '# tests 1',
+      ].join('\n');
+
+      const res = runFixture(tap);
+      assert.equal(res.status, 1);
+      assert.match(res.stderr, new RegExp(middleName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    });
+
+    it('(b) a lowercase "# skip" directive on a non-allowlisted test exits 1, and stderr names the test', () => {
+      const tap = [
+        'TAP version 13',
+        'ok 1 - unallowed test with lowercase directive # skip some reason',
+        '# tests 1',
+      ].join('\n');
+
+      const res = runFixture(tap);
+      assert.equal(res.status, 1);
+      assert.match(res.stderr, /unallowed test with lowercase directive/);
+    });
+
+    it('(c) AS-5 name "AS-5 game loads its own assets under the enforced CSP (Chromium)" skipped twice exits 1', () => {
+      const as5Name = 'AS-5 game loads its own assets under the enforced CSP (Chromium)';
+      const tap = [
+        'TAP version 13',
+        `ok 1 - ${as5Name} # SKIP reason one`,
+        `ok 2 - ${as5Name} # SKIP reason two`,
+        '# tests 2',
+      ].join('\n');
+
+      const res = runFixture(tap);
+      assert.equal(res.status, 1);
+      assert.match(res.stderr, /AS-5 game loads its own assets under the enforced CSP \(Chromium\)/);
+    });
+
+    describe('(c) loop over every ALLOWLIST entry: max exits 0, max+1 exits 1', () => {
+      for (const entry of ALLOWLIST) {
+        it(`ALLOWLIST entry "${entry.name}": skipping exactly max (${entry.max}) times exits 0`, () => {
+          const lines = ['TAP version 13'];
+          for (let i = 1; i <= entry.max; i++) {
+            lines.push(`ok ${i} - ${entry.name} # SKIP allowed reason ${i}`);
+          }
+          lines.push(`# tests ${entry.max}`);
+
+          const res = runFixture(lines.join('\n'));
+          assert.equal(res.status, 0);
+          assert.match(res.stdout, new RegExp(`OK: ${entry.max} tests; allowed skips: `));
+          assert.equal(res.stderr, '');
+        });
+
+        it(`ALLOWLIST entry "${entry.name}": skipping max+1 (${entry.max + 1}) times exits 1`, () => {
+          const lines = ['TAP version 13'];
+          for (let i = 1; i <= entry.max + 1; i++) {
+            lines.push(`ok ${i} - ${entry.name} # SKIP exceeded reason ${i}`);
+          }
+          lines.push(`# tests ${entry.max + 1}`);
+
+          const res = runFixture(lines.join('\n'));
+          assert.equal(res.status, 1);
+          assert.match(res.stderr, new RegExp(entry.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+        });
+      }
+    });
+
+    it('(e) a skipped test named "foo \\# bar" in the TAP (escaped hash) exits 1, and stderr contains "foo # bar"', () => {
+      const tap = [
+        'TAP version 13',
+        'ok 1 - foo \\# bar # SKIP some reason',
+        '# tests 1',
+      ].join('\n');
+
+      const res = runFixture(tap);
+      assert.equal(res.status, 1);
+      assert.match(res.stderr, /foo # bar/);
+    });
+
+    it('(f) "not ok 1 - x # SKIP r" on a non-allowlisted test exits 1, and stderr names x', () => {
+      const tap = [
+        'TAP version 13',
+        'not ok 1 - x # SKIP r',
+        '# tests 1',
+      ].join('\n');
+
+      const res = runFixture(tap);
+      assert.equal(res.status, 1);
+      assert.match(res.stderr, /\bx\b/);
     });
   });
 });
