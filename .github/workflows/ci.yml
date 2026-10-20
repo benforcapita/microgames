@@ -56,13 +56,18 @@ jobs:
       # Mail (mailpit) is required for smoke and must not be excluded.
       - name: Start local Supabase
         run: supabase start -x vector,logflare,edge-runtime,realtime,studio,imgproxy > /dev/null
-      # Mask local keys so they are redacted from runner logs if ever logged; env vars do not carry keys.
-      - name: Mask secrets
-        run: node --input-type=module -e "import { localSupabaseEnv } from './scripts/lib/local-supabase.mjs'; const env = localSupabaseEnv(); for (const k of ['PUBLIC_SUPABASE_PUBLISHABLE_KEY', 'SUPABASE_SECRET_KEY', 'DATABASE_URL']) console.log('::add-mask::' + env[k]);"
+      # Masks are registered before export; values come only from supabase status via the loopback guard, never from repo secrets.
+      - name: Export local Supabase env (masked)
+        run: node --input-type=module -e "import fs from 'node:fs'; import { localSupabaseEnv } from './scripts/lib/local-supabase.mjs'; const env = localSupabaseEnv(); for (const k of ['PUBLIC_SUPABASE_URL', 'PUBLIC_SUPABASE_PUBLISHABLE_KEY', 'SUPABASE_SECRET_KEY', 'DATABASE_URL', 'MAILPIT_URL']) { const v = env[k]; if (!v) { if (k === 'MAILPIT_URL') continue; console.error('missing ' + k + ' from supabase status'); process.exit(1); } if (['PUBLIC_SUPABASE_PUBLISHABLE_KEY', 'SUPABASE_SECRET_KEY', 'DATABASE_URL'].includes(k)) console.log('::add-mask::' + v); fs.appendFileSync(process.env.GITHUB_ENV, k + '=' + v + '\n'); }"
       - name: Smoke
         run: npm run smoke
       - name: Install Playwright Chromium
         run: npx playwright install --with-deps chromium
+      - name: DB tests
+        shell: bash
+        run: npm test 2>&1 | tee "$RUNNER_TEMP/db-tests.tap"
+      - name: Assert no DB suites skipped
+        run: node scripts/ci/assert-no-db-skips.mjs "$RUNNER_TEMP/db-tests.tap"
       - name: DB e2e
         run: npx playwright test e2e/db-sessions.spec.mjs
       - name: Stop local Supabase
