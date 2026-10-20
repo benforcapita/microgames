@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Callable, Mapping, Sequence
 from typing import Literal
 
 import httpx
 
-from categorizer import Settings, SettingsError
+from categorizer import Secret, Settings, SettingsError
 
 HaikuCode = Literal[
     "haiku_auth",
@@ -133,7 +134,6 @@ def suggest(
 ) -> Suggestion:
     if settings.openrouter_model == "":
         raise SettingsError("OPENROUTER_MODEL")
-    headers = {"Authorization": f"Bearer {settings.openrouter_api_key.reveal()}"}
     body = {
         "model": settings.openrouter_model,
         "temperature": 0,
@@ -146,26 +146,30 @@ def suggest(
     attempt = 0
     with httpx.Client(transport=transport, timeout=_TIMEOUT) as client:
         while True:
-            try:
-                return _call(client, headers, body)
-            except HaikuError as err:
-                if not err.retryable or attempt >= _MAX_RETRIES:
-                    raise
-                sleep(err.retry_after if err.retry_after is not None else 2.0**attempt)
-                attempt += 1
+            result = _call(client, settings.openrouter_api_key, body)
+            if isinstance(result, Suggestion):
+                return result
+            if not result.retryable or attempt >= _MAX_RETRIES:
+                raise result
+            sleep(result.retry_after if result.retry_after is not None else 2.0**attempt)
+            attempt += 1
 
 
 def _call(
     client: httpx.Client,
-    headers: Mapping[str, str],
+    key: Secret,
     body: Mapping[str, object],
-) -> Suggestion:
+) -> Suggestion | HaikuError:
     try:
-        response = client.post(_URL, headers=headers, json=body)
+        response = client.post(
+            _URL,
+            headers={"Authorization": f"Bearer {key.reveal()}"},
+            json=body,
+        )
     except httpx.HTTPError:
-        raise HaikuError("haiku_timeout") from None
+        return HaikuError("haiku_timeout")
     if response.status_code != 200:
-        raise _status_error(response)
+        return _status_error(response)
     return _parse(response)
 
 
@@ -192,20 +196,22 @@ def _retry_after(response: httpx.Response) -> float | None:
     if raw is None:
         return None
     text = raw.strip()
-    return float(text) if text.isdigit() else None
+    if re.fullmatch(r"[0-9]+", text) is None:
+        return None
+    return min(float(text), _TIMEOUT)
 
 
-def _parse(response: httpx.Response) -> Suggestion:
+def _parse(response: httpx.Response) -> Suggestion | HaikuError:
     try:
         body: object = response.json()
     except ValueError:
-        raise HaikuError("haiku_refusal") from None
+        return HaikuError("haiku_refusal")
     if not isinstance(body, dict):
-        raise HaikuError("haiku_refusal")
+        return HaikuError("haiku_refusal")
     arguments = _arguments(body)
     model = body.get("model")
     if arguments is None or not isinstance(model, str):
-        raise HaikuError("haiku_refusal")
+        return HaikuError("haiku_refusal")
     return Suggestion(arguments=arguments, model=model, usage=_usage(body.get("usage")))
 
 

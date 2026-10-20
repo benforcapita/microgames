@@ -199,6 +199,47 @@ def test_backoff_doubles_without_retry_after() -> None:
     assert sleeps == [1.0, 2.0]
 
 
+@pytest.mark.parametrize(
+    "header",
+    ["７", "٧", "Wed, 21 Oct 2026 07:28:00 GMT", "soon"],
+    ids=["fullwidth", "arabic_indic", "http_date", "garbage"],
+)
+def test_non_delta_seconds_retry_after_falls_back_to_backoff(header: str) -> None:
+    api = Api(
+        [
+            httpx.Response(429, headers=[(b"retry-after", header.encode())]),
+            httpx.Response(200, json=_ok_body()),
+        ]
+    )
+    sleeps: list[float] = []
+    result = suggest(_settings(), MESSAGES, transport=api.transport, sleep=sleeps.append)
+    assert result.arguments == '{"tags": []}'
+    assert sleeps == [1.0]
+
+
+def test_malformed_retry_after_keeps_the_status_error_code() -> None:
+    api = Api([httpx.Response(400, headers=[(b"retry-after", "٧".encode())])])
+    with pytest.raises(HaikuError) as raised:
+        suggest(_settings(), MESSAGES, transport=api.transport, sleep=lambda _s: None)
+    assert raised.value.code == "haiku_bad_request"
+    assert raised.value.http_status == 400
+    assert raised.value.retry_after is None
+
+
+@pytest.mark.parametrize("header", ["86400", "9" * 400], ids=["day_seconds", "huge"])
+def test_large_retry_after_is_capped_at_sixty_seconds(header: str) -> None:
+    api = Api(
+        [
+            httpx.Response(429, headers={"Retry-After": header}),
+            httpx.Response(200, json=_ok_body()),
+        ]
+    )
+    sleeps: list[float] = []
+    result = suggest(_settings(), MESSAGES, transport=api.transport, sleep=sleeps.append)
+    assert result.arguments == '{"tags": []}'
+    assert sleeps == [60.0]
+
+
 @pytest.mark.parametrize("failure", [httpx.TimeoutException("slow"), httpx.ConnectError("refused")])
 def test_transport_failures_map_to_haiku_timeout_and_retry(failure: Exception) -> None:
     api = Api([failure, failure, failure])
@@ -253,3 +294,41 @@ def test_key_never_appears_in_errors_or_log_output() -> None:
         assert KEY not in str(err)
         assert KEY not in repr(err)
         assert KEY not in buf.getvalue()
+
+
+def _assert_key_unreachable_from(err: HaikuError) -> None:
+    seen: set[int] = set()
+    stack: list[BaseException | None] = [err]
+    while stack:
+        node = stack.pop()
+        if node is None or id(node) in seen:
+            continue
+        seen.add(id(node))
+        assert KEY not in str(node)
+        assert KEY not in repr(node)
+        assert not isinstance(node, httpx.HTTPError)
+        request = getattr(node, "request", None)
+        if isinstance(request, httpx.Request):
+            assert KEY not in request.headers.get("authorization", "")
+        stack.extend((node.__cause__, node.__context__))
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [httpx.ConnectError("refused"), httpx.ReadTimeout("slow")],
+    ids=["connect_error", "read_timeout"],
+)
+def test_transport_failures_raise_an_unchained_haiku_error(failure: Exception) -> None:
+    api = Api([failure, failure, failure])
+    with pytest.raises(HaikuError) as raised:
+        suggest(_settings(), MESSAGES, transport=api.transport, sleep=lambda _s: None)
+    assert raised.value.code == "haiku_timeout"
+    _assert_key_unreachable_from(raised.value)
+
+
+def test_status_errors_raise_an_unchained_haiku_error() -> None:
+    api = Api(_errors([401]))
+    with pytest.raises(HaikuError) as raised:
+        suggest(_settings(), MESSAGES, transport=api.transport, sleep=lambda _s: None)
+    assert raised.value.code == "haiku_auth"
+    _assert_key_unreachable_from(raised.value)
