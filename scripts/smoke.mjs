@@ -12,6 +12,7 @@
 //   - /u/<handle> for a creator with no games -> 404 (page rewrites to /404)
 //   - protected pages (/me, /onboarding) when signed out -> 302 to /login; API routes when signed out -> 401
 import { spawn, execFileSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import { localSupabaseEnv } from './lib/local-supabase.mjs';
 import { findMoneyClaims, findPaymentPromises, findSiteMoneyTerms } from '../src/lib/money-claims.ts';
@@ -24,6 +25,7 @@ const sb = localSupabaseEnv();
 const env = {
   ...process.env,
   ...sb,
+  MG_IP_HASH_SECRET: process.env.MG_IP_HASH_SECRET || randomBytes(32).toString('hex'),
   HOST: '127.0.0.1',
   PORT: String(WEB_PORT),
   SITE_URL: WEB,
