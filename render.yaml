@@ -1,0 +1,9 @@
+services:
+  - type: cron
+    name: meshgrounds-categorizer
+    runtime: python
+    region: frankfurt
+    schedule: "* * * * *"
+    rootDir: workers/categorizer
+    buildCommand: pip install uv && uv sync --frozen --no-dev
+    startCommand: .venv/bin/python -m categorizer
