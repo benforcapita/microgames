@@ -82,6 +82,20 @@ describe('IP limiter', () => {
     }
     assert.equal(allowed, 20);
   });
+
+  it('drops a hit exactly windowMs old at the window boundary', () => {
+    let t = 0;
+    const limiter = createLimiter({ windowMs: 1000, max: 2, now: () => t });
+    assert.equal(limiter.hit('k'), true);
+    t = 500;
+    assert.equal(limiter.hit('k'), true);
+    t = 999;
+    assert.equal(limiter.check('k'), false);
+    assert.equal(limiter.hit('k'), false);
+    t = 1000;
+    assert.equal(limiter.check('k'), true);
+    assert.equal(limiter.hit('k'), true);
+  });
 });
 
 describe('map eviction', () => {
@@ -194,6 +208,11 @@ describe('clientIp', () => {
       if (admitSessionStart(`00000000-0000-4000-8000-${String(i).padStart(12, '0')}`, ip, 'g1', byUid, byIp)) counted++;
     }
     assert.equal(counted, 25);
+  });
+
+  it('on Vercel, takes the leftmost x-vercel-forwarded-for hop', () => {
+    const headers = new Headers({ 'x-vercel-forwarded-for': '203.0.113.9, 10.1.1.1, 10.2.2.2' });
+    assert.equal(clientIp(headers, '10.0.0.1', true), '203.0.113.9');
   });
 
   it('falls back to x-real-ip on Vercel, then the socket', () => {
