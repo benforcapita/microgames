@@ -292,6 +292,82 @@ export type TelemetryType = 'session_start' | 'first_frame' | 'start' | 'complet
 const lockSession = (tx: postgres.TransactionSql, sessionId: string) =>
   tx`select pg_advisory_xact_lock(hashtext(${sessionId}))`;
 
+/**
+ * One sessions column a telemetry event writes. `value` is what a freshly created
+ * row stores; `merge(stored, incoming)` applies the event to an existing row —
+ * the single source of truth for the field's rule, used verbatim in the fast
+ * UPDATE, the locked retry and the INSERT's ON CONFLICT branch (where `stored`
+ * is `sessions.<col>` and `incoming` is `excluded.<col>`).
+ */
+interface SessionEventColumn {
+  col: string;
+  value: postgres.Fragment;
+  merge: (stored: postgres.Fragment, incoming: postgres.Fragment) => postgres.Fragment;
+}
+
+/** Flags latch false → true; no later or duplicate event clears them. */
+const latchTrue = (col: string): SessionEventColumn => ({
+  col,
+  value: sql`true`,
+  merge: (stored, incoming) => sql`(${stored} or ${incoming})`,
+});
+
+/** first_frame_ms is first-value-wins. */
+const firstWins = (col: string, value: postgres.Fragment): SessionEventColumn => ({
+  col,
+  value,
+  merge: (stored, incoming) => sql`coalesce(${stored}, ${incoming})`,
+});
+
+/** duration_ms only moves forward. */
+const keepMax = (col: string, value: postgres.Fragment): SessionEventColumn => ({
+  col,
+  value,
+  merge: (stored, incoming) => sql`greatest(${stored}, ${incoming})`,
+});
+
+/** Joins fragments with commas (a SET or column/SELECT list). */
+const comma = (parts: postgres.Fragment[]): postgres.Fragment =>
+  parts.slice(1).reduce<postgres.Fragment>((acc, part) => sql`${acc}, ${part}`, parts[0] ?? sql``);
+
+/**
+ * Applies an event's column merges to its session row. The fast path is one
+ * unlocked UPDATE; on a miss the session lock serializes against a session_start
+ * or another event that may be creating the row — under the lock a second miss
+ * means the row really is absent, so only an admitted event may create it, and
+ * only for a published game. The ON CONFLICT branch applies the same merge to a
+ * row that raced in between; the game guard keeps a foreign session's row
+ * untouched. Nothing inside the lock may use the pool: `tx` only, or a
+ * pool-starved request deadlocks.
+ */
+async function upsertSessionEvent(
+  sessionId: string,
+  gameId: string,
+  columns: SessionEventColumn[],
+  admitNewSession?: (db: GameDb) => Promise<boolean>,
+) {
+  const where = sql`where id = ${sessionId} and game_id = ${gameId}`;
+  const update = comma(columns.map((c) => sql`${sql(c.col)} = ${c.merge(sql`${sql(c.col)}`, c.value)}`));
+  const hit = await sql`update sessions set ${update} ${where} returning id`;
+  if (hit.length) return;
+  await sql.begin(async (tx) => {
+    await lockSession(tx, sessionId);
+    const retry = await tx`update sessions set ${update} ${where} returning id`;
+    if (!retry.length && admitNewSession && (await admitNewSession(tx))) {
+      const conflict = comma(
+        columns.map((c) => sql`${sql(c.col)} = ${c.merge(sql`sessions.${sql(c.col)}`, sql`excluded.${sql(c.col)}`)}`),
+      );
+      await tx`
+        insert into sessions (id, game_id, ${comma(columns.map((c) => sql`${sql(c.col)}`))})
+        select ${sessionId}, ${gameId}, ${comma(columns.map((c) => c.value))}
+        where exists (select 1 from games where id = ${gameId} and stage in ${sql([...PUBLIC_STAGES])})
+        on conflict (id) do update
+          set ${conflict}
+          where sessions.game_id = excluded.game_id`;
+    }
+  });
+}
+
 export async function recordTelemetry(
   sessionId: string,
   gameId: string,
@@ -303,11 +379,10 @@ export async function recordTelemetry(
    * admitSessionStart. It runs inside the session lock, so it must only read via `db`
    * (the lock-holding transaction) — reaching the pool there can deadlock once every
    * pooled connection is held. Unset callers keep the old semantics: session_start
-   * always writes, first_frame never creates a row.
+   * always writes, the other events never create a row.
    */
   admitNewSession?: (db: GameDb) => Promise<boolean>,
 ) {
-  const where = sql`where id = ${sessionId} and game_id = ${gameId}`;
   switch (type) {
     case 'session_start':
       await sql.begin(async (tx) => {
@@ -322,46 +397,20 @@ export async function recordTelemetry(
     case 'first_frame': {
       const ms = clampFirstFrameMs(value);
       if (ms === null) return;
-      const hit = await sql`
-        update sessions set first_frame_ms = coalesce(first_frame_ms, ${ms}) ${where}
-        returning id`;
-      if (hit.length) return;
-      await sql.begin(async (tx) => {
-        await lockSession(tx, sessionId);
-        const retry = await tx`
-          update sessions set first_frame_ms = coalesce(first_frame_ms, ${ms}) ${where}
-          returning id`;
-        // Under the lock a miss means the row really is absent: no admitted write for
-        // this session can be in flight. Only an admitted first_frame may create it, and
-        // on conflict the game guard keeps a foreign session's row untouched.
-        if (!retry.length && admitNewSession && (await admitNewSession(tx))) {
-          await tx`
-            insert into sessions (id, game_id, first_frame_ms)
-            select ${sessionId}, ${gameId}, ${ms}
-            where exists (select 1 from games where id = ${gameId} and stage in ${sql([...PUBLIC_STAGES])})
-            on conflict (id) do update
-              set first_frame_ms = coalesce(sessions.first_frame_ms, excluded.first_frame_ms)
-              where sessions.game_id = excluded.game_id`;
-        }
-      });
-      return;
+      return upsertSessionEvent(sessionId, gameId, [firstWins('first_frame_ms', sql`${ms}`)], admitNewSession);
     }
     case 'ready':
       // Acknowledged only. sessions has no ready column, and this ticket does not migrate.
       // first_frame_ms stays the automatic animation-frame metric.
       return;
     case 'start':
-      await sql`update sessions set started = true ${where}`;
-      break;
+      return upsertSessionEvent(sessionId, gameId, [latchTrue('started')], admitNewSession);
     case 'complete':
-      await sql`update sessions set started = true, completed = true ${where}`;
-      break;
+      return upsertSessionEvent(sessionId, gameId, [latchTrue('started'), latchTrue('completed')], admitNewSession);
     case 'crash':
-      await sql`update sessions set crashed = true ${where}`;
-      break;
+      return upsertSessionEvent(sessionId, gameId, [latchTrue('crashed')], admitNewSession);
     case 'heartbeat':
-      await sql`update sessions set duration_ms = greatest(duration_ms, ${clampDurationMs(value)}) ${where}`;
-      break;
+      return upsertSessionEvent(sessionId, gameId, [keepMax('duration_ms', sql`${clampDurationMs(value)}`)], admitNewSession);
   }
 }
 
