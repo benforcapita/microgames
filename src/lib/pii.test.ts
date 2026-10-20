@@ -19,6 +19,23 @@ describe('containsPii / redactPii', () => {
     assert.equal(redactPii('mail ben at example dot com'), REDACTED, 'spans tokens: whole string');
     assert.equal(redactPii('TypeError: x\n    at main.js:3:14'), 'TypeError: x\n    at main.js:3:14');
   });
+  it('scans long unbroken runs linearly and still detects prefixed PII', () => {
+    for (const run of ['漢'.repeat(20_000), 'x'.repeat(20_000)]) {
+      const t0 = performance.now();
+      assert.equal(containsPii(run), false);
+      assert.equal(redactPii(run), run);
+      const elapsed = performance.now() - t0;
+      assert.ok(elapsed < 200, `expected linear scan under 200ms, took ${elapsed}ms`);
+    }
+
+    const prefix = '漢'.repeat(1_000) + ' ';
+    assert.equal(containsPii(prefix + 'ben@example.com'), true);
+    assert.equal(containsPii(prefix + 'ben[at]example.com'), true);
+    assert.equal(containsPii(prefix + 'ben at example dot com'), true);
+    assert.equal(redactPii(prefix + 'ben@example.com'), prefix + REDACTED);
+    assert.equal(redactPii(prefix + 'ben[at]example.com'), prefix + REDACTED);
+    assert.equal(redactPii(prefix + 'ben at example dot com'), REDACTED);
+  });
 });
 
 describe('truncateText (UTF-8 bytes, code-point boundaries)', () => {
