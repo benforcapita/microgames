@@ -13,6 +13,7 @@ Open exchange for single-file browser games (Three.js etc.). Astro 7 SSR (`@astr
 
 ## Architecture
 - `supabase/migrations/` — schema (profiles, games, sessions, ratings, saves) + `games` bucket. RLS on, no policies: all access goes through the server.
+- Session admission is Postgres-backed (`public.session_admissions` via `admitSessionStart` in `src/lib/server/abuse.ts`, ip subject = daily HMAC under `MG_IP_HASH_SECRET`): a database outage or missing table blocks all new sessions (fail closed).
 - `src/middleware.ts` — per-request Supabase client, `getClaims()` → `locals.user` / `locals.profile`; signed-in users without a handle are sent to `/onboarding`
 - `src/lib/server/` — `config.ts` (env), `db.ts` (postgres.js), `supabase.ts` (request client + service-role `admin`), `games.ts`, `profiles.ts`, `saves.ts`, `auth.ts` (`safeNext` redirect guard)
 - Auth: `/login` (password, sign up, magic link) → `/api/auth/login`; email links land on `/auth/callback` (PKCE `code` or `token_hash`)

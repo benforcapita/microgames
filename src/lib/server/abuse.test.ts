@@ -218,9 +218,10 @@ describe('sessionIpSubject', () => {
     assert.notEqual(sessionIpSubject(ip, 's1', new Date(Date.UTC(2026, 9, 20, 0, 30))), day);
   });
 
-  it('is a 64-hex hmac that depends on the secret and never exposes the ip', () => {
+  it('differs per ip and per secret, is 64-hex, and never exposes the ip', () => {
     const a = sessionIpSubject(ip, 's1', noon);
     assert.match(a, /^[0-9a-f]{64}$/);
+    assert.notEqual(sessionIpSubject('198.51.100.9', 's1', noon), a);
     assert.notEqual(sessionIpSubject(ip, 's2', noon), a);
     assert.equal(a.includes(ip), false);
   });
