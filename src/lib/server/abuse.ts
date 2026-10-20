@@ -216,7 +216,7 @@ export function admitSessionStart(
   byUid: Limiter = sessionStartByUid, byIp: Limiter = sessionStartByIp,
 ): boolean {
   const secret = process.env.MG_IP_HASH_SECRET;
-  if (!secret) throw new Error('Missing required env var MG_IP_HASH_SECRET (see .env.example)');
+  if (!secret || secret.length < 32) throw new Error('Missing required env var MG_IP_HASH_SECRET (see .env.example)');
   const uidKey = `${uid}:${gameId}`;
   if (!byUid.check(uidKey)) return false;
   if (!byIp.hit(`${sessionIpSubject(ip, secret, new Date())}:${gameId}`)) return false;

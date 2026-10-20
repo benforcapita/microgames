@@ -24,7 +24,7 @@ import {
   telemetryByUid,
 } from './abuse.ts';
 
-const TEST_SECRET = 'mg8b-a-test';
+const TEST_SECRET = 'mg8b-a-test-secret-0000000000000';
 process.env.MG_IP_HASH_SECRET = TEST_SECRET;
 
 describe('session_start limiter', () => {
@@ -256,14 +256,46 @@ describe('admitSessionStart ip keys', () => {
     );
   });
 
-  it('fails closed when MG_IP_HASH_SECRET is unset', () => {
+  it('an ip that exhausts its hourly starts on one game is still admitted on another', () => {
+    const byIp = createLimiter({ windowMs: 60 * 60_000, max: 20 });
+    const byUid = createLimiter({ windowMs: 30 * 60_000, max: 1 });
+    const dev = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
+    for (let i = 0; i < 20; i++) {
+      assert.equal(admitSessionStart(dev(i), '203.0.113.21', 'g1', byUid, byIp), true, `start ${i + 1}`);
+    }
+    assert.equal(admitSessionStart(dev(20), '203.0.113.21', 'g1', byUid, byIp), false, 'g1 budget spent');
+    assert.equal(admitSessionStart(dev(21), '203.0.113.21', 'g2', byUid, byIp), true, 'g2 has its own budget');
+    assert.equal(admitSessionStart(dev(22), '203.0.113.22', 'g1', byUid, byIp), true, 'other ip unaffected');
+  });
+
+  it('fails closed when MG_IP_HASH_SECRET is unset, empty, or shorter than 32 chars', () => {
     const prev = process.env.MG_IP_HASH_SECRET;
-    delete process.env.MG_IP_HASH_SECRET;
+    const dev = '00000000-0000-4000-8000-0000000000aa';
     try {
-      assert.throws(
-        () => admitSessionStart('00000000-0000-4000-8000-0000000000aa', '203.0.113.7', 'g'),
-        /MG_IP_HASH_SECRET/,
-      );
+      for (const v of [undefined, '', 'x'.repeat(31)]) {
+        if (v === undefined) delete process.env.MG_IP_HASH_SECRET;
+        else process.env.MG_IP_HASH_SECRET = v;
+        assert.throws(
+          () => admitSessionStart(dev, '203.0.113.7', 'g'),
+          (e: unknown) =>
+            e instanceof Error &&
+            /MG_IP_HASH_SECRET/.test(e.message) &&
+            !e.message.includes('203.0.113.7') &&
+            (v === undefined || v === '' || !e.message.includes(v)),
+        );
+      }
+    } finally {
+      process.env.MG_IP_HASH_SECRET = prev ?? TEST_SECRET;
+    }
+  });
+
+  it('accepts a 32-char MG_IP_HASH_SECRET', () => {
+    const prev = process.env.MG_IP_HASH_SECRET;
+    process.env.MG_IP_HASH_SECRET = 'x'.repeat(32);
+    try {
+      const byIp = createLimiter({ windowMs: 60_000, max: 1 });
+      const byUid = createLimiter({ windowMs: 60_000, max: 1 });
+      assert.equal(admitSessionStart('00000000-0000-4000-8000-0000000000aa', '203.0.113.7', 'g', byUid, byIp), true);
     } finally {
       process.env.MG_IP_HASH_SECRET = prev ?? TEST_SECRET;
     }
