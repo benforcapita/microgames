@@ -279,6 +279,18 @@ def test_no_usable_tool_call_is_refusal_without_retry(body: dict[str, object]) -
     assert sleeps == []
 
 
+@pytest.mark.parametrize("body", ["<html>oops</html>", ""], ids=["html", "empty"])
+def test_non_json_200_body_is_refusal_without_retry(body: str) -> None:
+    api = Api([httpx.Response(200, content=body)])
+    sleeps: list[float] = []
+    with pytest.raises(HaikuError) as raised:
+        suggest(_settings(), MESSAGES, transport=api.transport, sleep=sleeps.append)
+    assert raised.value.code == "haiku_refusal"
+    assert raised.value.retryable is False
+    assert len(api.requests) == 1
+    assert sleeps == []
+
+
 def test_key_never_appears_in_errors_or_log_output() -> None:
     refusal = _refusal_bodies()[0]
     scenarios: list[list[httpx.Response | Exception]] = [
