@@ -103,14 +103,14 @@ test('Temple Dash multi-file: upload, add files on the Files page, every asset l
   page.on('requestfailed', (req) => requestFailures.push(`${req.url()} ${req.failure()?.errorText ?? 'failed'}`));
 
   await test.step('sign in on the local stack', async () => {
-    await page.goto('/login?mode=signup&next=/upload');
+    await page.goto('/login?mode=signup&next=/me');
     await page.locator('input[name="email"]').fill(`temple-run-multi-${stamp}@example.com`);
     await page.locator('input[name="password"]').fill('testpass1');
     await page.getByRole('button', { name: 'Sign up' }).click();
     await page.waitForURL(/\/onboarding/);
     await page.locator('input[name="handle"]').fill(handle);
     await page.getByRole('button', { name: 'Claim handle' }).click();
-    await page.waitForURL(/\/upload$/);
+    await page.waitForURL(/\/me(#upload)?$/);
     await expect(page.getByRole('heading', { name: 'Upload a game' })).toBeVisible();
   });
 

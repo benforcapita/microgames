@@ -1,0 +1,67 @@
+---
+import { REVIEW_NOTE_MAX, reviewTransition } from '../lib/admin-rules';
+import type { Stage } from '../lib/server/game-rules';
+
+interface Props {
+  game: { id: string; title: string; stage: Stage };
+  /** Where to land after the decision (same-site path, may carry a query). */
+  next: string;
+}
+const { game, next } = Astro.props;
+const canApprove = reviewTransition(game.stage, 'approve') !== null;
+const canReject = reviewTransition(game.stage, 'reject') !== null;
+const rejectLabel = game.stage === 'pending' ? 'Reject' : 'Take down';
+const action = `/api/admin/games/${game.id}/review`;
+---
+
+<div class="review-actions" data-review={game.id}>
+  {
+    canApprove && (
+      <form method="post" action={action} class="approve" data-confirm={`Publish “${game.title}” to the Proving Grounds?`}>
+        <input type="hidden" name="next" value={next} />
+        <input type="hidden" name="decision" value="approve" />
+        <button class="btn sm" type="submit">Approve</button>
+      </form>
+    )
+  }
+  {
+    canReject && (
+      <details class="reject">
+        <summary class="btn ghost sm">{rejectLabel}</summary>
+        <form method="post" action={action}>
+          <input type="hidden" name="next" value={next} />
+          <input type="hidden" name="decision" value="reject" />
+          <label>Note to the creator <small>required, shown on their dashboard</small>
+            <textarea name="note" rows="3" maxlength={REVIEW_NOTE_MAX} required placeholder="What needs fixing?"></textarea>
+          </label>
+          <button class="btn ghost sm danger" type="submit">{rejectLabel}</button>
+        </form>
+      </details>
+    )
+  }
+</div>
+
+<style>
+  .review-actions { display: flex; gap: 0.5rem; align-items: flex-start; flex-wrap: wrap; }
+  .review-actions form { margin: 0; }
+  .reject { position: relative; }
+  .reject summary { list-style: none; cursor: pointer; display: inline-flex; }
+  .reject summary::-webkit-details-marker { display: none; }
+  .reject[open] summary { border-color: var(--bad); color: var(--bad); }
+  .reject form {
+    position: absolute; right: 0; top: calc(100% + 0.5rem); z-index: 5;
+    width: min(22rem, 80vw); display: grid; gap: 0.6rem; padding: 0.9rem;
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--radius);
+    box-shadow: 0 20px 60px -20px #000c;
+  }
+  .reject textarea { width: 100%; resize: vertical; }
+  .danger { border-color: #ff5d5d66; color: var(--bad); }
+</style>
+
+<script>
+  document.querySelectorAll<HTMLFormElement>('.review-actions form[data-confirm]').forEach((f) =>
+    f.addEventListener('submit', (e) => {
+      if (!confirm(f.dataset.confirm)) e.preventDefault();
+    }),
+  );
+</script>

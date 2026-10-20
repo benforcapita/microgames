@@ -16,7 +16,7 @@ The game CDN's CSP is the outer safety limit; this contract may be stricter than
 
 ## Creator prompts
 
-Paste one of these into your AI coding tool together with your game. They are also on the [/upload](/upload) page with copy buttons.
+Paste one of these into your AI coding tool together with your game. They are also on the [/me#upload](/me#upload) dashboard with copy buttons.
 
 ### Prompt A — make my game Meshground-ready
 

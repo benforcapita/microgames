@@ -77,3 +77,19 @@ jobs:
       - name: Stop local Supabase
         if: always()
         run: supabase stop
+
+  categorizer:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: workers/categorizer
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884
+        with:
+          working-directory: workers/categorizer
+          python-version: "3.12"
+      - run: uv sync --frozen --all-groups
+      - run: uv run ruff check .
+      - run: uv run pytest
+      - run: uv run python -c "from categorizer import scan_repo; raise SystemExit(scan_repo())"

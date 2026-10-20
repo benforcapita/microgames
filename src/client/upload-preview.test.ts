@@ -40,7 +40,7 @@ describe('upload preview capture', () => {
     const bare = injectPreview('<canvas></canvas>', 'BOOT_MARKER');
     assert.ok(bare.startsWith('<script>window.__MG_PREVIEW=true</script><script>BOOT_MARKER</script>'));
     const player = fs.readFileSync(new URL('./player.ts', import.meta.url), 'utf8');
-    const page = fs.readFileSync(new URL('../pages/upload.astro', import.meta.url), 'utf8');
+    const page = fs.readFileSync(new URL('../components/UploadSection.astro', import.meta.url), 'utf8');
     const cdn = fs.readFileSync(new URL('../../cdn/handler.mjs', import.meta.url), 'utf8');
     const boot = fs.readFileSync(new URL('../../cdn/boot.js', import.meta.url), 'utf8');
     assert.match(player, /case '__MG_SNAPSHOT':/);

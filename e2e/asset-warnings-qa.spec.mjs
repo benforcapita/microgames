@@ -11,14 +11,14 @@ const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR
 
 async function signUp(page, tag) {
   const stamp = `${tag}${Date.now().toString(36)}`;
-  await page.goto('/login?mode=signup&next=/upload');
+  await page.goto('/login?mode=signup&next=/me');
   await page.locator('input[name="email"]').fill(`${stamp}@example.com`);
   await page.locator('input[name="password"]').fill('testpass1');
   await page.getByRole('button', { name: 'Sign up' }).click();
   await page.waitForURL(/\/onboarding/);
   await page.locator('input[name="handle"]').fill(stamp.slice(0, 32));
   await page.getByRole('button', { name: 'Claim handle' }).click();
-  await page.waitForURL(/\/upload$/);
+  await page.waitForURL(/\/me(#upload)?$/);
   return stamp;
 }
 const pick = (page, paths) =>

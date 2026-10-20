@@ -16,14 +16,14 @@ const game = `<!doctype html><html><body style="margin:0"><canvas id="c" width="
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
 
 async function signUp(page, stamp) {
-  await page.goto('/login?mode=signup&next=/upload');
+  await page.goto('/login?mode=signup&next=/me');
   await page.locator('input[name="email"]').fill(`${stamp}@example.com`);
   await page.locator('input[name="password"]').fill('testpass1');
   await page.getByRole('button', { name: 'Sign up' }).click();
   await page.waitForURL(/\/onboarding/);
   await page.locator('input[name="handle"]').fill(stamp);
   await page.getByRole('button', { name: 'Claim handle' }).click();
-  await page.waitForURL(/\/upload$/);
+  await page.waitForURL(/\/me(#upload)?$/);
 }
 const PT = /[?&](?:amp;)?pt=/;
 
