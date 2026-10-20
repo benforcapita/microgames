@@ -45,8 +45,11 @@ async function rollback(sql: postgres.Sql, fn: (tx: postgres.TransactionSql) => 
   }
 }
 
-function refused(code: string) {
-  return (err: unknown) => err instanceof postgres.PostgresError && err.code === code;
+function refused(code: string, constraint?: string) {
+  return (err: unknown) =>
+    err instanceof postgres.PostgresError &&
+    err.code === code &&
+    (constraint === undefined || err.constraint_name === constraint);
 }
 
 const gid = () => `cat1-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -132,12 +135,12 @@ describe('categories and game_tags (CAT-1)', () => {
     if (!sql) return;
     try {
       await rollback(sql, async (tx) => {
-        for (const slug of ['NSFW', 'bad slug', 'bad-slug', '']) {
+        for (const slug of ['NSFW', 'bad slug', 'bad-slug', '', '_a', 'a_', 'a__b']) {
           await assert.rejects(
             tx.savepoint(
               (sp) => sp`insert into public.categories (slug, description) values (${slug}, 'x')`,
             ),
-            refused('23514'),
+            refused('23514', 'categories_slug_check'),
             slug,
           );
         }
@@ -152,22 +155,23 @@ describe('categories and game_tags (CAT-1)', () => {
     if (!sql) return;
     try {
       await rollback(sql, async (tx) => {
-        const bad: [number, number][] = [
-          [1.5, 0.1],
-          [0.5, 0.5],
-          [0.4, 0.6],
-          [0.85, -0.1],
+        const bad: [string, number, number, string][] = [
+          ['thr_confirm_hi', 1.5, 0.1, 'categories_confirm_threshold_range'],
+          ['thr_confirm_lo', 0.1, 0.2, 'categories_thresholds_ordered'],
+          ['thr_reject_lo', 0.85, -0.1, 'categories_reject_threshold_range'],
+          ['thr_equal', 0.5, 0.5, 'categories_thresholds_ordered'],
+          ['thr_inverted', 0.4, 0.6, 'categories_thresholds_ordered'],
         ];
-        for (const [confirm, reject] of bad) {
+        for (const [slug, confirm, reject, constraint] of bad) {
           await assert.rejects(
             tx.savepoint(
               (sp) => sp`
                 insert into public.categories (slug, description, confirm_threshold, reject_threshold)
-                values (${'t' + confirm + '_' + reject}, 'x', ${confirm}, ${reject})
+                values (${slug}, 'x', ${confirm}, ${reject})
               `,
             ),
-            refused('23514'),
-            `${confirm}/${reject}`,
+            refused('23514', constraint),
+            `${slug} ${confirm}/${reject}`,
           );
         }
       });
@@ -232,6 +236,27 @@ describe('categories and game_tags (CAT-1)', () => {
     }
   });
 
+  it('refuses a short, non-hex, or uppercase bundle hash', async (t) => {
+    const sql = await connect(t);
+    if (!sql) return;
+    const id = gid();
+    try {
+      await rollback(sql, async (tx) => {
+        await insertGame(tx, id);
+        const bad = ['aa'.repeat(16), 'zz'.repeat(32), 'AA'.repeat(32)];
+        for (const bundle of bad) {
+          await assert.rejects(
+            tx.savepoint((sp) => insertTag(sp, id, 'nsfw', 'needs_review', null, bundle)),
+            refused('23514', 'game_tags_bundle_sha256_check'),
+            `bundle ${bundle.slice(0, 8)}…`,
+          );
+        }
+      });
+    } finally {
+      await sql.end({ timeout: 1 });
+    }
+  });
+
   it('refuses a duplicate (game, bundle, category) and a tag for an unknown category', async (t) => {
     const sql = await connect(t);
     if (!sql) return;
@@ -271,18 +296,47 @@ describe('categories and game_tags (CAT-1)', () => {
           { relname: 'game_tags', relrowsecurity: true },
         ],
       );
+      const writes: Record<string, string[]> = {
+        categories: [
+          `insert into public.categories (slug, description) values ('x', 'x')`,
+          `update public.categories set description = 'x'`,
+          `delete from public.categories`,
+        ],
+        game_tags: [
+          `insert into public.game_tags (game_id, bundle_sha256, category_slug, status) values ('x', '${shaA}', 'nsfw', 'needs_review')`,
+          `update public.game_tags set status = 'confirmed'`,
+          `delete from public.game_tags`,
+        ],
+      };
       for (const role of ['anon', 'authenticated']) {
         for (const table of ['categories', 'game_tags']) {
           await rollback(sql, async (tx) => {
             await tx.unsafe(`set local role ${role}`);
-            await assert.rejects(
-              tx.savepoint((sp) => sp.unsafe(`select * from public.${table}`)),
-              refused('42501'),
-              `${role} reading ${table}`,
-            );
+            for (const stmt of [`select * from public.${table}`, ...writes[table]]) {
+              await assert.rejects(
+                tx.savepoint((sp) => sp.unsafe(stmt)),
+                refused('42501'),
+                `${role}: ${stmt}`,
+              );
+            }
           });
         }
       }
+    } finally {
+      await sql.end({ timeout: 1 });
+    }
+  });
+
+  it('indexes game_tags by category_slug', async (t) => {
+    const sql = await connect(t);
+    if (!sql) return;
+    try {
+      const rows = await sql`
+        select indexname from pg_indexes
+        where schemaname = 'public' and tablename = 'game_tags'
+          and indexdef like '%(category_slug%'
+      `;
+      assert.equal(rows.length, 1);
     } finally {
       await sql.end({ timeout: 1 });
     }

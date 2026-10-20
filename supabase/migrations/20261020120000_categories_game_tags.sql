@@ -3,10 +3,10 @@ create table public.categories (
   description text not null,
   status text not null default 'proposed' check (status in ('proposed', 'approved', 'retired')),
   is_safety boolean not null default false,
-  confirm_threshold numeric not null default 0.85 check (confirm_threshold between 0 and 1),
-  reject_threshold numeric not null default 0.15 check (reject_threshold between 0 and 1),
+  confirm_threshold numeric not null default 0.85 constraint categories_confirm_threshold_range check (confirm_threshold between 0 and 1),
+  reject_threshold numeric not null default 0.15 constraint categories_reject_threshold_range check (reject_threshold between 0 and 1),
   created_at timestamptz not null default now(),
-  check (reject_threshold < confirm_threshold)
+  constraint categories_thresholds_ordered check (reject_threshold < confirm_threshold)
 );
 
 create table public.game_tags (
@@ -31,6 +31,8 @@ create table public.game_tags (
     or (status = 'overridden' and applies is not null)
   )
 );
+
+create index game_tags_category_slug_idx on public.game_tags (category_slug);
 
 alter table public.categories enable row level security;
 alter table public.game_tags enable row level security;
