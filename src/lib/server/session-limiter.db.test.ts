@@ -15,7 +15,7 @@ try {
 }
 
 if (isLocal) {
-  process.env.MG_IP_HASH_SECRET ??= 'mg8b-test-secret';
+  process.env.MG_IP_HASH_SECRET ??= 'mg8b-b-test-secret-0000000000000';
 }
 
 let probeOk = false;
@@ -225,7 +225,7 @@ describe('shared session-start limiter (db)', () => {
     try {
       await assert.rejects(() => admit(sqlA, { uid: randomUUID(), ip: nextIp() }), /MG_IP_HASH_SECRET/);
     } finally {
-      process.env.MG_IP_HASH_SECRET = prev ?? 'mg8b-test-secret';
+      process.env.MG_IP_HASH_SECRET = prev ?? 'mg8b-b-test-secret-0000000000000';
     }
   });
 });

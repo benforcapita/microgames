@@ -28,7 +28,7 @@ if (isLocal) {
   process.env.PUBLIC_SUPABASE_URL ??= 'http://127.0.0.1:54321';
   process.env.PUBLIC_SUPABASE_PUBLISHABLE_KEY ??= 'test';
   process.env.SUPABASE_SECRET_KEY ??= 'test';
-  process.env.MG_IP_HASH_SECRET ??= 'test';
+  process.env.MG_IP_HASH_SECRET ??= 'mg8b-db-test-secret-000000000000';
 }
 
 let probeOk = false;

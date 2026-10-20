@@ -267,7 +267,7 @@ export async function admitSessionStart(
   { uid, ip, gameId, now = Date.now() }: SessionAdmission,
 ): Promise<boolean> {
   const secret = process.env.MG_IP_HASH_SECRET;
-  if (!secret) throw new Error('Missing required env var MG_IP_HASH_SECRET (see .env.example)');
+  if (!secret || secret.length < 32) throw new Error('Missing required env var MG_IP_HASH_SECRET (see .env.example)');
   const at = new Date(now);
   const uidCutoff = new Date(now - SESSION_START_UID_WINDOW_MS);
   const ipCutoff = new Date(now - SESSION_START_IP_WINDOW_MS);
