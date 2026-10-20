@@ -113,6 +113,14 @@ const deleted = Astro.url.searchParams.has('deleted');
 </style>
 
 <script>
+  // One-shot notices (?deleted, ?revoked): drop the flag so a reload doesn't show them again.
+  const url = new URL(location.href);
+  if (url.searchParams.has('deleted') || url.searchParams.has('revoked')) {
+    url.searchParams.delete('deleted');
+    url.searchParams.delete('revoked');
+    history.replaceState(history.state, '', url.pathname + url.search + url.hash);
+  }
+
   document.querySelectorAll<HTMLFormElement>('form[data-confirm]').forEach((f) =>
     f.addEventListener('submit', (e) => {
       if (!confirm(f.dataset.confirm)) e.preventDefault();

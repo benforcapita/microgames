@@ -39,6 +39,8 @@
     margin: 0 auto;
   }
   .install-banner[hidden] { display: none; }
+  /* While the banner shows, leave room under the page so it never sits on top of the last content. */
+  :global(body:has(.install-banner:not([hidden]))) { padding-bottom: calc(6.5rem + env(safe-area-inset-bottom)); }
   .install-banner img { border-radius: 10px; flex-shrink: 0; }
   .copy { display: flex; flex-direction: column; min-width: 0; flex: 1; font-size: 0.85rem; line-height: 1.35; }
   .copy strong { font-size: 0.95rem; }

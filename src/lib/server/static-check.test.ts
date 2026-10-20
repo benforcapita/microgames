@@ -107,6 +107,13 @@ describe('allowlist comes from the CDN CSP (cdn/csp.mjs)', () => {
 });
 
 describe('static-check details', () => {
+  it('counts the SDK guide hook calls (window.Meshground?.ready?.()) and the old Meshgrounds alias', () => {
+    const hooks = (js: string) => findings(analyzeGame(`<canvas></canvas><script>${js}</script>`), 'contract-hooks');
+    const all = (ns: string) => `${ns}?.ready?.();${ns}?.onPause?.(() => {});${ns}?.onResume?.(() => {});`;
+    assert.deepEqual(hooks(all('window.Meshground')), []);
+    assert.deepEqual(hooks(all('window.Meshgrounds')), []);
+    assert.deepEqual(hooks('window.Meshground?.ready?.();'), ['Meshground.onPause', 'Meshground.onResume']);
+  });
   it('never fails the three seed games', () => {
     for (const f of fs.readdirSync(SEED)) assert.notEqual(analyzeGame(fs.readFileSync(new URL(f, SEED))).status, 'fail', f);
   });
