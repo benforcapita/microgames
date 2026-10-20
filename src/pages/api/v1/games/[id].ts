@@ -20,18 +20,23 @@ export const GET: APIRoute = async ({ request, params, url }) => {
   });
 };
 
-/** Replace an unpublished game's HTML (and optionally its thumbnail); it goes back through validation. */
+/** Replace an unpublished game's HTML (it goes back through validation), its thumbnail, or both. */
 export const PUT: APIRoute = async ({ request, params, url }) => {
   const caller = await requireApiCaller(request);
   if (caller instanceof Response) return caller;
   if (!apiWrites.hit(caller.user.id)) return apiJson({ error: 'Too many uploads. Try again later.' }, 429);
   const files = updateFiles(await readJson(request));
   if ('error' in files) return apiJson({ errors: [files.error] }, 400);
+  if (!files.game && !files.thumb) return apiJson({ errors: ['Send new html, a new thumbnail, or both.'] }, 400);
 
-  const errors = gameFileErrors(files.game);
-  if (errors.length || !files.game) return apiJson({ errors }, 400);
-  const read = await readGameHtml(files.game);
-  if (read.error) return apiJson({ errors: [read.error] }, 400);
+  let html;
+  if (files.game) {
+    const errors = gameFileErrors(files.game);
+    if (errors.length) return apiJson({ errors }, 400);
+    const read = await readGameHtml(files.game);
+    if (read.error) return apiJson({ errors: [read.error] }, 400);
+    html = read.html;
+  }
   let thumb;
   if (files.thumb) {
     const checked = await validateThumb(files.thumb);
@@ -39,7 +44,7 @@ export const PUT: APIRoute = async ({ request, params, url }) => {
     thumb = checked.thumb;
   }
 
-  const result = await replaceGameBundle({ gameKey: params.id ?? '', ownerId: caller.user.id, html: read.html, thumb });
+  const result = await replaceGameBundle({ gameKey: params.id ?? '', ownerId: caller.user.id, html, thumb });
   if (!result.ok) return apiJson({ error: result.error }, result.status);
   return apiJson({ game: apiGame(result.game, siteOrigin(url), null) });
 };

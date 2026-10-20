@@ -122,8 +122,18 @@ describe('meshground MCP server', () => {
       assert.equal(seen[0].body.thumbnail, undefined);
       const badThumb = await c.call('update_game', { game: 'g1', html: '<canvas>', thumbnail_path: join(dir, 'bad.gif') });
       assert.equal(badThumb.isError, true);
+      const badThumbOnly = await c.call('update_game', { game: 'g1', thumbnail_path: join(dir, 'bad.gif') });
+      assert.match(badThumbOnly.content[0].text, /PNG, JPEG or WebP/);
+
+      writeFileSync(join(dir, 'thumb.png'), Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex'));
+      seen.length = 0;
+      const thumbOnly = await c.call('update_game', { game: 'g1', thumbnail_path: join(dir, 'thumb.png') });
+      assert.equal(thumbOnly.isError, undefined);
+      assert.equal(seen[0].body.html, undefined);
+      assert.equal(seen[0].body.thumbnail.type, 'image/png');
+
       const missing = await c.call('update_game', { game: 'g1' });
-      assert.match(missing.content[0].text, /html_path/);
+      assert.match(missing.content[0].text, /html_path.*thumbnail_path/);
     } finally {
       c.close();
     }

@@ -64,6 +64,16 @@ const awaitingReview = view.game.stage === 'pending' && view.validation?.status 
       </span>
     </div>
     <p class="muted lead">{view.detail}</p>
+    {
+      !view.published && (
+        <p class="panel visibility" id="visibility">
+          <b>{view.game.stage === 'rejected' ? 'Not public.' : 'Not public yet.'}</b>{' '}
+          {view.game.stage === 'rejected'
+            ? "Players can't find or play this game. Only you can see this page."
+            : "Players can't find or play this game until a reviewer publishes it. Only you can see this page."}
+        </p>
+      )
+    }
 
     <AssetWarnings summary={assetSummary} />
 
@@ -198,6 +208,8 @@ const awaitingReview = view.game.stage === 'pending' && view.validation?.status 
   .head { align-items: flex-end; }
   .head h1 { margin: 0; }
   .lead { margin: 0; max-width: 62ch; }
+  .visibility { margin: 0; padding: 0.75rem 1rem; font-size: 0.9rem; border-color: #ffb02e55; }
+  .visibility b { color: var(--warn); }
   .phase.running, .phase.queued, .phase.waiting { color: var(--warn); border-color: #ffb34055; }
   .phase.passed { color: var(--accent); border-color: #c4ff3d55; }
   .phase.failed, .phase.error { color: var(--bad); border-color: #ff5d5d55; }
