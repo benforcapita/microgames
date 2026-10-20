@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 from collections.abc import Sequence
 
 import httpx
@@ -132,7 +133,9 @@ def test_request_is_the_pinned_openrouter_call() -> None:
 
 def test_model_comes_only_from_settings() -> None:
     api = Api([httpx.Response(200, json=_ok_body())])
-    suggest(_settings(model="other/model-x"), MESSAGES, transport=api.transport, sleep=lambda _s: None)
+    suggest(
+        _settings(model="other/model-x"), MESSAGES, transport=api.transport, sleep=lambda _s: None
+    )
     assert json.loads(api.requests[0].content)["model"] == "other/model-x"
 
 
@@ -217,6 +220,17 @@ def test_non_delta_seconds_retry_after_falls_back_to_backoff(header: str) -> Non
     assert sleeps == [1.0]
 
 
+@pytest.mark.parametrize("header", ["-5", "-1.5"], ids=["negative", "negative_float"])
+def test_negative_retry_after_is_treated_as_missing(header: str) -> None:
+    api = Api([httpx.Response(429, headers={"Retry-After": header}) for _ in range(3)])
+    sleeps: list[float] = []
+    with pytest.raises(HaikuError) as raised:
+        suggest(_settings(), MESSAGES, transport=api.transport, sleep=sleeps.append)
+    assert raised.value.code == "haiku_rate_limited"
+    assert raised.value.retry_after is None
+    assert sleeps == [1.0, 2.0]
+
+
 def test_malformed_retry_after_keeps_the_status_error_code() -> None:
     api = Api([httpx.Response(400, headers=[(b"retry-after", "٧".encode())])])
     with pytest.raises(HaikuError) as raised:
@@ -251,7 +265,9 @@ def test_transport_failures_map_to_haiku_timeout_and_retry(failure: Exception) -
     assert sleeps == [1.0, 2.0]
 
 
-@pytest.mark.parametrize("body", _refusal_bodies(), ids=["missing", "wrong_name", "bad_args", "filtered", "empty"])
+@pytest.mark.parametrize(
+    "body", _refusal_bodies(), ids=["missing", "wrong_name", "bad_args", "filtered", "empty"]
+)
 def test_no_usable_tool_call_is_refusal_without_retry(body: dict[str, object]) -> None:
     api = Api([httpx.Response(200, json=body)])
     sleeps: list[float] = []
@@ -332,3 +348,33 @@ def test_status_errors_raise_an_unchained_haiku_error() -> None:
         suggest(_settings(), MESSAGES, transport=api.transport, sleep=lambda _s: None)
     assert raised.value.code == "haiku_auth"
     _assert_key_unreachable_from(raised.value)
+
+
+@pytest.mark.parametrize(
+    ("steps", "code"),
+    [
+        ([httpx.Response(200, json=_ok_body())], None),
+        (_errors([401]), "haiku_auth"),
+        ([httpx.Response(429), httpx.Response(200, json=_ok_body())], None),
+        ([httpx.ConnectError("refused"), httpx.Response(200, json=_ok_body())], None),
+    ],
+    ids=["success", "non_retryable_error", "rate_limit_retry", "transport_retry"],
+)
+def test_key_never_appears_in_logs_stdout_or_stderr(
+    steps: list[httpx.Response | Exception],
+    code: str | None,
+    caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    api = Api(steps)
+    with caplog.at_level(logging.DEBUG):
+        if code is None:
+            suggest(_settings(), MESSAGES, transport=api.transport, sleep=lambda _s: None)
+        else:
+            with pytest.raises(HaikuError) as raised:
+                suggest(_settings(), MESSAGES, transport=api.transport, sleep=lambda _s: None)
+            assert raised.value.code == code
+    captured = capsys.readouterr()
+    assert KEY not in caplog.text
+    assert KEY not in captured.out
+    assert KEY not in captured.err
