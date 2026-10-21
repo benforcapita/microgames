@@ -578,18 +578,23 @@ describe('preview links', () => {
       await tx.unsafe('reset role');
       const [second] = await tx<{ revoked_at: Date }[]>`select revoked_at from public.preview_links where id = ${link.id}::uuid`;
       assert.equal(second.revoked_at.toISOString(), first.revoked_at.toISOString());
-      const [audited] = await tx<{ n: number }[]>`
-        select count(*)::int as n
+      const [audited] = await tx<{ matched: number; total: number }[]>`
+        select
+          count(*) filter (
+            where a.action = 'revoke_preview'
+              and a.before->>'preview_link_id' = ${link.id}
+              and jsonb_typeof(a.before->'revoked_at') = 'null'
+              and a.after->>'preview_link_id' = ${link.id}
+              and (a.after->>'revoked_at')::timestamptz = (
+                select l.revoked_at from public.preview_links as l where l.id = ${link.id}::uuid
+              )
+          )::int as matched,
+          count(*)::int as total
         from public.admin_actions as a
-        join public.preview_links as l on l.id = ${link.id}::uuid
-        where a.action = 'revoke_preview'
-          and a.game_id = ${gameId}
-          and a.before->>'preview_link_id' = ${link.id}
-          and a.before->>'revoked_at' is null
-          and a.after->>'preview_link_id' = ${link.id}
-          and (a.after->>'revoked_at')::timestamptz = l.revoked_at
+        where a.game_id = ${gameId}
       `;
-      assert.equal(audited.n, 1);
+      assert.equal(audited.matched, 1);
+      assert.equal(audited.total, 1);
       assert.deepEqual(await play(tx, link.token), []);
       const [anonExec] = await tx<{ anon_exec: boolean; auth_exec: boolean }[]>`
         select
@@ -904,6 +909,12 @@ describe('preview links', () => {
         values
           (${gameId}, ${gameId}, ${ownerId}::uuid, ${pendingCreator}, 'Unapproved Preview', 'pending', ${sql.array([tag, pendingTag])}),
           (${liveId}, ${liveId}, ${ownerId}::uuid, ${creator}, 'Live Control', 'live', ${sql.array([tag, liveTag])})
+      `;
+      const filler = `f${gameId.slice(2)}`;
+      await sql`
+        insert into public.games (id, slug, owner_id, creator, title, stage, tags)
+        select ${filler} || g::text, ${filler} || g::text, ${ownerId}::uuid, ${pendingCreator}, 'Pending tag', 'pending', ${[pendingTag]}
+        from generate_series(1, 40) as g
       `;
       const [version] = await sql<{ id: string }[]>`
         insert into public.game_validations (game_id, version, bundle_sha256, status)
