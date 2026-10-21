@@ -167,11 +167,13 @@ def test_open_exposes_http_status_and_body_stays_bounded(status: int, code: str)
 @pytest.mark.parametrize(
     ("status", "code"),
     [
+        (199, "fetch_4xx"),
         (301, "fetch_4xx"),
         (302, "fetch_4xx"),
         (307, "fetch_4xx"),
         (404, "fetch_4xx"),
         (418, "fetch_4xx"),
+        (499, "fetch_4xx"),
         (500, "fetch_5xx"),
         (503, "fetch_5xx"),
         (401, "fetch_unauthorized"),
@@ -298,17 +300,24 @@ def test_mid_stream_timeout_is_fetch_timeout() -> None:
 
 
 class _DripStream(httpx.SyncByteStream):
-    def __init__(self, clock: support.ManualClock, pulled: list[int], chunks: int = -1) -> None:
+    def __init__(
+        self,
+        clock: support.ManualClock,
+        pulled: list[int],
+        chunks: int = -1,
+        step: float = 2.0,
+    ) -> None:
         self._clock = clock
         self._pulled = pulled
         self._chunks = chunks
+        self._step = step
         self.closed = False
 
     def __iter__(self) -> Iterator[bytes]:
         left = self._chunks
         while left != 0:
             left -= 1
-            self._clock.advance(2.0)
+            self._clock.advance(self._step)
             self._pulled.append(_CHUNK)
             yield b"x" * _CHUNK
 
@@ -351,6 +360,43 @@ def test_zero_deadline_stops_before_any_open() -> None:
     assert isinstance(result, DownloadFailure)
     assert result.code == "fetch_timeout"
     assert calls == []
+
+
+def test_clock_landing_exactly_on_deadline_mid_read_is_fetch_timeout() -> None:
+    clock = support.ManualClock()
+    pulled: list[int] = []
+    stream = _DripStream(clock, pulled, chunks=2)
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=stream)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    transport = HttpxTransport(client=client, base_url="https://cdn.test/")
+    result = download_files(
+        (FileRequest(path="index.html"),), transport, timeout=4.0, clock=clock.monotonic
+    )
+    assert isinstance(result, DownloadFailure)
+    assert result.code == "fetch_timeout"
+    assert pulled == [_CHUNK, _CHUNK]
+    assert stream.closed
+
+
+def test_default_overall_timeout_is_sixty_seconds() -> None:
+    clock = support.ManualClock()
+    pulled: list[int] = []
+    stream = _DripStream(clock, pulled, chunks=3, step=30.0)
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=stream)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    transport = HttpxTransport(client=client, base_url="https://cdn.test/")
+    result = download_files(
+        (FileRequest(path="index.html"),), transport, clock=clock.monotonic
+    )
+    assert isinstance(result, DownloadFailure)
+    assert result.code == "fetch_timeout"
+    assert pulled == [_CHUNK, _CHUNK]
 
 
 def test_deadline_blocks_opening_the_next_file() -> None:

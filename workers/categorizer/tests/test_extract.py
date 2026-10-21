@@ -294,6 +294,65 @@ def test_text_asset_capped_at_four_kibibytes(tmp_path: Path) -> None:
     assert "ZZBEYONDZZ" not in result.haiku_text
 
 
+def test_text_asset_cut_at_exactly_four_kibibytes(tmp_path: Path) -> None:
+    files = [DownloadedFile(path="notes.txt", body=b"a" * 4096 + b"Z")]
+    result = extract_bundle(files, Meta(), tmp_root=tmp_path)
+    assert isinstance(result, Extract)
+    assert result.haiku_text == "a" * 4096
+
+
+def test_js_strings_capped_at_four_hundred(tmp_path: Path) -> None:
+    body = "".join(f'const s{i} = "LIT{i:04d}";\n' for i in range(401)).encode()
+    result = extract_bundle([DownloadedFile(path="app.js", body=body)], Meta(), tmp_root=tmp_path)
+    assert isinstance(result, Extract)
+    assert "LIT0399" in result.haiku_text
+    assert "LIT0400" not in result.haiku_text
+
+
+def test_js_strings_deduped_across_files(tmp_path: Path) -> None:
+    files = [
+        DownloadedFile(path="a.js", body=b'const s = "DUPMARKERX";'),
+        DownloadedFile(path="b.js", body=b'const t = "DUPMARKERX";'),
+    ]
+    result = extract_bundle(files, Meta(), tmp_root=tmp_path)
+    assert isinstance(result, Extract)
+    assert result.haiku_text.count("DUPMARKERX") == 1
+
+
+def test_mjs_file_is_tokenized_as_javascript(tmp_path: Path) -> None:
+    files = [DownloadedFile(path="app.mjs", body=b'const s = "MJSLITMARK";')]
+    result = extract_bundle(files, Meta(), tmp_root=tmp_path)
+    assert isinstance(result, Extract)
+    assert "MJSLITMARK" in result.haiku_text
+    assert [item for item in result.manifest] == [("app.mjs", 23)]
+
+
+def test_uppercase_extensions_follow_same_kinds(tmp_path: Path) -> None:
+    files = [
+        DownloadedFile(path="app.JS", body=b'const s = "UPPERJSMARK";'),
+        DownloadedFile(path="IMG.PNG", body=_png(8, 8)),
+        DownloadedFile(path="notes.TXT", body=b"UPPERTEXTMARK"),
+    ]
+    result = extract_bundle(files, Meta(), tmp_root=tmp_path)
+    assert isinstance(result, Extract)
+    assert "UPPERJSMARK" in result.haiku_text
+    assert "UPPERTEXTMARK" in result.haiku_text
+    assert [name for name, _body in result.images] == ["IMG.PNG"]
+
+
+def test_worker_returning_non_extract_is_extract_crash(tmp_path: Path) -> None:
+    result = extract_bundle(_files(), Meta(), tmp_root=tmp_path, fn=support.not_extract)
+    assert isinstance(result, ExtractFailure)
+    assert result.code == "extract_crash"
+
+
+def test_non_meta_payload_is_extract_crash(tmp_path: Path) -> None:
+    payload = support.NotMeta(title="Quack Title")
+    result = extract_bundle(_files(), payload, tmp_root=tmp_path)
+    assert isinstance(result, ExtractFailure)
+    assert result.code == "extract_crash"
+
+
 def test_binary_asset_is_manifest_only(tmp_path: Path) -> None:
     files = [DownloadedFile(path="sfx.wav", body=b"RIFF" + b"\x00" * 100)]
     result = extract_bundle(files, Meta(), tmp_root=tmp_path)

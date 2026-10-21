@@ -65,7 +65,26 @@ def test_wall_clock_kills_child(tmp_path: Path) -> None:
     )
     assert outcome.code == "extract_limit"
     assert outcome.proc.exitcode == -signal.SIGKILL
-    assert time.monotonic() - started < 15.0
+    assert time.monotonic() - started < 4.0
+    assert _gone(outcome.proc.pid)
+
+
+def test_sigxcpu_death_is_extract_limit(tmp_path: Path) -> None:
+    outcome = run_sandboxed(tmp_path, support.die_sigxcpu, None, limits=Limits())
+    assert outcome.code == "extract_limit"
+    assert outcome.proc.exitcode == -signal.SIGXCPU
+    assert _gone(outcome.proc.pid)
+
+
+def test_open_files_limit_restricts_child(tmp_path: Path) -> None:
+    outcome = run_sandboxed(
+        tmp_path,
+        support.count_openable,
+        40,
+        limits=Limits(open_files=8, wall_seconds=15.0),
+    )
+    assert outcome.code is None
+    assert outcome.value <= 8
     assert _gone(outcome.proc.pid)
 
 

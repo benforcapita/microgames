@@ -37,6 +37,13 @@ def test_script_and_style_bodies_dropped() -> None:
     assert "keep me" in parsed[0]
 
 
+def test_style_inside_body_is_dropped() -> None:
+    html = "<html><body><style>.sel{STYLETEXT}</style><p>keep</p></body></html>"
+    parsed = parse_html(html)
+    assert "STYLETEXT" not in parsed[0]
+    assert "keep" in parsed[0]
+
+
 def test_comments_captured_separately() -> None:
     html = "<html><body><!--first note--><p>x</p><!-- second --></body></html>"
     parsed = parse_html(html)

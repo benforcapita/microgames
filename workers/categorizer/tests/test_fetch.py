@@ -351,13 +351,13 @@ def test_two_files_that_sum_over_the_total_are_bundle_too_large() -> None:
 
 
 class _StatusCursor(_Cursor):
-    def __init__(self, data: bytes, status: int) -> None:
+    def __init__(self, data: bytes, status: object) -> None:
         super().__init__(data)
         self.status = status
 
 
 class _StatusTransport(_MapTransport):
-    def __init__(self, files: dict[str, bytes], status: int) -> None:
+    def __init__(self, files: dict[str, bytes], status: object) -> None:
         super().__init__(files)
         self._status = status
 
@@ -371,11 +371,15 @@ class _StatusTransport(_MapTransport):
 @pytest.mark.parametrize(
     ("status", "code"),
     [
+        (100, "fetch_4xx"),
+        (150, "fetch_4xx"),
+        (199, "fetch_4xx"),
         (301, "fetch_4xx"),
         (302, "fetch_4xx"),
         (307, "fetch_4xx"),
         (400, "fetch_4xx"),
         (404, "fetch_4xx"),
+        (499, "fetch_4xx"),
         (500, "fetch_5xx"),
         (502, "fetch_5xx"),
         (401, "fetch_unauthorized"),
@@ -404,3 +408,16 @@ def test_status_200_on_fake_source_still_downloads() -> None:
     )
     assert isinstance(result, DownloadOk)
     assert result.files[0].body == body
+
+
+@pytest.mark.parametrize("status", ["200", 200.0, None, True])
+def test_non_integer_status_is_fetch_5xx(status: object) -> None:
+    body = b"alpha"
+    transport = _StatusTransport({"index.html": body}, status)
+    result = download_files(
+        (FileRequest(path="index.html", content_sha256=_sha(body)),),
+        transport,
+    )
+    assert isinstance(result, DownloadFailure)
+    assert result.code == "fetch_5xx"
+    assert [cursor.pulled for cursor in transport.cursors] == [0]
