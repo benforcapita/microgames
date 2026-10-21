@@ -124,6 +124,28 @@ async function views(tx: Sql, id: string): Promise<number> {
   return row.view_count;
 }
 
+async function waitForLocks(probe: postgres.Sql, pids: number[]): Promise<void> {
+  const deadline = Date.now() + 3_000;
+  for (;;) {
+    const [row] = await probe<{ n: number }[]>`
+      select count(*)::int as n
+      from pg_stat_activity
+      where pid in (${pids[0]}, ${pids[1]})
+        and wait_event_type = 'Lock'
+    `;
+    if (row.n === pids.length) return;
+    if (Date.now() >= deadline) {
+      const activity = await probe<{ pid: number; wait_event_type: string | null; state: string }[]>`
+        select pid, wait_event_type, state
+        from pg_stat_activity
+        where pid in (${pids[0]}, ${pids[1]})
+      `;
+      throw new Error(`both admin revokes did not wait on the row lock: ${JSON.stringify(activity)}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+
 describe('preview links', () => {
   db('expires on the timestamp and resolves one microsecond later', async (sql) => {
     await rollback(sql, async (tx) => {
@@ -293,6 +315,25 @@ describe('preview links', () => {
         where game_id = ${gameId} and bundle_sha256 = ${sha}
       `;
       assert.deepEqual(await play(tx, link.token), []);
+      assert.equal(await views(tx, link.id), 1);
+    });
+  });
+
+  db('resolves a bundle whose confirmed category is neither nsfw nor the only safe tag', async (sql) => {
+    await rollback(sql, async (tx) => {
+      const { ownerId, versionId, gameId, sha } = await seed(tx);
+      const link = await mint(tx, ownerId, versionId);
+      const category = `extra_${gameId.slice(2)}`;
+      await tx`
+        insert into public.categories (slug, description, status, is_safety)
+        values (${category}, 'stylized combat', 'approved', false)
+      `;
+      await tx`
+        insert into public.game_tags (game_id, bundle_sha256, category_slug, status, applies)
+        values (${gameId}, ${sha}, ${category}, 'confirmed', true),
+               (${gameId}, ${sha}, 'kid_safe', 'confirmed', true)
+      `;
+      assert.equal((await play(tx, link.token)).length, 1);
       assert.equal(await views(tx, link.id), 1);
     });
   });
@@ -515,7 +556,8 @@ describe('preview links', () => {
       const [body] = await tx<{ src: string }[]>`
         select pg_get_functiondef('public.create_preview_link(uuid)'::regprocedure) as src
       `;
-      assert.match(body.src, /extensions\.gen_random_bytes\(32\)/);
+      const assignments = body.src.split('\n').filter((line) => /^\s*v_token\s*:=/.test(line));
+      assert.deepEqual(assignments.map((line) => /extensions\.gen_random_bytes\(32\)/.test(line) && !/digest\s*\(|gen_random_uuid\s*\(/.test(line)), [true]);
     });
   });
 
@@ -626,6 +668,138 @@ describe('preview links', () => {
       assert.equal(open.revoked_at, null);
       assert.equal(open.audits, 0);
     });
+  });
+
+  db('leaves the other link on that version open when an admin revokes one', async (sql) => {
+    await rollback(sql, async (tx) => {
+      const { ownerId, versionId, gameId } = await seed(tx);
+      const first = await mint(tx, ownerId, versionId);
+      const sibling = await mint(tx, ownerId, versionId);
+      const adminId = randomUUID();
+      await tx`
+        insert into auth.users (instance_id, id, aud, role, email, encrypted_password, created_at, updated_at)
+        values ('00000000-0000-0000-0000-000000000000', ${adminId}::uuid, 'authenticated', 'authenticated', ${`${adminId}@example.test`}, '', now(), now())
+      `;
+      await tx`insert into public.profiles (id, handle, role) values (${adminId}::uuid, ${`b${gameId.slice(2)}`}, 'admin')`;
+      await asRole(tx, 'authenticated', adminId);
+      await tx`select public.admin_revoke_preview_link(${first.id}::uuid)`;
+      await tx.unsafe('reset role');
+      const [rows] = await tx<{ target: Date | null; other: Date | null; audits: number }[]>`
+        select
+          (select revoked_at from public.preview_links where id = ${first.id}::uuid) as target,
+          (select revoked_at from public.preview_links where id = ${sibling.id}::uuid) as other,
+          (select count(*)::int from public.admin_actions where game_id = ${gameId}) as audits
+      `;
+      assert.ok(rows.target);
+      assert.equal(rows.other, null);
+      assert.equal(rows.audits, 1);
+      assert.deepEqual(await play(tx, first.token), []);
+      assert.equal((await play(tx, sibling.token)).length, 1);
+      assert.equal(await views(tx, sibling.id), 1);
+      assert.equal(await views(tx, first.id), 0);
+    });
+  });
+
+  db('writes one audit row when two admins revoke one link at the same time', async (sql) => {
+    const dbUrl = localDbUrl();
+    if (!dbUrl) return;
+    const ownerId = randomUUID();
+    const admins = [randomUUID(), randomUUID()];
+    const gameId = `pl${randomUUID().replaceAll('-', '').slice(0, 10)}`;
+    const clients = admins.map((_, index) => postgres(dbUrl, {
+      max: 1,
+      idle_timeout: 30,
+      connect_timeout: 3,
+      connection: { application_name: `preview-admin-${index}` },
+    }));
+    const holder = postgres(dbUrl, { max: 1, idle_timeout: 30, connect_timeout: 3 });
+    const probe = postgres(dbUrl, { max: 1, idle_timeout: 1, connect_timeout: 3 });
+    let releaseHold = () => {};
+    let holding: Promise<unknown> = Promise.resolve();
+    const attempts: Promise<string>[] = [];
+    try {
+      await sql`
+        insert into auth.users (instance_id, id, aud, role, email, encrypted_password, created_at, updated_at)
+        values ('00000000-0000-0000-0000-000000000000', ${ownerId}::uuid, 'authenticated', 'authenticated', ${`${ownerId}@example.test`}, '', now(), now())
+      `;
+      await sql`insert into public.profiles (id, handle) values (${ownerId}::uuid, ${`h${gameId.slice(2)}`})`;
+      for (const [index, adminId] of admins.entries()) {
+        await sql`
+          insert into auth.users (instance_id, id, aud, role, email, encrypted_password, created_at, updated_at)
+          values ('00000000-0000-0000-0000-000000000000', ${adminId}::uuid, 'authenticated', 'authenticated', ${`${adminId}@example.test`}, '', now(), now())
+        `;
+        await sql`insert into public.profiles (id, handle, role) values (${adminId}::uuid, ${`a${index}${gameId.slice(2, 12)}`}, 'admin')`;
+      }
+      await sql`
+        insert into public.games (id, slug, owner_id, creator, title, stage)
+        values (${gameId}, ${gameId}, ${ownerId}::uuid, 'owner', 'Preview Title', 'pending')
+      `;
+      const [version] = await sql<{ id: string }[]>`
+        insert into public.game_validations (game_id, version, bundle_sha256, status)
+        values (${gameId}, 1, ${bundle('34')}, 'passed')
+        returning id
+      `;
+      const link = await sql.begin((tx) => mint(tx, ownerId, version.id));
+      const pids = await Promise.all(clients.map(async (client) => {
+        const [row] = await client<{ pid: number }[]>`select pg_backend_pid() as pid`;
+        return row.pid;
+      }));
+      assert.equal(new Set(pids).size, clients.length);
+      let markLocked = () => {};
+      const locked = new Promise<void>((resolve) => { markLocked = resolve; });
+      const holdGate = new Promise<void>((resolve) => { releaseHold = resolve; });
+      holding = holder.begin(async (tx) => {
+        await tx`select id from public.preview_links where id = ${link.id}::uuid for update`;
+        markLocked();
+        await holdGate;
+      });
+      await locked;
+      attempts.push(...clients.map(async (client, index) => {
+        await client.unsafe(`set lock_timeout = '4s'`);
+        return client.begin(async (tx) => {
+          await asRole(tx, 'authenticated', admins[index]);
+          await tx`select public.admin_revoke_preview_link(${link.id}::uuid)`;
+          await tx.unsafe('reset role');
+          const [seen] = await tx<{ revoked_at: string }[]>`
+            select revoked_at::text as revoked_at from public.preview_links where id = ${link.id}::uuid
+          `;
+          return seen.revoked_at;
+        });
+      }));
+      await waitForLocks(probe, pids);
+      releaseHold();
+      await holding;
+      const stamps = await Promise.all(attempts);
+      const [row] = await probe<{ revoked_at: string; total: number; matched: number }[]>`
+        select
+          l.revoked_at::text as revoked_at,
+          (
+            select count(*)::int from public.admin_actions as a where a.game_id = ${gameId}
+          ) as total,
+          (
+            select count(*)::int
+            from public.admin_actions as a
+            where a.game_id = ${gameId}
+              and a.action = 'revoke_preview'
+              and a.before->>'preview_link_id' = ${link.id}
+              and jsonb_typeof(a.before->'revoked_at') = 'null'
+              and a.after->>'preview_link_id' = ${link.id}
+              and (a.after->>'revoked_at')::timestamptz = l.revoked_at
+          ) as matched
+        from public.preview_links as l
+        where l.id = ${link.id}::uuid
+      `;
+      assert.equal(stamps[0], stamps[1]);
+      assert.equal(row.revoked_at, stamps[0]);
+      assert.equal(row.total, 1);
+      assert.equal(row.matched, 1);
+    } finally {
+      releaseHold();
+      await Promise.allSettled([holding, ...attempts]);
+      await Promise.all([holder, probe, ...clients].map((client) => client.end({ timeout: 1 }).catch(() => {})));
+      await sql`delete from public.admin_actions where game_id = ${gameId}`;
+      await sql`delete from auth.users where id in (${ownerId}::uuid, ${admins[0]}::uuid, ${admins[1]}::uuid)`;
+    }
   });
 
   db('stops the eleventh create within an hour after the earlier links are revoked', async (sql) => {
