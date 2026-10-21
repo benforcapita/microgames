@@ -143,6 +143,22 @@ def test_temp_dir_is_private_and_removed_on_success(
     assert list(tmp_path.iterdir()) == []
 
 
+def test_temp_dir_mode_0700_while_staging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    modes: list[int] = []
+    real_stage = bundle_mod.stage_files
+
+    def wrapped(root: Path, files: Sequence[DownloadedFile]) -> bool:
+        modes.append(stat.S_IMODE(os.stat(root).st_mode))
+        return real_stage(root, files)
+
+    monkeypatch.setattr(bundle_mod, "stage_files", wrapped)
+    result = extract_bundle(_files(), _meta(), tmp_root=tmp_path)
+    assert isinstance(result, Extract)
+    assert modes == [0o700]
+
+
 def test_temp_dir_removed_mid_batch_rejection(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
