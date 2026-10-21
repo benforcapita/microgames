@@ -18,10 +18,14 @@ import {
   ratingGuard,
   ratingWritesByUser,
   secureCookie,
+  sessionIpSubject,
   sessionStartByIp,
   sessionStartByUid,
   telemetryByUid,
 } from './abuse.ts';
+
+const TEST_SECRET = 'mg8b-a-test-secret-0000000000000';
+process.env.MG_IP_HASH_SECRET = TEST_SECRET;
 
 describe('session_start limiter', () => {
   it('allows repeated session_start from same uid+game within window once (simulate 50 hits -> 1 allowed)', () => {
@@ -77,6 +81,20 @@ describe('IP limiter', () => {
       }
     }
     assert.equal(allowed, 20);
+  });
+
+  it('drops a hit exactly windowMs old at the window boundary', () => {
+    let t = 0;
+    const limiter = createLimiter({ windowMs: 1000, max: 2, now: () => t });
+    assert.equal(limiter.hit('k'), true);
+    t = 500;
+    assert.equal(limiter.hit('k'), true);
+    t = 999;
+    assert.equal(limiter.check('k'), false);
+    assert.equal(limiter.hit('k'), false);
+    t = 1000;
+    assert.equal(limiter.check('k'), true);
+    assert.equal(limiter.hit('k'), true);
   });
 });
 
@@ -192,6 +210,11 @@ describe('clientIp', () => {
     assert.equal(counted, 25);
   });
 
+  it('on Vercel, takes the leftmost x-vercel-forwarded-for hop', () => {
+    const headers = new Headers({ 'x-vercel-forwarded-for': '203.0.113.9, 10.1.1.1, 10.2.2.2' });
+    assert.equal(clientIp(headers, '10.0.0.1', true), '203.0.113.9');
+  });
+
   it('falls back to x-real-ip on Vercel, then the socket', () => {
     assert.equal(clientIp(new Headers({ 'x-real-ip': '198.51.100.7' }), '10.0.0.1', true), '198.51.100.7');
     assert.equal(clientIp(new Headers(), '10.0.0.1', true), '10.0.0.1');
@@ -215,6 +238,86 @@ describe('secureCookie', () => {
     assert.equal(secureCookie('http:', false, true), true);
     assert.equal(secureCookie('https:', false, false), true);
     assert.equal(secureCookie('http:', false, false), false);
+  });
+});
+
+describe('sessionIpSubject', () => {
+  const ip = '203.0.113.44';
+  const noon = new Date(Date.UTC(2026, 9, 19, 12));
+
+  it('is stable within a UTC day and rotates across UTC days', () => {
+    const day = sessionIpSubject(ip, 's1', noon);
+    assert.equal(sessionIpSubject(ip, 's1', new Date(Date.UTC(2026, 9, 19, 23, 59))), day);
+    assert.notEqual(sessionIpSubject(ip, 's1', new Date(Date.UTC(2026, 9, 20, 0, 30))), day);
+  });
+
+  it('differs per ip and per secret, is 64-hex, and never exposes the ip', () => {
+    const a = sessionIpSubject(ip, 's1', noon);
+    assert.match(a, /^[0-9a-f]{64}$/);
+    assert.notEqual(sessionIpSubject('198.51.100.9', 's1', noon), a);
+    assert.notEqual(sessionIpSubject(ip, 's2', noon), a);
+    assert.equal(a.includes(ip), false);
+  });
+});
+
+describe('admitSessionStart ip keys', () => {
+  it('spends the ip budget under the hashed subject, never the raw ip', () => {
+    const byIp = createLimiter({ windowMs: 60_000, max: 1 });
+    const byUid = createLimiter({ windowMs: 60_000, max: 1 });
+    const devA = '00000000-0000-4000-8000-0000000000aa';
+    const devB = '00000000-0000-4000-8000-0000000000bb';
+    assert.equal(admitSessionStart(devA, '203.0.113.7', 'g', byUid, byIp), true);
+    assert.equal(byIp.check('203.0.113.7:g'), true, 'raw ip must not be a limiter key');
+    assert.equal(
+      admitSessionStart(devB, '203.0.113.7', 'g', byUid, byIp),
+      false,
+      'the same ip still dedupes through the hashed subject',
+    );
+  });
+
+  it('an ip that exhausts its hourly starts on one game is still admitted on another', () => {
+    const byIp = createLimiter({ windowMs: 60 * 60_000, max: 20 });
+    const byUid = createLimiter({ windowMs: 30 * 60_000, max: 1 });
+    const dev = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
+    for (let i = 0; i < 20; i++) {
+      assert.equal(admitSessionStart(dev(i), '203.0.113.21', 'g1', byUid, byIp), true, `start ${i + 1}`);
+    }
+    assert.equal(admitSessionStart(dev(20), '203.0.113.21', 'g1', byUid, byIp), false, 'g1 budget spent');
+    assert.equal(admitSessionStart(dev(21), '203.0.113.21', 'g2', byUid, byIp), true, 'g2 has its own budget');
+    assert.equal(admitSessionStart(dev(22), '203.0.113.22', 'g1', byUid, byIp), true, 'other ip unaffected');
+  });
+
+  it('fails closed when MG_IP_HASH_SECRET is unset, empty, or shorter than 32 chars', () => {
+    const prev = process.env.MG_IP_HASH_SECRET;
+    const dev = '00000000-0000-4000-8000-0000000000aa';
+    try {
+      for (const v of [undefined, '', 'x'.repeat(31)]) {
+        if (v === undefined) delete process.env.MG_IP_HASH_SECRET;
+        else process.env.MG_IP_HASH_SECRET = v;
+        assert.throws(
+          () => admitSessionStart(dev, '203.0.113.7', 'g'),
+          (e: unknown) =>
+            e instanceof Error &&
+            /MG_IP_HASH_SECRET/.test(e.message) &&
+            !e.message.includes('203.0.113.7') &&
+            (v === undefined || v === '' || !e.message.includes(v)),
+        );
+      }
+    } finally {
+      process.env.MG_IP_HASH_SECRET = prev ?? TEST_SECRET;
+    }
+  });
+
+  it('accepts a 32-char MG_IP_HASH_SECRET', () => {
+    const prev = process.env.MG_IP_HASH_SECRET;
+    process.env.MG_IP_HASH_SECRET = 'x'.repeat(32);
+    try {
+      const byIp = createLimiter({ windowMs: 60_000, max: 1 });
+      const byUid = createLimiter({ windowMs: 60_000, max: 1 });
+      assert.equal(admitSessionStart('00000000-0000-4000-8000-0000000000aa', '203.0.113.7', 'g', byUid, byIp), true);
+    } finally {
+      process.env.MG_IP_HASH_SECRET = prev ?? TEST_SECRET;
+    }
   });
 });
 

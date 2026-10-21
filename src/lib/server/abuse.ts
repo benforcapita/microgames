@@ -127,6 +127,12 @@ export function createRatingGuard(opts?: RatingGuardOptions): {
 
 export const sessionStartByUid = createLimiter({ windowMs: 30 * 60_000, max: 1 });
 export const sessionStartByIp = createLimiter({ windowMs: 60 * 60_000, max: 20 });
+
+export function sessionIpSubject(ip: string, secret: string, at: Date): string {
+  const dayKey = crypto.createHmac('sha256', secret).update(at.toISOString().slice(0, 10)).digest();
+  return crypto.createHmac('sha256', dayKey).update(ip).digest('hex');
+}
+
 export const telemetryByUid = createLimiter({ windowMs: 60_000, max: 120 });
 export const ratingGuard = createRatingGuard();
 
@@ -209,8 +215,10 @@ export function admitSessionStart(
   uid: string, ip: string, gameId: string,
   byUid: Limiter = sessionStartByUid, byIp: Limiter = sessionStartByIp,
 ): boolean {
+  const secret = process.env.MG_IP_HASH_SECRET;
+  if (!secret || secret.length < 32) throw new Error('Missing required env var MG_IP_HASH_SECRET (see .env.example)');
   const uidKey = `${uid}:${gameId}`;
   if (!byUid.check(uidKey)) return false;
-  if (!byIp.hit(`${ip}:${gameId}`)) return false;
+  if (!byIp.hit(`${sessionIpSubject(ip, secret, new Date())}:${gameId}`)) return false;
   return byUid.hit(uidKey);
 }

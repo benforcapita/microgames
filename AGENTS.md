@@ -20,6 +20,7 @@ Open exchange for single-file browser games (Three.js etc.). Astro 7 SSR (`@astr
 - `cdn/boot.js` — in-game runtime: rAF/clock/audio pause, localStorage shim, telemetry, `window.Meshground`
 - `src/client/player.ts` — portal side of the postMessage protocol (telemetry, ads, saves → `/api/saves/:gameId` when logged in, else browser localStorage)
 - `public/EXCHANGE_SDK.md` — prompt file creators paste into their AI coding tool; keep message types in sync with `player.ts` / `boot.js`
+- PWA: `public/manifest.webmanifest`, `public/sw.js` (never caches HTML; only `/_astro/` + `/icons/`, offline fallback `public/offline.html`; bump `VERSION` to evict), icons in `public/icons/`. `src/components/InstallPrompt.astro` + `src/client/install-prompt.ts` (rendered by `Layout.astro`) show a phone-only install banner: native prompt via `beforeinstallprompt` on Android, Share → Add to Home Screen instructions on iOS; "Not now" snoozes 14 days (`localStorage['mg:install-dismissed']`)
 - Game iframes use `sandbox="allow-scripts allow-pointer-lock"` — never add `allow-same-origin`
 - Uploading, rating, and cloud saves require login; playing does not.
 - Upload form lives on `/me#upload` (`src/components/UploadSection.astro`); `/upload` is a redirect alias that also carries `?fork=`. `/me` therefore gets the blob `frame-src` CSP.

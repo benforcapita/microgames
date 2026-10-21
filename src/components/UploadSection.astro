@@ -113,7 +113,9 @@ const hasMcp = Astro.slots.has('mcp');
 </section>
 
 <style>
-  .upload { display: grid; grid-template-columns: 1fr 1.3fr; gap: 2.5rem; align-items: start; scroll-margin-top: 80px; }
+  .upload { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr); gap: 2.5rem; align-items: start; scroll-margin-top: 80px; }
+  /* Grid items default to min-width: auto, so one long unbroken line (a prompt, a snippet) would widen the page. */
+  .upload > * { min-width: 0; }
   .intro { position: sticky; top: 90px; display: grid; gap: 1rem; }
   .intro p { margin: 0; }
   .fork { border-color: #ff4fd855; }
@@ -158,7 +160,7 @@ const hasMcp = Astro.slots.has('mcp');
   #asset-warnings :global(li), #asset-warnings :global(p) { overflow-wrap: anywhere; }
   #asset-warnings :global(.warn) { color: var(--warn); }
   @media (max-width: 860px) {
-    .upload, .two, .snap { grid-template-columns: 1fr; }
+    .upload, .two, .snap { grid-template-columns: minmax(0, 1fr); }
     .intro { position: static; }
   }
 </style>

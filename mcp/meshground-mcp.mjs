@@ -129,21 +129,24 @@ const TOOLS = [
     name: 'update_game',
     title: 'Update an unpublished game',
     description:
-      'Replaces the HTML (and optionally the thumbnail) of one of your games that is not published yet (validating, awaiting review, or rejected). It goes back through validation. Published games cannot be replaced; publish a new game with fork_of instead.',
+      'Replaces the HTML, the thumbnail, or both, of one of your games that is not published yet (validating, awaiting review, or rejected). New HTML goes back through validation; a thumbnail alone does not. Published games cannot be replaced; publish a new game with fork_of instead.',
     inputSchema: {
       type: 'object',
       properties: {
         game: { type: 'string', description: 'Game id or slug (see list_my_games).' },
-        html: { type: 'string', description: 'The complete new HTML document. Use this or html_path.' },
+        html: { type: 'string', description: 'The complete new HTML document. Use this or html_path, or omit both to change only the thumbnail.' },
         html_path: { type: 'string', description: 'Absolute path to a local .html file. Use this or html.' },
-        thumbnail_path: { type: 'string', description: 'Optional new PNG/JPEG/WebP thumbnail, at most 640×360 and under 512 KB.' },
+        thumbnail_path: { type: 'string', description: 'New PNG/JPEG/WebP thumbnail, at most 640×360 and under 512 KB.' },
       },
       required: ['game'],
     },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
     run: async (args) => {
-      const html = await gameHtml(args);
       const thumbnail = args.thumbnail_path ? await thumbnailFile(args.thumbnail_path) : undefined;
+      if (!thumbnail && !args.html && !args.html_path) {
+        throw new ToolError('Pass the new game as `html` or `html_path`, a new `thumbnail_path`, or both.');
+      }
+      const html = args.html || args.html_path ? await gameHtml(args) : undefined;
       const { game } = await api(`/api/v1/games/${encodeURIComponent(String(args.game ?? ''))}`, { method: 'PUT', body: { html, thumbnail } });
       return `Updated "${game.title}" (id ${game.id}). Status: ${game.status}.\nTrack validation and review: ${game.submissionUrl}`;
     },
@@ -313,7 +316,8 @@ export function placeholderThumbnail(title) {
     draw(line, left + Math.max(1, scale >> 1), y + Math.max(1, scale >> 1), scale, [0, 0, 0], 0.45);
     draw(line, left, y, scale, [255, 255, 255], 1);
   });
-  draw('MESHGROUND', 12, H - 20, 1, [255, 255, 255], 0.55);
+  draw('MESHGROUND', 13, H - 23, 2, [0, 0, 0], 0.45);
+  draw('MESHGROUND', 12, H - 24, 2, [255, 255, 255], 0.8);
   return encodePng(W, H, raw);
 }
 
