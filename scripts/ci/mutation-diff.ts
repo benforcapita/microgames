@@ -28,6 +28,7 @@ type EquivalentMutant = {
   line: number;
   mutator: string;
   replacement: string;
+  justification: string;
 };
 
 type SurvivorJudgment = { kind: 'equivalent'; mutant: Mutant } | { kind: 'gap'; mutant: Mutant };
@@ -59,6 +60,7 @@ type SummaryState = {
   patterns: readonly string[];
   harness: readonly RepoPath[];
   outside: readonly RepoPath[];
+  unmutated: readonly RepoPath[];
   judgments: readonly SurvivorJudgment[];
   error: string | null;
 };
@@ -100,8 +102,7 @@ type StrykerRunConfig = {
   coverageAnalysis: 'off';
   commandRunner: { command: string };
   mutate: string[];
-  incremental: true;
-  incrementalFile: string;
+  incremental: false;
   reporters: ['clear-text', 'json'];
   jsonReporter: { fileName: string };
   thresholds: { high: 100; low: 100; break: null };
@@ -130,7 +131,7 @@ export function mutationBase(raw: string | undefined): string {
 
 function isRepoPath(value: string): value is RepoPath {
   if (value.length === 0 || value.length > 400) return false;
-  if (!/^[A-Za-z0-9._@/-]+$/.test(value)) return false;
+  if (!/^[A-Za-z0-9._@/\[\]-]+$/.test(value)) return false;
   return value.split('/').every((part) => part.length > 0 && part !== '.' && part !== '..');
 }
 
@@ -167,6 +168,23 @@ function isOutsideCode(file: RepoPath): boolean {
   return CODE_FILE.test(file) || file.endsWith('.py');
 }
 
+function headerPaths(line: string): Parsed<RepoPath[]> {
+  const prefix = 'diff --git ';
+  if (!line.startsWith(prefix)) return fail(`diff header is not a repo path: ${line}`);
+  if (line.includes('"')) return fail(`quoted diff path is not supported: ${line}`);
+  const rest = line.slice(prefix.length);
+  const split = rest.lastIndexOf(' b/');
+  if (!rest.startsWith('a/') || split < 2) return fail(`diff header is not a repo path: ${line}`);
+  const before = rest.slice(2, split);
+  const after = rest.slice(split + 3);
+  const paths: RepoPath[] = [];
+  for (const candidate of [before, after]) {
+    if (!isRepoPath(candidate)) return fail(`diff path is not a repo path: ${candidate}`);
+    if (!paths.includes(candidate)) paths.push(candidate);
+  }
+  return { ok: true, value: paths };
+}
+
 function pathFromPlus(line: string): Parsed<RepoPath | null> {
   const raw = line.slice(4).trim();
   if (raw === '/dev/null') return { ok: true, value: null };
@@ -177,17 +195,22 @@ function pathFromPlus(line: string): Parsed<RepoPath | null> {
 }
 
 export function parseChangedFiles(diff: string): Parsed<ChangedFile[]> {
-  const files: ChangedFile[] = [];
+  const lineSets = new Map<RepoPath, Set<number>>();
   let pathName: RepoPath | null = null;
-  let lines = new Set<number>();
   let newLine = 0;
   let inHunk = false;
   let open = false;
 
+  const ensure = (file: RepoPath): Set<number> => {
+    const existing = lineSets.get(file);
+    if (existing) return existing;
+    const created = new Set<number>();
+    lineSets.set(file, created);
+    return created;
+  };
+
   const flush = (): void => {
-    if (pathName && lines.size > 0) files.push({ path: pathName, lines });
     pathName = null;
-    lines = new Set();
     newLine = 0;
     inHunk = false;
     open = false;
@@ -197,6 +220,9 @@ export function parseChangedFiles(diff: string): Parsed<ChangedFile[]> {
     const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
     if (line.startsWith('diff --git ')) {
       flush();
+      const header = headerPaths(line);
+      if (!header.ok) return header;
+      for (const file of header.value) ensure(file);
       open = true;
       continue;
     }
@@ -218,7 +244,7 @@ export function parseChangedFiles(diff: string): Parsed<ChangedFile[]> {
     }
     if (!inHunk) continue;
     if (line.startsWith('+')) {
-      if (pathName && newLine > 0) lines.add(newLine);
+      if (pathName && newLine > 0) ensure(pathName).add(newLine);
       newLine += 1;
       continue;
     }
@@ -226,7 +252,7 @@ export function parseChangedFiles(diff: string): Parsed<ChangedFile[]> {
     newLine += 1;
   }
   flush();
-  return { ok: true, value: files };
+  return { ok: true, value: [...lineSets].map(([filePath, lines]) => ({ path: filePath, lines })) };
 }
 
 function classify(files: readonly ChangedFile[]): ClassifiedDiff {
@@ -271,12 +297,31 @@ function rangesFor(lines: ReadonlySet<number>): Array<{ start: number; end: numb
   return ranges;
 }
 
+function strykerMutatePath(file: RepoPath): string {
+  return file.replaceAll(/[\[\]]/g, (character) => (character === '[' ? '[[]' : '[]]'));
+}
+
 function mutatePatterns(files: readonly ChangedFile[]): string[] {
   const patterns: string[] = [];
   for (const file of files) {
-    for (const range of rangesFor(file.lines)) patterns.push(`${file.path}:${range.start}-${range.end}`);
+    const mutatePath = strykerMutatePath(file.path);
+    for (const range of rangesFor(file.lines)) patterns.push(`${mutatePath}:${range.start}-${range.end}`);
   }
   return patterns;
+}
+
+function isUnmutatedSurface(file: RepoPath): boolean {
+  if (file.endsWith('.sql') || file.endsWith('.astro') || file.endsWith('.py')) return true;
+  return file.startsWith('admin/') || file.startsWith('supabase/') || file.startsWith('workers/');
+}
+
+function unmutatedSurfaces(files: readonly ChangedFile[]): RepoPath[] {
+  const found = new Set<RepoPath>();
+  for (const file of files) {
+    if (isMutable(file.path) || !isUnmutatedSurface(file.path)) continue;
+    found.add(file.path);
+  }
+  return [...found].sort((left, right) => left.localeCompare(right));
 }
 
 function candidatePaths(resolved: string): string[] {
@@ -323,8 +368,7 @@ function buildConfig(patterns: readonly string[], command: string, reportDir: st
     coverageAnalysis: 'off',
     commandRunner: { command },
     mutate: [...patterns],
-    incremental: true,
-    incrementalFile: `${reportDir}/stryker-incremental.json`,
+    incremental: false,
     reporters: ['clear-text', 'json'],
     jsonReporter: { fileName: `${reportDir}/mutation.json` },
     thresholds: { high: 100, low: 100, break: null },
@@ -441,9 +485,11 @@ function parseEquivalents(text: string): Parsed<EquivalentMutant[]> {
     const replacement = entry.replacement;
     if (typeof file !== 'string' || !isRepoPath(file)) return fail('equivalent file is invalid');
     if (typeof line !== 'number' || !Number.isInteger(line) || line < 1) return fail('equivalent line is invalid');
+    const justification = entry.justification;
     if (typeof mutator !== 'string' || mutator.length === 0) return fail('equivalent mutator is invalid');
     if (typeof replacement !== 'string') return fail('equivalent replacement is invalid');
-    entries.push({ file, line, mutator, replacement });
+    if (typeof justification !== 'string' || justification.trim() === '') return fail('equivalent justification is required');
+    entries.push({ file, line, mutator, replacement, justification: justification.trim() });
   }
   return { ok: true, value: entries };
 }
@@ -462,8 +508,8 @@ function judgeMutants(mutants: readonly Mutant[], changed: ReadonlyMap<RepoPath,
     switch (mutant.status) {
       case 'Killed':
       case 'Timeout':
-      case 'Ignored':
         break;
+      case 'Ignored':
       case 'Survived':
         judgments.push(isListed(mutant, equivalents) ? { kind: 'equivalent', mutant } : { kind: 'gap', mutant });
         break;
@@ -502,8 +548,13 @@ function recordOf(judgment: SurvivorJudgment): SurvivorRecord {
   };
 }
 
+function warningLine(file: RepoPath): string {
+  const safe = file.replaceAll('%', '%25').replaceAll('\r', '%0D').replaceAll('\n', '%0A');
+  return `::warning::Changed file is not mutation-tested: ${safe}`;
+}
+
 function renderSummary(state: SummaryState): string {
-  const lines = ['## Mutation survivors', '', `Diff base: \`${cell(state.baseRef)}\`.`, ''];
+  const lines = [...state.unmutated.map(warningLine), '## Mutation survivors', '', `Diff base: \`${cell(state.baseRef)}\`.`, ''];
   if (state.error) lines.push(state.error, '');
   if (state.diffKnown && state.patterns.length === 0) lines.push('No changed production lines to mutate.', '');
   if (state.patterns.length > 0) {
@@ -572,7 +623,7 @@ function finish(request: MutationRequest, deps: MutationDeps, exitCode: number, 
 }
 
 function emptyState(baseRef: string, error: string | null, diffKnown: boolean): SummaryState {
-  return { baseRef, diffKnown, patterns: [], harness: [], outside: [], judgments: [], error };
+  return { baseRef, diffKnown, patterns: [], harness: [], outside: [], unmutated: [], judgments: [], error };
 }
 
 export function runMutation(request: MutationRequest, deps: MutationDeps): MutationRun {
@@ -595,13 +646,14 @@ export function runMutation(request: MutationRequest, deps: MutationDeps): Mutat
     patterns,
     harness: classified.harness,
     outside: classified.outside,
+    unmutated: unmutatedSurfaces(parsed.value),
   };
+  const equivalentsText = deps.readText(request.equivalentsPath);
+  const equivalents = equivalentsText === null ? emptyEquivalents() : parseEquivalents(equivalentsText);
+  if (!equivalents.ok) return finish(request, deps, 1, { ...baseState, judgments: [], error: equivalents.message });
   if (patterns.length === 0) {
     return finish(request, deps, 0, { ...baseState, judgments: [], error: null });
   }
-  const equivalentsText = deps.readText(request.equivalentsPath);
-  const equivalents = equivalentsText === null || equivalentsText.trim() === '' ? emptyEquivalents() : parseEquivalents(equivalentsText);
-  if (!equivalents.ok) return finish(request, deps, 1, { ...baseState, judgments: [], error: equivalents.message });
   const tests = testsFor(classified.targets.map((file) => file.path), deps.testSources());
   const configPath = `${request.reportDir}/stryker.config.json`;
   deps.writeText(configPath, `${JSON.stringify(buildConfig(patterns, testCommand(tests), request.reportDir), null, 2)}\n`);

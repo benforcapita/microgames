@@ -98,6 +98,9 @@ jobs:
     name: mutation (${{ matrix.run }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: write
     strategy:
       fail-fast: false
       matrix:
@@ -114,13 +117,6 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - name: Cache Stryker incremental results
-        uses: actions/cache@v4
-        with:
-          path: reports/stryker-incremental.json
-          key: stryker-${{ runner.os }}-${{ hashFiles('package-lock.json', 'scripts/ci/mutation-diff.ts') }}-${{ github.event.pull_request.head.sha || github.sha }}-${{ matrix.run }}
-          restore-keys: |
-            stryker-${{ runner.os }}-${{ hashFiles('package-lock.json', 'scripts/ci/mutation-diff.ts') }}-
       - name: Mutation test changed lines
         env:
           MUTATION_BASE: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || github.event.before }}

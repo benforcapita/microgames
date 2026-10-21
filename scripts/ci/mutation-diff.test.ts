@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import { Minimatch, minimatch } from 'minimatch';
 import os from 'node:os';
 import path from 'node:path';
 import { after, describe, it } from 'node:test';
@@ -134,6 +135,19 @@ function artifact(files: Map<string, string>): SurvivorArtifact {
   return { error: typeof parsed.error === 'string' || parsed.error === null ? parsed.error : 'invalid error', gaps, equivalents: parsed.equivalents };
 }
 
+function strykerWouldMutate(pattern: string, file: string): boolean {
+  const match = /^(.*?):(\d+)(?::\d+)?-(\d+)(?::\d+)?$/.exec(pattern);
+  const filePattern = match?.[1];
+  const start = match?.[2];
+  const end = match?.[3];
+  if (filePattern === undefined || start === undefined || end === undefined) return false;
+  if (new Minimatch(pattern).hasMagic()) return false;
+  const startLine = Number(start);
+  const endLine = Number(end);
+  if (startLine < 1 || startLine > endLine) return false;
+  return minimatch(path.resolve(file), path.resolve(filePattern), { dot: false });
+}
+
 function configOf(files: Map<string, string>): StrykerConfig {
   const raw = files.get('reports/stryker.config.json');
   assert.ok(raw, 'stryker config was written');
@@ -220,11 +234,36 @@ describe('runMutation', () => {
     const box = memory({ diff: diffFor('workers/categorizer/scan.py', ['def scan():', '    return 1']) });
     const result = runMutation(request(), box.deps);
     assert.equal(result.exitCode, 0);
-    assert.match(result.summary, /workers\/categorizer\/scan\.py/);
+    assert.match(result.summary, /::warning::.*workers\/categorizer\/scan\.py/);
     assert.deepEqual(box.strykerCalls, []);
   });
 
-  it('asks Stryker for incremental mutation of the changed lines and the tests that import them', () => {
+  it('warns for changed SQL, Astro, admin, Supabase, worker, and Python files', () => {
+    const unmutated = [
+      'supabase/migrations/001_init.sql',
+      'src/pages/index.astro',
+      'admin/src/main.ts',
+      'workers/categorizer/scan.py',
+    ];
+    const box = memory({
+      diff: [
+        ...unmutated.map((file) => diffFor(file, ['export const value = 1;'])),
+        diffFor('src/lib/add.ts', ['export const value = 1;']),
+        diffFor('README.md', ['# title']),
+      ].join('\n'),
+      report: report('src/lib/add.ts', [mutant({ status: 'Killed' })]),
+    });
+    const result = runMutation(request(), box.deps);
+    assert.equal(result.exitCode, 0);
+    for (const file of unmutated) {
+      assert.match(result.summary, new RegExp(`::warning::.*${file.replaceAll('/', '\\/')}`));
+    }
+    assert.doesNotMatch(result.summary, /::warning::.*src\/lib\/add\.ts/);
+    assert.doesNotMatch(result.summary, /::warning::.*README\.md/);
+    assert.equal(box.strykerCalls.length, 1);
+  });
+
+  it('mutates changed lines without reusing an incremental cache', () => {
     const box = memory({
       diff: [
         diffFor('src/lib/add.ts', ['export function add(left: number, right: number): number {', '  return left + right;', '}']).trimEnd(),
@@ -241,7 +280,8 @@ describe('runMutation', () => {
     const result = runMutation(request(), box.deps);
     assert.equal(result.exitCode, 0);
     const config = configOf(box.files);
-    assert.equal(config.incremental, true);
+    assert.equal(config.incremental, false);
+    assert.equal(box.files.get('reports/stryker.config.json')?.includes('incrementalFile'), false);
     assert.equal(config.coverageAnalysis, 'off');
     assert.equal(config.concurrency, 2);
     assert.equal(config.timeoutMS, 10000);
@@ -292,8 +332,20 @@ describe('runMutation', () => {
       'scripts/ci/mutation-equivalents.json',
       JSON.stringify({
         equivalents: [
-          { file: 'src/lib/add.ts', line: 2, mutator: 'ArithmeticOperator', replacement: '-' },
-          { file: 'src/lib/add.ts', line: 2, mutator: 'BlockStatement', replacement: '{}' },
+          {
+            file: 'src/lib/add.ts',
+            line: 2,
+            mutator: 'ArithmeticOperator',
+            replacement: '-',
+            justification: 'The swapped operator is equivalent for this identity.',
+          },
+          {
+            file: 'src/lib/add.ts',
+            line: 2,
+            mutator: 'BlockStatement',
+            replacement: '{}',
+            justification: 'Listed so the allowlist itself is valid; NoCoverage still fails.',
+          },
         ],
       }),
     );
@@ -313,12 +365,160 @@ describe('runMutation', () => {
     });
     box.files.set(
       'scripts/ci/mutation-equivalents.json',
-      JSON.stringify({ equivalents: [{ file: 'src/lib/add.ts', line: 2, mutator: 'ArithmeticOperator', replacement: '-' }] }),
+      JSON.stringify({
+        equivalents: [
+          {
+            file: 'src/lib/add.ts',
+            line: 2,
+            mutator: 'ArithmeticOperator',
+            replacement: '-',
+            justification: 'The swapped operator is equivalent for this identity.',
+          },
+        ],
+      }),
     );
     const result = runMutation(request(), box.deps);
     assert.equal(result.exitCode, 0);
     assert.deepEqual(artifact(box.files).gaps, []);
     assert.equal(artifact(box.files).equivalents.length, 1);
+  });
+
+  it('fails when a changed line ignores a mutant', () => {
+    const box = memory({
+      diff: diffFor('src/lib/add.ts', ['export function add(left: number, right: number): number {', '  return left + right;', '}']),
+      report: report('src/lib/add.ts', [mutant({ status: 'Ignored', replacement: '' })]),
+    });
+    const result = runMutation(request(), box.deps);
+    assert.equal(result.exitCode, 1);
+    assert.equal(artifact(box.files).error, null);
+    assert.equal(artifact(box.files).gaps[0]?.status, 'Ignored');
+    assert.equal(artifact(box.files).equivalents.length, 0);
+  });
+
+  it('fails when an allowlist entry has no justification', () => {
+    const entry = { file: 'src/lib/add.ts', line: 2, mutator: 'ArithmeticOperator', replacement: '-' };
+    const payloads = [entry, { ...entry, justification: '   ' }];
+    for (const payload of payloads) {
+      const box = memory({
+        diff: diffFor('src/lib/add.ts', ['export function add(left: number, right: number): number {', '  return left + right;', '}']),
+        report: report('src/lib/add.ts', [mutant()]),
+      });
+      box.files.set('scripts/ci/mutation-equivalents.json', JSON.stringify({ equivalents: [payload] }));
+      const result = runMutation(request(), box.deps);
+      assert.equal(result.exitCode, 1);
+      assert.match(result.summary, /justification/);
+      assert.deepEqual(artifact(box.files).gaps, []);
+      assert.equal(artifact(box.files).equivalents.length, 0);
+    }
+  });
+
+  it('does not waive an ignored mutant when the allowlist names a different replacement', () => {
+    const box = memory({
+      diff: diffFor('src/lib/add.ts', ['export function add(left: number, right: number): number {', '  return left + right;', '}']),
+      report: report('src/lib/add.ts', [mutant({ status: 'Ignored', replacement: '' })]),
+    });
+    box.files.set(
+      'scripts/ci/mutation-equivalents.json',
+      JSON.stringify({
+        equivalents: [
+          {
+            file: 'src/lib/add.ts',
+            line: 2,
+            mutator: 'ArithmeticOperator',
+            replacement: 'other',
+            justification: 'This entry names a different replacement.',
+          },
+        ],
+      }),
+    );
+    const result = runMutation(request(), box.deps);
+    assert.equal(result.exitCode, 1);
+    assert.equal(artifact(box.files).gaps[0]?.status, 'Ignored');
+    assert.equal(artifact(box.files).equivalents.length, 0);
+  });
+
+  it('fails when the allowlist is invalid even if nothing is mutated', () => {
+    const box = memory({ diff: diffFor('README.md', ['# title']) });
+    box.files.set(
+      'scripts/ci/mutation-equivalents.json',
+      JSON.stringify({ equivalents: [{ file: 'src/lib/add.ts', line: 2, mutator: 'ArithmeticOperator', replacement: '-' }] }),
+    );
+    const result = runMutation(request(), box.deps);
+    assert.equal(result.exitCode, 1);
+    assert.match(result.summary, /justification/);
+    assert.deepEqual(box.strykerCalls, []);
+  });
+
+  it('warns when an unmutated file is deleted or renamed', () => {
+    const diff = [
+      'diff --git a/supabase/migrations/foo.sql b/supabase/migrations/foo.sql',
+      'index ab290eb..e69de29 100644',
+      '--- a/supabase/migrations/foo.sql',
+      '+++ b/supabase/migrations/foo.sql',
+      '@@ -1 +0,0 @@',
+      '-select 1;',
+      'diff --git a/workers/categorizer/scan.py b/workers/categorizer/decide.py',
+      'similarity index 100%',
+      'rename from workers/categorizer/scan.py',
+      'rename to workers/categorizer/decide.py',
+      '',
+    ].join('\n');
+    const box = memory({ diff });
+    const result = runMutation(request(), box.deps);
+    assert.equal(result.exitCode, 0, result.summary);
+    assert.match(result.summary, /::warning::.*supabase\/migrations\/foo\.sql/);
+    assert.match(result.summary, /::warning::.*workers\/categorizer\/scan\.py/);
+    assert.match(result.summary, /::warning::.*workers\/categorizer\/decide\.py/);
+    assert.deepEqual(box.strykerCalls, []);
+  });
+
+  it('accepts an ignored mutant only when the allowlist justifies it', () => {
+    const box = memory({
+      diff: diffFor('src/lib/add.ts', ['export function add(left: number, right: number): number {', '  return left + right;', '}']),
+      report: report('src/lib/add.ts', [mutant({ status: 'Ignored', replacement: '' })]),
+    });
+    box.files.set(
+      'scripts/ci/mutation-equivalents.json',
+      JSON.stringify({
+        equivalents: [
+          {
+            file: 'src/lib/add.ts',
+            line: 2,
+            mutator: 'ArithmeticOperator',
+            replacement: '',
+            justification: 'The disable comment guards a boundary the test cannot observe.',
+          },
+        ],
+      }),
+    );
+    const result = runMutation(request(), box.deps);
+    assert.equal(result.exitCode, 0);
+    assert.deepEqual(artifact(box.files).gaps, []);
+    assert.equal(artifact(box.files).equivalents.length, 1);
+  });
+
+  it('accepts a changed path that contains brackets', () => {
+    const file = 'src/pages/[slug].ts';
+    const box = memory({
+      diff: diffFor(file, ['export const slug = 1;', 'export const other = 2;']),
+      report: report(file, [mutant({ status: 'Killed', location: { start: { line: 1, column: 1 }, end: { line: 1, column: 2 } } })]),
+    });
+    const result = runMutation(request(), box.deps);
+    assert.equal(result.exitCode, 0, result.summary);
+    assert.doesNotMatch(result.summary, /not a repo path/);
+    const pattern = configOf(box.files).mutate[0];
+    assert.equal(pattern === undefined, false);
+    assert.equal(strykerWouldMutate(pattern ?? '', file), true);
+  });
+
+  it('accepts a bracketed Astro route and warns that it is not mutated', () => {
+    const file = 'src/pages/u/[creator].astro';
+    const box = memory({ diff: diffFor(file, ['---', '---']) });
+    const result = runMutation(request(), box.deps);
+    assert.equal(result.exitCode, 0, result.summary);
+    assert.doesNotMatch(result.summary, /not a repo path/);
+    assert.match(result.summary, /::warning::.*src\/pages\/u\/\[creator\]\.astro/);
+    assert.deepEqual(box.strykerCalls, []);
   });
 
   it('fails when Stryker exits without a report', () => {
@@ -407,5 +607,9 @@ describe('mutation cli', () => {
     assert.match(yaml, /timeout-minutes: 15/);
     assert.match(yaml, /mutation-survivors-\$\{\{ matrix\.run \}\}/);
     assert.match(yaml, /reports\/mutation-survivors\.json/);
+    assert.match(yaml, /contents: read/);
+    assert.match(yaml, /actions: write/);
+    assert.doesNotMatch(yaml, /stryker-incremental/);
+    assert.doesNotMatch(yaml, /restore-keys/);
   });
 });
