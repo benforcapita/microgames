@@ -1,20 +1,7 @@
-import { readFileSync } from 'node:fs';
-
-function getSupabaseDbPort(): number {
-  try {
-    const toml = readFileSync(new URL('../../../supabase/config.toml', import.meta.url), 'utf8');
-    const match = toml.match(/\[db\][^\[]*?\bport\s*=\s*(\d+)/s);
-    if (match?.[1]) {
-      return Number(match[1]);
-    }
-  } catch {}
-  return 54322;
-}
-
 process.env.PUBLIC_SUPABASE_URL ??= 'http://127.0.0.1:54321';
 process.env.PUBLIC_SUPABASE_PUBLISHABLE_KEY ??= 'mock';
 process.env.SUPABASE_SECRET_KEY ??= 'mock';
-process.env.DATABASE_URL ??= `postgresql://postgres:postgres@127.0.0.1:${getSupabaseDbPort()}/postgres`;
+process.env.DATABASE_URL ??= 'postgresql://postgres:postgres@127.0.0.1:54324/postgres';
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';

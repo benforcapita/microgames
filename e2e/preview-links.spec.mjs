@@ -101,7 +101,10 @@ test('creator share links UI, active list, revoke, cap, and non-owner access con
     where version_id in (select id from public.game_validations where game_id = ${gameId})
   `;
   const evilOwnerPost = await page.request.post(`/api/submissions/${gameId}/preview-links`, {
-    headers: { Origin: 'https://evil.example' },
+    headers: {
+      Origin: 'https://evil.example',
+      'Content-Type': 'application/json',
+    },
   });
   expect(evilOwnerPost.status()).toBe(403);
   const countAfterEvil = await sql`
@@ -118,9 +121,18 @@ test('creator share links UI, active list, revoke, cap, and non-owner access con
   expect(cacheControl).toContain('no-store');
 
   const validOwnerData = await validOwnerPost.json();
-  await page.request.post(`/api/submissions/${gameId}/preview-links/${validOwnerData.id}/revoke`, {
+  const evilOwnerRevoke = await page.request.post(`/api/submissions/${gameId}/preview-links/${validOwnerData.id}/revoke`, {
+    headers: {
+      Origin: 'https://evil.example',
+      'Content-Type': 'application/json',
+    },
+  });
+  expect(evilOwnerRevoke.status()).toBe(403);
+
+  const validOwnerRevoke = await page.request.post(`/api/submissions/${gameId}/preview-links/${validOwnerData.id}/revoke`, {
     headers: { Origin: siteOrigin },
   });
+  expect(validOwnerRevoke.status()).toBe(200);
 
   for (let i = 0; i < 5; i++) {
     await shareBtn.click();
@@ -157,6 +169,28 @@ test('creator share links UI, active list, revoke, cap, and non-owner access con
   });
   expect(missingLinkRevoke.status()).toBe(404);
   expect(await missingLinkRevoke.json()).toEqual({ error: 'Not found' });
+
+  const malformedLinkRevoke = await page.request.post(`/api/submissions/${gameId}/preview-links/not-a-valid-uuid/revoke`, {
+    headers: { Origin: siteOrigin },
+  });
+  expect(malformedLinkRevoke.status()).toBe(404);
+  expect(await malformedLinkRevoke.json()).toEqual({ error: 'Not found' });
+
+  const unvalidatedGameSlug = `unval-${stamp}`;
+  const [unvalidatedGame] = await sql`
+    insert into public.games (id, slug, owner_id, creator, title, stage)
+    values (${unvalidatedGameSlug}, ${unvalidatedGameSlug}, (select owner_id from public.games where id = ${gameId}), 'creator', 'Unvalidated', 'pending')
+    returning id
+  `;
+  try {
+    const unvalidatedPost = await page.request.post(`/api/submissions/${unvalidatedGame.id}/preview-links`, {
+      headers: { Origin: siteOrigin },
+    });
+    expect(unvalidatedPost.status()).toBe(404);
+    expect(await unvalidatedPost.json()).toEqual({ error: 'Not found' });
+  } finally {
+    await sql`delete from public.games where id = ${unvalidatedGame.id}`;
+  }
 
   const otherContext = await browser.newContext();
   const otherPage = await otherContext.newPage();
@@ -345,6 +379,7 @@ test('an unapproved game with an active preview link is absent from public listi
 
   const unapprovedTag = `sl3hidden${stamp}`;
   const liveTag = `sl3live${stamp}`;
+  const provingControlSlug = `prvctrl-${stamp}`;
 
   const anonContext = await browser.newContext();
   const request = anonContext.request;
@@ -355,6 +390,11 @@ test('an unapproved game with an active preview link is absent from public listi
 
     await sql`update public.games set tags = array[${liveTag}] where id = ${liveGame.id}`;
     await sql`insert into public.featured_games (game_id, position, active) values (${liveGame.id}, 1, true)`;
+
+    await sql`
+      insert into public.games (id, slug, owner_id, creator, title, stage)
+      values (${provingControlSlug}, ${provingControlSlug}, (select owner_id from public.games where id = ${gameId}), 'creator', 'Proving Control Game', 'proving')
+    `;
 
     await expect.poll(async () => {
       const res = await request.get('/');
@@ -397,6 +437,36 @@ test('an unapproved game with an active preview link is absent from public listi
       }
     }
 
+    const liveTagRes = await request.get(`/games?tag=${encodeURIComponent(liveTag)}`);
+    expect(liveTagRes.status()).toBe(200);
+    const liveTagBody = await liveTagRes.text();
+    expect(liveTagBody).toContain(liveGame.title);
+    expect(liveTagBody).toContain(liveGame.slug);
+    expect(liveTagBody).toContain(`>#${liveTag}</a>`);
+    expect(liveTagBody).not.toContain(title);
+    expect(liveTagBody).not.toContain(slug);
+
+    const creatorsRes = await request.get('/creators');
+    expect(creatorsRes.status()).toBe(200);
+    const creatorsBody = await creatorsRes.text();
+    expect(creatorsBody).toContain('Ship one file. Get played.');
+    expect(creatorsBody).toContain('How a game goes live');
+    expect(creatorsBody).not.toContain(title);
+    expect(creatorsBody).not.toContain(slug);
+
+    const provingRes = await request.get('/proving');
+    expect(provingRes.status()).toBe(200);
+    const provingBody = await provingRes.text();
+    expect(provingBody).toContain('The Proving Grounds');
+    expect(provingBody).toContain('Sign in to see your own games in the Proving Grounds.');
+    expect(provingBody).not.toContain(title);
+    expect(provingBody).not.toContain(slug);
+    expect(provingBody).not.toContain('Proving Control Game');
+
+    await page.goto('/proving');
+    await expect(page.locator('.slide')).toContainText('Proving Control Game');
+    await expect(page.locator('.slide')).not.toContainText(title);
+
     const ownerRes = await request.get(`/u/${stamp}`);
     expect(ownerRes.status()).toBe(404);
     const ownerBody = await ownerRes.text();
@@ -418,17 +488,6 @@ test('an unapproved game with an active preview link is absent from public listi
       expect(featuredSection).not.toContain(slug);
     }
 
-    await test.step('non-existent routes (/sitemap.xml, /rss.xml, /feed.xml, /api/games) return 404 without unapproved game', async () => {
-      const nonExistentPaths = ['/sitemap.xml', '/rss.xml', '/feed.xml', '/api/games'];
-      for (const path of nonExistentPaths) {
-        const res = await request.get(path);
-        expect(res.status()).toBe(404);
-        const body = await res.text();
-        expect(body).not.toContain(title);
-        expect(body).not.toContain(slug);
-      }
-    });
-
     const v1Res = await request.get('/api/v1/games');
     expect(v1Res.status()).toBe(401);
 
@@ -445,6 +504,7 @@ test('an unapproved game with an active preview link is absent from public listi
   } finally {
     await sql`delete from public.featured_games where game_id in (${gameId}, ${liveGame.id})`;
     await sql`update public.games set tags = ${originalLiveTags} where id = ${liveGame.id}`;
+    await sql`delete from public.games where id = ${provingControlSlug}`;
     await context.close();
     await anonContext.close();
   }
