@@ -16,7 +16,7 @@
     "astro": "astro",
     "seed": "node scripts/seed.mjs",
     "admin:grant": "node scripts/grant-admin.mjs",
-    "test": "node --experimental-strip-types --disable-warning=ExperimentalWarning --import ./scripts/register-ts.mjs --test \"src/**/*.test.ts\" \"mcp/**/*.test.ts\" \"cdn/**/*.test.ts\" \"scripts/**/*.test.ts\" && node --experimental-strip-types --disable-warning=ExperimentalWarning --import ./scripts/register-ts.mjs --test --test-concurrency=1 \"supabase/**/*.test.ts\"",
+    "test": "node --experimental-strip-types --disable-warning=ExperimentalWarning --import ./scripts/register-ts.mjs --test \"src/**/*.test.ts\" \"mcp/**/*.test.ts\" \"cdn/**/*.test.ts\" \"scripts/**/*.test.ts\" \"tests/**/*.unit.test.ts\" && node --experimental-strip-types --disable-warning=ExperimentalWarning --import ./scripts/register-ts.mjs --test --test-concurrency=1 \"supabase/**/*.test.ts\" \"tests/**/*.db.test.ts\"",
     "db:start": "npx -y supabase@2.120.0 start -x vector,logflare,edge-runtime,imgproxy,realtime",
     "db:stop": "npx -y supabase@2.120.0 stop",
     "check": "astro check",

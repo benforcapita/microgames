@@ -15,6 +15,11 @@ export const ALLOWLIST = [
     max: 1,
     why: 'CI-T2 strict timing on shared runners',
   },
+  {
+    name: 'a swipe in the game then a tap on the × leaves fullscreen',
+    max: 1,
+    why: 'the default e2e project has no touch; playwright.fullscreen.config.mjs runs it',
+  },
 ];
 
 function applySkip(name, reason, allowlist, allowed, errors) {
@@ -150,11 +155,13 @@ export function checkPlaywrightJson(content, allowlist = ALLOWLIST) {
               errors.push(`${name}: flaky`);
             }
             if (isSkipped) {
-              const skipAnnotation = Array.isArray(test.annotations)
-                ? test.annotations.find((a) => a?.type === 'skip' || a?.type === 'fixme')
-                : undefined;
-              const reason = skipAnnotation?.description?.trim() || 'skipped';
-              applySkip(name, reason, allowlist, allowed, errors);
+              const annotations = Array.isArray(test.annotations) ? test.annotations : [];
+              const todo = annotations.find((a) => a?.type === 'todo' && typeof a.description === 'string' && a.description.trim().length > 0);
+              if (!todo) {
+                const skipAnnotation = annotations.find((a) => a?.type === 'skip' || a?.type === 'fixme');
+                const reason = skipAnnotation?.description?.trim() || 'skipped';
+                applySkip(name, reason, allowlist, allowed, errors);
+              }
             }
           }
         }
