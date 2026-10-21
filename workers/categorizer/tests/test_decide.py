@@ -218,3 +218,17 @@ def test_nsfw_confirmed_never_leaves_kid_safe_confirmed() -> None:
                 injection,
             )
     assert combinations == 2048
+
+
+def test_decide_all_applies_injection_to_every_safety_verdict() -> None:
+    verdicts = decide_all(
+        [NSFW, KID_SAFE, PUZZLE],
+        {"nsfw": 0.9, "kid_safe": 0.1, "puzzle": 0.9},
+        {},
+        injection=True,
+    )
+    assert verdicts == {
+        "nsfw": "needs_review",
+        "kid_safe": "needs_review",
+        "puzzle": "confirmed",
+    }

@@ -7,7 +7,7 @@ from collections.abc import Sequence
 
 import httpx2
 import pytest
-from typesafe_sdk import Noul
+from typesafe_sdk import Noul, TypeSafeRateLimitError
 
 from categorizer import ErrorEvent, Limits, Secret, Settings, emit_error
 from categorizer.decide import Category, decide_all
@@ -68,19 +68,23 @@ def _settings(model: str = MODEL) -> Settings:
     )
 
 
-def _ok_body(answers: dict[str, float] | None = None) -> dict[str, object]:
+def _ok_body(answers: dict[str, float] | None = None, model: str = MODEL) -> dict[str, object]:
     if answers is None:
         answers = {"t_nsfw": 0.9}
     return {
-        "model": MODEL,
+        "model": model,
         "usage": {"input_tokens": 10, "output_tokens": 2},
         "answers": {name: {"type": "noul", "noul": p} for name, p in answers.items()},
     }
 
 
-def _ok(answers: dict[str, float] | None = None, request_id: str = "req-1") -> httpx2.Response:
+def _ok(
+    answers: dict[str, float] | None = None,
+    request_id: str = "req-1",
+    model: str = MODEL,
+) -> httpx2.Response:
     return httpx2.Response(
-        200, json=_ok_body(answers), headers={"x-typesafe-request-id": request_id}
+        200, json=_ok_body(answers, model), headers={"x-typesafe-request-id": request_id}
     )
 
 
@@ -238,6 +242,13 @@ def test_an_out_of_range_noul_is_no_answer() -> None:
     api = Api([_ok({"t_nsfw": 1.5, "t_kid_safe": 0.9})])
     result = judge(_jev(api), STATE, [NSFW, KID_SAFE], [])
     assert result.answers == {"nsfw": None, "kid_safe": 0.9}
+
+
+def test_a_negative_wire_noul_is_no_answer() -> None:
+    api = Api([_ok({"t_nsfw": -0.1, "t_kid_safe": 0.9})])
+    result = judge(_jev(api), STATE, [NSFW, KID_SAFE], [])
+    assert result.answers == {"nsfw": None, "kid_safe": 0.9}
+    assert decide_all([NSFW, KID_SAFE], result.answers, {})["nsfw"] == "needs_review"
 
 
 @pytest.mark.parametrize(
@@ -454,3 +465,82 @@ def test_key_never_appears_in_logs_stdout_or_stderr(
     assert KEY not in caplog.text
     assert KEY not in captured.out
     assert KEY not in captured.err
+
+
+def test_the_recorded_model_is_the_response_model_not_the_requested_one() -> None:
+    api = Api([_ok({"t_nsfw": 0.9}, model="jev-1.13.0-build7")])
+    result = judge(_jev(api), STATE, [NSFW], [])
+    assert result.model == "jev-1.13.0-build7"
+
+
+@pytest.mark.parametrize(
+    ("models", "expected"),
+    [
+        (["jev-a", "jev-b", "jev-c"], "jev-a"),
+        (["", "jev-b", "jev-c"], "jev-b"),
+    ],
+    ids=["first_non_empty_wins", "empty_model_is_skipped"],
+)
+def test_the_result_model_is_the_first_non_empty_chunk_model(
+    models: list[str], expected: str
+) -> None:
+    cats = [NSFW, KID_SAFE, *_content(15)]
+    answers = {f"t_{cat.slug}": 0.9 for cat in cats}
+    api = Api([_ok(answers, model=model) for model in models])
+    result = judge(_jev(api), STATE, cats, _slugs(cats))
+    assert len(api.requests) == 3
+    assert result.model == expected
+
+
+def test_a_suggested_slug_is_asked_once_no_matter_how_often_suggested() -> None:
+    cats = [NSFW, KID_SAFE, *_content(6)]
+    fake = FakeJev()
+    result = judge(fake, STATE, cats, [*_slugs(cats), "c0"])
+    assert [len(questions) for questions in fake.questions] == [8]
+    assert result.usage["calls"] == 1
+    assert set(result.answers) == {cat.slug for cat in cats}
+
+
+@pytest.mark.parametrize(
+    ("steps", "code"),
+    [
+        ([httpx2.Response(500)] * 3, "jev_5xx"),
+        ([httpx2.Response(400)], "jev_bad_request"),
+    ],
+    ids=["retryable", "permanent"],
+)
+def test_a_middle_chunk_failure_raises_and_no_tag_is_rejected(
+    steps: list[httpx2.Response], code: str
+) -> None:
+    cats = [NSFW, KID_SAFE, *_content(15)]
+    first = {f"t_{cat.slug}": 0.9 for cat in cats[:8]}
+    api = Api([_ok(first), *steps, _ok()])
+    with pytest.raises(JevError) as raised:
+        judge(_jev(api), STATE, cats, _slugs(cats))
+    assert raised.value.code == code
+    assert len(api.requests) == 1 + len(steps)
+    assert set(decide_all(cats, {}, {}).values()) == {"needs_review"}
+
+
+def test_a_retry_after_header_beyond_the_cap_sleeps_sixty_seconds() -> None:
+    api = Api([httpx2.Response(503, headers={"Retry-After": "3600"}), _ok()])
+    sleeps: list[float] = []
+    judge(_jev(api, sleeps=sleeps), STATE, [NSFW], [])
+    assert sleeps == [60.0]
+
+
+def test_a_retry_after_ms_beyond_the_cap_sleeps_sixty_seconds() -> None:
+    api = Api([httpx2.Response(429, headers={"retry-after-ms": "3600000"}), _ok()])
+    sleeps: list[float] = []
+    judge(_jev(api, sleeps=sleeps), STATE, [NSFW], [])
+    assert sleeps == [60.0]
+
+
+def test_a_negative_retry_after_ms_falls_back_to_backoff() -> None:
+    error = TypeSafeRateLimitError(429, None, httpx2.Headers())
+    error.retry_after_ms = -100.0
+    api = Api([error, _ok()])
+    sleeps: list[float] = []
+    result = judge(_jev(api, sleeps=sleeps), STATE, [NSFW], [])
+    assert result.answers == {"nsfw": 0.9}
+    assert sleeps == [1.0]
