@@ -243,10 +243,10 @@ function normalizeIp(ip: string): string {
   if (h[0] === 0 && h[1] === 0 && h[2] === 0 && h[3] === 0 && h[4] === 0 && h[5] === 0xffff) {
     return `${(h[6] ?? 0) >> 8}.${(h[6] ?? 0) & 0xff}.${(h[7] ?? 0) >> 8}.${(h[7] ?? 0) & 0xff}`;
   }
-  return h
+  return `v6/64:${h
     .slice(0, 4)
     .map((n) => n.toString(16).padStart(4, '0'))
-    .join(':');
+    .join(':')}`;
 }
 
 export function sessionIpSubject(ip: string, secret: string, at: Date): string {
