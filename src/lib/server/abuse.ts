@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import type postgres from 'postgres';
 
 export const MG_UID_COOKIE = 'mg_uid';
 
@@ -125,14 +126,6 @@ export function createRatingGuard(opts?: RatingGuardOptions): {
   };
 }
 
-export const sessionStartByUid = createLimiter({ windowMs: 30 * 60_000, max: 1 });
-export const sessionStartByIp = createLimiter({ windowMs: 60 * 60_000, max: 20 });
-
-export function sessionIpSubject(ip: string, secret: string, at: Date): string {
-  const dayKey = crypto.createHmac('sha256', secret).update(at.toISOString().slice(0, 10)).digest();
-  return crypto.createHmac('sha256', dayKey).update(ip).digest('hex');
-}
-
 export const telemetryByUid = createLimiter({ windowMs: 60_000, max: 120 });
 export const ratingGuard = createRatingGuard();
 
@@ -206,19 +199,84 @@ export function authorizeRating(
   return { ok: true };
 }
 
-/**
- * Admit a session_start. A device may count once per window per game; the IP cap is a backstop.
- * The device slot is only consumed when the start is actually counted, so an IP-cap drop
- * does not lock the device out for the rest of the window.
- */
-export function admitSessionStart(
-  uid: string, ip: string, gameId: string,
-  byUid: Limiter = sessionStartByUid, byIp: Limiter = sessionStartByIp,
-): boolean {
-  const secret = process.env.MG_IP_HASH_SECRET;
+export const SESSION_START_UID_WINDOW_MS = 30 * 60_000;
+export const SESSION_START_IP_WINDOW_MS = 60 * 60_000;
+export const SESSION_START_IP_MAX = 20;
+const SWEEP_BATCH = 500;
+
+export function sessionIpSubject(ip: string, secret: string, at: Date): string {
+  const dayKey = crypto.createHmac('sha256', secret).update(at.toISOString().slice(0, 10)).digest();
+  return crypto.createHmac('sha256', dayKey).update(ip).digest('hex');
+}
+
+export interface SessionAdmission {
+  uid: string;
+  ip: string;
+  gameId: string;
+  now?: number;
+}
+
+async function inWindow(
+  tx: postgres.TransactionSql,
+  kind: 'uid' | 'ip',
+  subject: string,
+  gameId: string,
+  cutoff: Date,
+): Promise<number> {
+  const [row] = await tx<{ n: number }[]>`
+    select count(*)::int as n from public.session_admissions
+    where kind = ${kind} and subject = ${subject} and game_id = ${gameId} and created_at > ${cutoff}`;
+  return row?.n ?? 0;
+}
+
+async function hit(
+  tx: postgres.TransactionSql,
+  kind: 'uid' | 'ip',
+  subject: string,
+  gameId: string,
+  at: Date,
+  cutoff: Date,
+  sweep: Date,
+  max: number,
+): Promise<boolean> {
+  const [row] = await tx<{ admitted: boolean }[]>`
+    with pruned as (
+      delete from public.session_admissions
+      where id in (
+        select id from public.session_admissions
+        where created_at < ${sweep}
+        order by id
+        limit ${SWEEP_BATCH}
+        for update skip locked
+      )
+      returning 1
+    ), ins as (
+      insert into public.session_admissions (kind, subject, game_id, created_at)
+      select ${kind}, ${subject}, ${gameId}, ${at}
+      where (select count(*) from public.session_admissions s
+             where s.kind = ${kind} and s.subject = ${subject} and s.game_id = ${gameId}
+               and s.created_at > ${cutoff}) < ${max}
+      returning id
+    )
+    select exists(select 1 from ins) as admitted`;
+  return row?.admitted === true;
+}
+
+export async function admitSessionStart(
+  tx: postgres.TransactionSql,
+  { uid, ip, gameId, now = Date.now() }: SessionAdmission,
+): Promise<boolean> {
+  const secret = process.env.MG_IP_HASH_SECRET?.trim();
   if (!secret || secret.length < 32) throw new Error('Missing required env var MG_IP_HASH_SECRET (see .env.example)');
-  const uidKey = `${uid}:${gameId}`;
-  if (!byUid.check(uidKey)) return false;
-  if (!byIp.hit(`${sessionIpSubject(ip, secret, new Date())}:${gameId}`)) return false;
-  return byUid.hit(uidKey);
+  const at = new Date(now);
+  const uidCutoff = new Date(now - SESSION_START_UID_WINDOW_MS);
+  const ipCutoff = new Date(now - SESSION_START_IP_WINDOW_MS);
+  const sweep = new Date(now - Math.max(SESSION_START_UID_WINDOW_MS, SESSION_START_IP_WINDOW_MS));
+  const ipSubject = sessionIpSubject(ip, secret, at);
+  const key = (kind: 'uid' | 'ip', subject: string) => `session-admit:${kind}:${subject}:${gameId}`;
+  await tx`select pg_advisory_xact_lock(hashtextextended(${key('uid', uid)}, 0))`;
+  if ((await inWindow(tx, 'uid', uid, gameId, uidCutoff)) >= 1) return false;
+  await tx`select pg_advisory_xact_lock(hashtextextended(${key('ip', ipSubject)}, 0))`;
+  if (!(await hit(tx, 'ip', ipSubject, gameId, at, ipCutoff, sweep, SESSION_START_IP_MAX))) return false;
+  return hit(tx, 'uid', uid, gameId, at, uidCutoff, sweep, 1);
 }

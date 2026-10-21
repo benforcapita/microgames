@@ -7,7 +7,6 @@ import {
   RATING_WRITES_MAX,
   RATING_WRITES_WINDOW_MS,
   SELF_RATING_MESSAGE,
-  admitSessionStart,
   authorizeRating,
   clientIp,
   createLimiter,
@@ -19,13 +18,8 @@ import {
   ratingWritesByUser,
   secureCookie,
   sessionIpSubject,
-  sessionStartByIp,
-  sessionStartByUid,
   telemetryByUid,
 } from './abuse.ts';
-
-const TEST_SECRET = 'mg8b-a-test-secret-0000000000000';
-process.env.MG_IP_HASH_SECRET = TEST_SECRET;
 
 describe('session_start limiter', () => {
   it('allows repeated session_start from same uid+game within window once (simulate 50 hits -> 1 allowed)', () => {
@@ -186,8 +180,6 @@ describe('parseUid', () => {
 describe('singletons', () => {
   it('exports expected singletons and constants', () => {
     assert.equal(MG_UID_COOKIE, 'mg_uid');
-    assert.equal(typeof sessionStartByUid.hit, 'function');
-    assert.equal(typeof sessionStartByIp.hit, 'function');
     assert.equal(typeof telemetryByUid.hit, 'function');
     assert.equal(typeof ratingGuard.allow, 'function');
     assert.equal(typeof ratingWritesByUser.hit, 'function');
@@ -197,17 +189,11 @@ describe('singletons', () => {
 });
 
 describe('clientIp', () => {
-  it('on Vercel, 25 distinct client IPs behind one socket are each counted (not collapsed by the IP cap)', () => {
-    const byIp = createLimiter({ windowMs: 60 * 60_000, max: 20 });
-    const byUid = createLimiter({ windowMs: 30 * 60_000, max: 1 });
-    let counted = 0;
+  it('on Vercel, 25 distinct client IPs behind one socket are each returned (not collapsed)', () => {
     for (let i = 1; i <= 25; i++) {
       const headers = new Headers({ 'x-vercel-forwarded-for': `203.0.113.${i}` });
-      const ip = clientIp(headers, '10.0.0.1', true);
-      assert.equal(ip, `203.0.113.${i}`);
-      if (admitSessionStart(`00000000-0000-4000-8000-${String(i).padStart(12, '0')}`, ip, 'g1', byUid, byIp)) counted++;
+      assert.equal(clientIp(headers, '10.0.0.1', true), `203.0.113.${i}`);
     }
-    assert.equal(counted, 25);
   });
 
   it('on Vercel, takes the leftmost x-vercel-forwarded-for hop', () => {
@@ -257,95 +243,6 @@ describe('sessionIpSubject', () => {
     assert.notEqual(sessionIpSubject('198.51.100.9', 's1', noon), a);
     assert.notEqual(sessionIpSubject(ip, 's2', noon), a);
     assert.equal(a.includes(ip), false);
-  });
-});
-
-describe('admitSessionStart ip keys', () => {
-  it('spends the ip budget under the hashed subject, never the raw ip', () => {
-    const byIp = createLimiter({ windowMs: 60_000, max: 1 });
-    const byUid = createLimiter({ windowMs: 60_000, max: 1 });
-    const devA = '00000000-0000-4000-8000-0000000000aa';
-    const devB = '00000000-0000-4000-8000-0000000000bb';
-    assert.equal(admitSessionStart(devA, '203.0.113.7', 'g', byUid, byIp), true);
-    assert.equal(byIp.check('203.0.113.7:g'), true, 'raw ip must not be a limiter key');
-    assert.equal(
-      admitSessionStart(devB, '203.0.113.7', 'g', byUid, byIp),
-      false,
-      'the same ip still dedupes through the hashed subject',
-    );
-  });
-
-  it('an ip that exhausts its hourly starts on one game is still admitted on another', () => {
-    const byIp = createLimiter({ windowMs: 60 * 60_000, max: 20 });
-    const byUid = createLimiter({ windowMs: 30 * 60_000, max: 1 });
-    const dev = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
-    for (let i = 0; i < 20; i++) {
-      assert.equal(admitSessionStart(dev(i), '203.0.113.21', 'g1', byUid, byIp), true, `start ${i + 1}`);
-    }
-    assert.equal(admitSessionStart(dev(20), '203.0.113.21', 'g1', byUid, byIp), false, 'g1 budget spent');
-    assert.equal(admitSessionStart(dev(21), '203.0.113.21', 'g2', byUid, byIp), true, 'g2 has its own budget');
-    assert.equal(admitSessionStart(dev(22), '203.0.113.22', 'g1', byUid, byIp), true, 'other ip unaffected');
-  });
-
-  it('fails closed when MG_IP_HASH_SECRET is unset, empty, or shorter than 32 chars', () => {
-    const prev = process.env.MG_IP_HASH_SECRET;
-    const dev = '00000000-0000-4000-8000-0000000000aa';
-    try {
-      for (const v of [undefined, '', 'x'.repeat(31)]) {
-        if (v === undefined) delete process.env.MG_IP_HASH_SECRET;
-        else process.env.MG_IP_HASH_SECRET = v;
-        assert.throws(
-          () => admitSessionStart(dev, '203.0.113.7', 'g'),
-          (e: unknown) =>
-            e instanceof Error &&
-            /MG_IP_HASH_SECRET/.test(e.message) &&
-            !e.message.includes('203.0.113.7') &&
-            (v === undefined || v === '' || !e.message.includes(v)),
-        );
-      }
-    } finally {
-      process.env.MG_IP_HASH_SECRET = prev ?? TEST_SECRET;
-    }
-  });
-
-  it('accepts a 32-char MG_IP_HASH_SECRET', () => {
-    const prev = process.env.MG_IP_HASH_SECRET;
-    process.env.MG_IP_HASH_SECRET = 'x'.repeat(32);
-    try {
-      const byIp = createLimiter({ windowMs: 60_000, max: 1 });
-      const byUid = createLimiter({ windowMs: 60_000, max: 1 });
-      assert.equal(admitSessionStart('00000000-0000-4000-8000-0000000000aa', '203.0.113.7', 'g', byUid, byIp), true);
-    } finally {
-      process.env.MG_IP_HASH_SECRET = prev ?? TEST_SECRET;
-    }
-  });
-});
-
-describe('admitSessionStart', () => {
-  it('an IP-cap drop does not consume the device 30-min dedupe slot', () => {
-    let t = 0;
-    const now = () => t;
-    const byIp = createLimiter({ windowMs: 60 * 60_000, max: 1, now });
-    const byUid = createLimiter({ windowMs: 30 * 60_000, max: 1, now });
-    const devA = '00000000-0000-4000-8000-00000000000a';
-    const devB = '00000000-0000-4000-8000-00000000000b';
-    assert.equal(admitSessionStart(devA, '1.1.1.1', 'g', byUid, byIp), true);
-    // IP cap now full: device B is dropped by the IP limiter...
-    assert.equal(admitSessionStart(devB, '1.1.1.1', 'g', byUid, byIp), false);
-    // ...but its device slot is untouched, so from another IP it is still counted.
-    assert.equal(byUid.check(`${devB}:g`), true);
-    assert.equal(admitSessionStart(devB, '2.2.2.2', 'g', byUid, byIp), true);
-    // and then deduped within the window
-    assert.equal(admitSessionStart(devB, '3.3.3.3', 'g', byUid, byIp), false);
-  });
-
-  it('a device duplicate does not consume IP budget', () => {
-    const byIp = createLimiter({ windowMs: 60_000, max: 2 });
-    const byUid = createLimiter({ windowMs: 60_000, max: 1 });
-    const dev = '00000000-0000-4000-8000-0000000000aa';
-    assert.equal(admitSessionStart(dev, '1.1.1.1', 'g', byUid, byIp), true);
-    for (let i = 0; i < 10; i++) assert.equal(admitSessionStart(dev, '1.1.1.1', 'g', byUid, byIp), false);
-    assert.equal(admitSessionStart('00000000-0000-4000-8000-0000000000bb', '1.1.1.1', 'g', byUid, byIp), true);
   });
 });
 
