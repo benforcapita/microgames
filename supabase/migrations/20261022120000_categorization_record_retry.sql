@@ -53,6 +53,7 @@ declare
   v_ok boolean;
   v_props jsonb;
   v_n int;
+  v_new int;
 begin
   select (r.lease_token = cat_propose_categories.lease_token and r.lease_until > now())
     into v_ok
@@ -63,13 +64,25 @@ begin
     raise exception 'lease_lost' using errcode = 'P0001';
   end if;
   perform pg_advisory_xact_lock(hashtext('cat_propose_categories'));
-  if (select count(*) from public.categories where status = 'proposed') > 50 then
-    raise exception 'too_many_proposals' using errcode = 'P0001';
-  end if;
   v_props := case
     when jsonb_typeof(p) = 'array' then p
     else coalesce(p -> 'proposed_categories', '[]'::jsonb)
   end;
+  select count(*) into v_new
+  from (
+    select distinct s.slug
+    from (
+      select lower(btrim(e ->> 'slug')) as slug,
+             btrim(coalesce(e ->> 'definition', e ->> 'name', '')) as description
+      from jsonb_array_elements(v_props) as e limit 3
+    ) s
+    where s.slug ~ '^[a-z0-9]+(_[a-z0-9]+)*$'
+      and s.description <> ''
+      and not exists (select 1 from public.categories c where c.slug = s.slug)
+  ) d;
+  if (select count(*) from public.categories where status = 'proposed') + v_new > 50 then
+    raise exception 'too_many_proposals' using errcode = 'P0001';
+  end if;
   insert into public.categories (slug, description, status, is_safety)
   select s.slug, s.description, 'proposed', false
   from (

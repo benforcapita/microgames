@@ -1241,11 +1241,13 @@ describe('categorization record, retry and purge (CAT-2b)', { concurrency: false
     }
   });
 
-  it('allows proposals while at most 50 are open and refuses once more are open', async (t) => {
+  it('refuses propose only when open plus new slugs would exceed 50, counting only new valid slugs', async (t) => {
     const sql = await connect(t);
     if (!sql) return;
     const gameId = gid();
-    const p = { proposed_categories: [{ slug: 'edge_one', definition: 'one' }, { slug: 'edge_two', definition: 'two' }] };
+    const p = (...slugs: string[]) => ({
+      proposed_categories: slugs.map((slug) => ({ slug, definition: 'def ' + slug })),
+    });
     try {
       await rollback(sql, async (tx) => {
         await enable(tx, true);
@@ -1253,19 +1255,58 @@ describe('categorization record, retry and purge (CAT-2b)', { concurrency: false
         await insertGame(tx, gameId);
         const runId = await insertRun(tx, gameId, sha('1'));
         const { claim: c } = await failAndCheck(tx, runId);
-        const [{ open }] = await tx<{ open: number }[]>`
-          select count(*)::int as open from public.categories where status = 'proposed'
-        `;
+        const openCount = async () =>
+          (await tx<{ n: number }[]>`select count(*)::int as n from public.categories where status = 'proposed'`)[0].n;
+        const setOpen = async (target: number) => {
+          await tx`delete from public.categories where slug like 'cf\_%'`;
+          const base = await openCount();
+          assert.ok(base <= target, `baseline open ${base} exceeds target ${target}`);
+          await tx`
+            insert into public.categories (slug, description, status)
+            select 'cf_' || i, 'filler', 'proposed'
+            from generate_series(${base + 1}::int, ${target}::int) as i
+          `;
+          assert.equal(await openCount(), target);
+        };
+        const absent = async (...slugs: string[]) => {
+          const [{ n }] = await tx<{ n: number }[]>`
+            select count(*)::int as n from public.categories where slug = any(${slugs})
+          `;
+          assert.equal(n, 0);
+        };
+
+        await setOpen(47);
+        assert.equal(await propose(tx, runId, c.lease_token, p('cap_a', 'cap_b', 'cap_c')), 3);
+        assert.equal(await openCount(), 50);
+
+        await assert.rejects(tx.savepoint((sp) => propose(sp, runId, c.lease_token, p('cap_d'))), tooManyProposals);
+        await assert.rejects(
+          tx.savepoint((sp) => propose(sp, runId, c.lease_token, p('cap_e', 'cap_f', 'cap_g'))),
+          tooManyProposals,
+        );
+        await absent('cap_d', 'cap_e', 'cap_f', 'cap_g');
+
+        await setOpen(49);
+        await assert.rejects(
+          tx.savepoint((sp) => propose(sp, runId, c.lease_token, p('cap_h', 'cap_i', 'cap_j'))),
+          tooManyProposals,
+        );
+        await absent('cap_h', 'cap_i', 'cap_j');
+        assert.equal(await openCount(), 49);
+
         await tx`
           insert into public.categories (slug, description, status)
-          select 'cap_' || i, 'filler', 'proposed'
-          from generate_series(${open + 1}, 50) as i
+          values ('cap_ex1', 'existing one', 'approved'), ('cap_ex2', 'existing two', 'retired')
         `;
-        assert.equal(await propose(tx, runId, c.lease_token, p), 2);
-        await assert.rejects(tx.savepoint((sp) => propose(sp, runId, c.lease_token, p)), tooManyProposals);
-        await tx`delete from public.categories where slug in ('edge_one', 'edge_two')`;
-        await tx`insert into public.categories (slug, description, status) values ('cap_51', 'filler', 'proposed')`;
-        await assert.rejects(tx.savepoint((sp) => propose(sp, runId, c.lease_token, p)), tooManyProposals);
+        assert.equal(await propose(tx, runId, c.lease_token, p('cap_ex1', 'cap_ex2', 'cap_k')), 1);
+        assert.equal(await openCount(), 50);
+
+        await setOpen(49);
+        assert.equal(await propose(tx, runId, c.lease_token, p('cap_m', 'cap_m', 'cap_m')), 1);
+        assert.equal(await openCount(), 50);
+
+        assert.equal(await propose(tx, runId, c.lease_token, p('cap_ex1', 'cap_ex2')), 0);
+        assert.equal(await openCount(), 50);
       });
     } finally {
       await sql.end({ timeout: 1 });
@@ -1292,7 +1333,7 @@ describe('categorization record, retry and purge (CAT-2b)', { concurrency: false
         await tx`
           insert into public.categories (slug, description, status)
           select 'race_' || i, 'filler', 'proposed'
-          from generate_series(${open + 1}, 50) as i
+          from generate_series(${open + 1}, 49) as i
         `;
       });
       const runA = await insertRun(a, gameId, sha('a'));
@@ -1301,6 +1342,7 @@ describe('categorization record, retry and purge (CAT-2b)', { concurrency: false
       const runB = await insertRun(a, gameId, sha('b'));
       const [cB] = await claim(b);
       assert.equal(cB?.run_id, runB);
+      await b`set statement_timeout = '15s'`;
       let held!: () => void;
       const aHolds = new Promise<void>((r) => {
         held = r;
@@ -1329,7 +1371,7 @@ describe('categorization record, retry and purge (CAT-2b)', { concurrency: false
       const [{ open: openAfter }] = await a<{ open: number }[]>`
         select count(*)::int as open from public.categories where status = 'proposed'
       `;
-      assert.equal(openAfter, 51);
+      assert.equal(openAfter, 50);
     } finally {
       await a`delete from public.games where id = ${gameId}`.catch(() => {});
       await a`delete from public.categories where slug like 'race\_%'`.catch(() => {});
@@ -1337,6 +1379,131 @@ describe('categorization record, retry and purge (CAT-2b)', { concurrency: false
       await a`update private.settings set value = '50' where key = 'categorization_daily_run_cap'`.catch(() => {});
       await a.end({ timeout: 1 });
       await b.end({ timeout: 1 });
+    }
+  });
+
+  it('releases the propose advisory lock at commit so a second session can propose', async (t) => {
+    const dbUrl = localDbUrl();
+    if (!dbUrl) {
+      t.skip('refusing to run categorization record SQL against a non-local database');
+      return;
+    }
+    const a = postgres(dbUrl, { connect_timeout: 3, max: 1 });
+    const b = postgres(dbUrl, { connect_timeout: 3, max: 1 });
+    try {
+      await a`select 1`;
+      await b`select 1`;
+    } catch {
+      await a.end({ timeout: 1 }).catch(() => {});
+      await b.end({ timeout: 1 }).catch(() => {});
+      t.skip('local supabase is not running');
+      return;
+    }
+    const gameId = gid();
+    const tokenA = randomUUID();
+    const tokenB = randomUUID();
+    try {
+      await b`set statement_timeout = '10s'`;
+      await insertGame(a, gameId);
+      const runA = await insertRun(a, gameId, sha('a'), {
+        status: 'running',
+        token: tokenA,
+        leaseUntil: iso(600_000),
+      });
+      const runB = await insertRun(a, gameId, sha('b'), {
+        status: 'running',
+        token: tokenB,
+        leaseUntil: iso(600_000),
+      });
+      assert.equal(
+        await propose(a, runA, tokenA, { proposed_categories: [{ slug: 'lock_a', definition: 'a' }] }),
+        1,
+      );
+      const [{ pid }] = await a<{ pid: number }[]>`select pg_backend_pid() as pid`;
+      const [{ n: held }] = await a<{ n: number }[]>`
+        select count(*)::int as n from pg_locks where locktype = 'advisory' and pid = ${pid}
+      `;
+      assert.equal(held, 0);
+      assert.equal(
+        await propose(b, runB, tokenB, { proposed_categories: [{ slug: 'lock_b', definition: 'b' }] }),
+        1,
+      );
+    } finally {
+      await a`delete from public.games where id = ${gameId}`.catch(() => {});
+      await a`delete from public.categories where slug in ('lock_a', 'lock_b')`.catch(() => {});
+      await a.end({ timeout: 1 });
+      await b.end({ timeout: 1 });
+    }
+  });
+
+  it('leaves game_tags rows for categories that lost approved status untouched on a new run', async (t) => {
+    const sql = await connect(t);
+    if (!sql) return;
+    const gameId = gid();
+    try {
+      await rollback(sql, async (tx) => {
+        await enable(tx, true);
+        await setCap(tx, (await startedToday(tx)) + 10);
+        await insertGame(tx, gameId);
+        await tx`
+          insert into public.categories (slug, description, status)
+          values ('fading_ret', 'retired later', 'approved'),
+                 ('fading_prop', 're-proposed later', 'approved'),
+                 ('control_cat', 'stays approved', 'approved')
+        `;
+        const bundle = sha('1');
+        await insertTag(tx, gameId, bundle, 'fading_ret', 'confirmed', true, {
+          confidence: 0.9,
+          evidence: { keep: 'ret' },
+          updatedDaysAgo: 5,
+        });
+        await insertTag(tx, gameId, bundle, 'fading_prop', 'confirmed', true, {
+          confidence: 0.8,
+          evidence: { keep: 'prop' },
+          updatedDaysAgo: 5,
+        });
+        const snapshot = async () => {
+          const rows = await tx<
+            {
+              category_slug: string;
+              status: string;
+              applies: boolean | null;
+              confidence: string | null;
+              evidence: unknown;
+              updated_at: Date;
+            }[]
+          >`
+            select category_slug, status, applies, confidence::text, evidence, updated_at
+            from public.game_tags
+            where game_id = ${gameId} and bundle_sha256 = ${bundle} and category_slug like 'fading\_%'
+            order by category_slug
+          `;
+          return rows.map((r) => ({ ...r }));
+        };
+        const before = await snapshot();
+        assert.equal(before.length, 2);
+        await tx`update public.categories set status = 'retired' where slug = 'fading_ret'`;
+        await tx`update public.categories set status = 'proposed' where slug = 'fading_prop'`;
+        const runId = await insertRun(tx, gameId, bundle, { mode: 'active' });
+        const { claim: c } = await failAndCheck(tx, runId);
+        const p = {
+          tags: [
+            { slug: 'fading_ret', status: 'rejected', applies: false, confidence: 0.1, evidence: { overwrite: true } },
+            { slug: 'fading_prop', status: 'rejected', applies: false, confidence: 0.2, evidence: { overwrite: true } },
+            { slug: 'control_cat', status: 'confirmed', applies: true, confidence: 0.7 },
+          ],
+          usage: {},
+        };
+        assert.equal(await recordResult(tx, c.run_id, c.lease_token, p), 'succeeded');
+        assert.deepEqual(await snapshot(), before);
+        const [control] = await tx<{ status: string }[]>`
+          select status from public.game_tags
+          where game_id = ${gameId} and bundle_sha256 = ${bundle} and category_slug = 'control_cat'
+        `;
+        assert.equal(control?.status, 'confirmed');
+      });
+    } finally {
+      await sql.end({ timeout: 1 });
     }
   });
 });
