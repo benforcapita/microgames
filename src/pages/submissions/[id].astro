@@ -1,9 +1,11 @@
 ---
 import Layout from '../../layouts/Layout.astro';
 import AssetWarnings from '../../components/AssetWarnings.astro';
+import PreviewLinks from '../../components/PreviewLinks.astro';
 import { summarizeAssets, type AssetInputItem } from '../../lib/asset-limits';
 import { isAdmin } from '../../lib/server/profiles';
 import { loadAssetSummaryInput, sqlSubmissionStore } from '../../lib/server/submissions-db';
+import { getGameOwnerId, listActivePreviewLinks } from '../../lib/server/preview-links';
 import {
   isSubmissionPreview,
   previewSubmissionView,
@@ -40,6 +42,11 @@ const staticChecks = view.validation?.checks.filter((c) => c.source === 'static'
 const runChecks = view.validation?.checks.filter((c) => c.source === 'run') ?? [];
 const stageLabel = submissionStageLabel(view.game.stage, view.validation?.status ?? null);
 const awaitingReview = view.game.stage === 'pending' && view.validation?.status === 'passed';
+const ownerId = preview ? null : await getGameOwnerId(id);
+const isOwner = !preview && Boolean(Astro.locals.user && ownerId && ownerId === Astro.locals.user.id);
+const activeLinks = isOwner
+  ? await listActivePreviewLinks({ supabase: Astro.locals.supabase, gameId: id })
+  : [];
 ---
 
 <Layout title={`${view.game.title} · Submission`} description={`Validation status for ${view.game.title}.`}>
@@ -95,6 +102,8 @@ const awaitingReview = view.game.stage === 'pending' && view.validation?.status 
         <a class="btn" href="/me#upload">Upload a fixed version</a>
       </p>
     )}
+
+    {isOwner && <PreviewLinks gameId={view.game.id} links={activeLinks} />}
 
     <section class="panel">
       <h2>Static checks</h2>
