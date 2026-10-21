@@ -154,13 +154,14 @@ def test_exactly_eight_questions_use_one_call() -> None:
     assert [len(questions) for questions in fake.questions] == [8]
 
 
-def test_at_most_fourteen_tags_are_asked_with_safety_first() -> None:
+def test_every_suggested_tag_is_asked_safety_first_in_chunks_of_eight() -> None:
     cats = [NSFW, KID_SAFE, *_content(20)]
     fake = FakeJev()
     result = judge(fake, STATE, cats, _slugs(cats))
     asked = [name for questions in fake.questions for name in questions]
-    assert asked == ["t_nsfw", "t_kid_safe"] + [f"t_c{i}" for i in range(12)]
-    assert len(result.answers) == 14
+    assert asked == ["t_nsfw", "t_kid_safe"] + [f"t_c{i}" for i in range(20)]
+    assert [len(questions) for questions in fake.questions] == [8, 8, 6]
+    assert len(result.answers) == 22
 
 
 def test_state_is_passed_to_the_backend_verbatim() -> None:

@@ -34,7 +34,6 @@ _TIMEOUT = 30.0
 _MAX_RETRIES = 2
 _MAX_DELAY = 60.0
 _CHUNK = 8
-_MAX_TAGS = 14
 _SAFETY = ("nsfw", "kid_safe")
 _REQUEST_ID = "x-typesafe-request-id"
 _STATUS: dict[int, JevCode] = {
@@ -172,7 +171,7 @@ def _plan(categories: Sequence[Category], suggested: Sequence[str]) -> list[Cate
     for slug in suggested:
         if slug in by_slug and slug not in slugs:
             slugs.append(slug)
-    return [by_slug[slug] for slug in slugs[:_MAX_TAGS]]
+    return [by_slug[slug] for slug in slugs]
 
 
 def _question(cat: Category) -> Noul:
