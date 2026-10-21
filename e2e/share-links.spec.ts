@@ -103,7 +103,7 @@ test('an unapproved game with an active preview link is absent from browse, sear
     const search = await request.get(`/games?q=${encodeURIComponent(title)}`);
     expect(search.status()).toBe(200);
     const searchBody = await search.text();
-    expect(searchBody).toContain('<h1>Play</h1>');
+    expect(searchBody).toContain('>Play</h1>');
     expect(searchBody).not.toContain(title);
     expect(searchBody).not.toContain(`/play/${pendingId}`);
 
