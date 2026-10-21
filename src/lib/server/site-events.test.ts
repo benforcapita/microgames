@@ -174,6 +174,9 @@ describe('POST /api/events: preview links', () => {
       `%252Fp%252F${token}`,
       `%25252Fp%25252F${token}`,
       `%2fp%2f${token}`,
+      `/P/${token}`,
+      `%2FP%2F${token}`,
+      `\\/p\\/${token}`,
       `/p/${token} /p/${again}`,
     ];
     const first = await h.send({
@@ -204,6 +207,11 @@ describe('POST /api/events: preview links', () => {
     assert.match(stored, /%252Fp%252F\[redacted\]/);
     assert.match(stored, /%25252Fp%25252F\[redacted\]/);
     assert.match(stored, /%2fp%2f\[redacted\]/);
+    assert.match(stored, /\/p\/\[redacted\]/);
+    assert.match(stored, /%2Fp%2F\[redacted\]/);
+    const links = h.rows[0]?.event.details.links;
+    assert.ok(Array.isArray(links));
+    assert.ok(links.includes(String.raw`\/p\/[redacted]`));
     assert.match(stored, /src\/pages\/p\/\[token\]\.astro/);
     assert.match(stored, /\/play\/stk7wr01/);
     assert.match(stored, /\/proving/);

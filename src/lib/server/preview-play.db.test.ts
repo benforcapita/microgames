@@ -50,6 +50,7 @@ type ListGamesByIds = typeof import('./games.ts').listGamesByIds;
 type ListTags = typeof import('./games.ts').listTags;
 type GetGame = typeof import('./games.ts').getGame;
 type ReplaceBundle = typeof import('./games.ts').replaceGameBundle;
+type DeleteGame = typeof import('./games.ts').deleteGame;
 type IpSubject = typeof import('./abuse.ts').sessionIpSubject;
 type AdmitPreview = typeof import('./abuse.ts').admitPreviewPage;
 
@@ -59,13 +60,14 @@ let listGamesByIds: ListGamesByIds;
 let listTags: ListTags;
 let getGame: GetGame;
 let replaceGameBundle: ReplaceBundle;
+let deleteGame: DeleteGame;
 let sessionIpSubject: IpSubject;
 let admitPreviewPage: AdmitPreview;
 let sql: postgres.Sql;
 
 if (probeOk && dbUrl) {
   ({ openPreviewLink } = await import('./preview-play.ts'));
-  ({ listGames, listGamesByIds, listTags, getGame, replaceGameBundle } = await import('./games.ts'));
+  ({ listGames, listGamesByIds, listTags, getGame, replaceGameBundle, deleteGame } = await import('./games.ts'));
   ({ sessionIpSubject, admitPreviewPage } = await import('./abuse.ts'));
   ({ sql } = await import('./db.ts'));
 }
@@ -97,13 +99,14 @@ function memoryBundles(): BundleStorage & { files: Map<string, Uint8Array> } {
   };
 }
 
-function playCdn(files: Map<string, Uint8Array>, version: number) {
+function playCdn(files: Map<string, Uint8Array>, version: number | (() => number)) {
   const previewSecret = process.env.CDN_PREVIEW_SECRET ?? SECRET;
+  const currentVersion = () => (typeof version === 'function' ? version() : version);
   const fakeFetch: typeof fetch = async (input) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
     const u = new URL(url);
     if (u.pathname === '/rest/v1/games') return Response.json([{ stage: 'pending' }]);
-    if (u.pathname === '/rest/v1/game_validations') return Response.json([{ version }]);
+    if (u.pathname === '/rest/v1/game_validations') return Response.json([{ version: currentVersion() }]);
     const prefix = '/storage/v1/object/authenticated/games/';
     if (u.pathname.startsWith(prefix)) {
       const body = files.get(decodeURIComponent(u.pathname.slice(prefix.length)));
@@ -603,6 +606,156 @@ describe('preview play', () => {
       assert.equal(rows.length, 0);
     } finally {
       await sql`delete from public.preview_page_hits where subject = ${subject}`.catch(() => {});
+    }
+  });
+
+  it('plays the passed v2 bundle after v1 was opened and tagged nsfw', async (t) => {
+    if (!probeOk || !sql) {
+      t.skip('local supabase is not running');
+      return;
+    }
+    const ownerId = randomUUID();
+    const gameId = `pv${randomBytes(4).toString('hex')}`;
+    const creator = `cr${gameId}`.slice(0, 32);
+    const bundles = memoryBundles();
+    const v1 = htmlBytes('BUNDLE-V1');
+    const v2 = htmlBytes('BUNDLE-V2');
+    const passed2 = 'cd'.repeat(32);
+    let current = 1;
+    try {
+      await sql`
+        insert into auth.users (instance_id, id, aud, role, email, encrypted_password, created_at, updated_at)
+        values ('00000000-0000-0000-0000-000000000000', ${ownerId}::uuid, 'authenticated', 'authenticated', ${`${ownerId}@example.test`}, '', now(), now())
+      `;
+      await sql`insert into public.profiles (id, handle) values (${ownerId}::uuid, ${creator})`;
+      await sql`
+        insert into public.games (id, slug, owner_id, creator, title, stage)
+        values (${gameId}, ${gameId}, ${ownerId}::uuid, ${creator}, ${`Quarry ${gameId}`}, 'pending')
+      `;
+      const [version] = await sql<{ id: string }[]>`
+        insert into public.game_validations (game_id, version, bundle_sha256, status)
+        values (${gameId}, 1, ${sha}, 'passed')
+        returning id
+      `;
+      bundles.files.set(`${gameId}/index.html`, v1);
+      const mint = async (versionId: string) => {
+        const [link] = await sql.begin(async (tx) => {
+          await tx`select set_config('request.jwt.claim.sub', ${ownerId}, true)`;
+          await tx`select set_config('request.jwt.claims', ${JSON.stringify({ sub: ownerId, role: 'authenticated' })}, true)`;
+          await tx.unsafe('set local role authenticated');
+          return tx<{ token: string }[]>`select token from public.create_preview_link(${versionId}::uuid)`;
+        });
+        return link.token;
+      };
+      const firstToken = await mint(version.id);
+      const first = await openPreviewLink({ token: firstToken, ip: `lane-${gameId}-v1` });
+      assert.equal(first.kind, 'play');
+      if (first.kind !== 'play') return;
+      assert.equal(first.version, 1);
+      const get = playCdn(bundles.files, () => current);
+      const v1Src = new URL(gameFrameSrc('http://cdn.test', first.gameId, 'http://portal.test', '{}', first.previewToken, first.version));
+      const opened = await get(`${v1Src.pathname}${v1Src.search}`);
+      assert.equal(opened.status, 200);
+      assert.match(opened.body, /BUNDLE-V1/);
+      await sql`
+        insert into public.game_tags (game_id, bundle_sha256, category_slug, status, applies)
+        values (${gameId}, ${sha}, 'nsfw', 'confirmed', true)
+      `;
+      const killed = await openPreviewLink({ token: firstToken, ip: `lane-${gameId}-nsfw` });
+      const unknown = await openPreviewLink({ token: token(), ip: `lane-${gameId}-miss` });
+      assert.deepEqual(killed, { kind: 'miss' });
+      assert.deepEqual(killed, unknown);
+      const replaced = await replaceGameBundle({ gameKey: gameId, ownerId, html: v2 }, bundles);
+      assert.equal(replaced.ok, true);
+      const [next] = await sql<{ id: string }[]>`
+        insert into public.game_validations (game_id, version, bundle_sha256, status)
+        values (${gameId}, 2, ${passed2}, 'passed')
+        returning id
+      `;
+      current = 2;
+      const secondToken = await mint(next.id);
+      const second = await openPreviewLink({ token: secondToken, ip: `lane-${gameId}-v2` });
+      assert.equal(second.kind, 'play');
+      if (second.kind !== 'play') return;
+      assert.equal(second.version, 2);
+      const v2Src = new URL(gameFrameSrc('http://cdn.test', second.gameId, 'http://portal.test', '{}', second.previewToken, second.version));
+      const passed = await get(`${v2Src.pathname}${v2Src.search}`);
+      assert.equal(passed.status, 200);
+      assert.match(passed.body, /BUNDLE-V2/);
+      assert.equal(passed.body.includes('BUNDLE-V1'), false);
+      const still = await get(`${v1Src.pathname}${v1Src.search}`);
+      assert.equal(still.status, 200);
+      assert.match(still.body, /BUNDLE-V1/);
+      assert.equal(still.body.includes('BUNDLE-V2'), false);
+    } finally {
+      await sql`delete from public.games where id = ${gameId}`.catch(() => {});
+      await sql`delete from public.profiles where id = ${ownerId}::uuid`.catch(() => {});
+      await sql`delete from auth.users where id = ${ownerId}::uuid`.catch(() => {});
+    }
+  });
+
+  it('archives the latest validation, surfaces an archive upload error, and deletes every archive', async (t) => {
+    if (!probeOk || !sql) {
+      t.skip('local supabase is not running');
+      return;
+    }
+    const ownerId = randomUUID();
+    const gameId = `ar${randomBytes(4).toString('hex')}`;
+    const bundles = memoryBundles();
+    const v1 = htmlBytes('ARCHIVE-V1');
+    const v2 = htmlBytes('ARCHIVE-V2');
+    const v3 = htmlBytes('ARCHIVE-V3');
+    const decode = (bytes: Uint8Array | undefined) => new TextDecoder().decode(bytes ?? new Uint8Array());
+    try {
+      await sql`
+        insert into auth.users (instance_id, id, aud, role, email, encrypted_password, created_at, updated_at)
+        values ('00000000-0000-0000-0000-000000000000', ${ownerId}::uuid, 'authenticated', 'authenticated', ${`${ownerId}@example.test`}, '', now(), now())
+      `;
+      await sql`insert into public.profiles (id, handle) values (${ownerId}::uuid, ${gameId})`;
+      await sql`
+        insert into public.games (id, slug, owner_id, creator, title, stage)
+        values (${gameId}, ${gameId}, ${ownerId}::uuid, ${gameId}, 'Archive', 'pending')
+      `;
+      await sql`
+        insert into public.game_validations (game_id, version, bundle_sha256, status)
+        values (${gameId}, 1, ${sha}, 'passed'), (${gameId}, 2, ${'cd'.repeat(32)}, 'passed')
+      `;
+      bundles.files.set(`${gameId}/1/index.html`, v1);
+      bundles.files.set(`${gameId}/index.html`, v2);
+      const replaced = await replaceGameBundle({ gameKey: gameId, ownerId, html: v3 }, bundles);
+      assert.equal(replaced.ok, true);
+      assert.equal(decode(bundles.files.get(`${gameId}/1/index.html`)), decode(v1));
+      assert.equal(decode(bundles.files.get(`${gameId}/2/index.html`)), decode(v2));
+      assert.equal(decode(bundles.files.get(`${gameId}/index.html`)), decode(v3));
+
+      const refused = memoryBundles();
+      refused.files.set(`${gameId}/index.html`, v1);
+      const upload = refused.upload.bind(refused);
+      refused.upload = async (path, bytes, contentType) => (
+        path === `${gameId}/2/index.html` ? { error: { message: 'archive refused' } } : upload(path, bytes, contentType)
+      );
+      await assert.rejects(
+        () => replaceGameBundle({ gameKey: gameId, ownerId, html: v3 }, refused),
+        /archive refused/,
+      );
+      assert.equal(decode(refused.files.get(`${gameId}/index.html`)), decode(v1));
+      assert.equal(refused.files.has(`${gameId}/2/index.html`), false);
+
+      const removed: string[] = [];
+      const deleted = await deleteGame(gameId, ownerId, {
+        async remove(paths) {
+          removed.push(...paths);
+          return { error: null };
+        },
+      });
+      assert.equal(deleted, true);
+      assert.ok(removed.includes(`${gameId}/index.html`));
+      assert.ok(removed.includes(`${gameId}/1/index.html`));
+      assert.ok(removed.includes(`${gameId}/2/index.html`));
+    } finally {
+      await sql`delete from public.games where id = ${gameId}`.catch(() => {});
+      await sql`delete from public.profiles where id = ${ownerId}::uuid`.catch(() => {});
+      await sql`delete from auth.users where id = ${ownerId}::uuid`.catch(() => {});
     }
   });
 });

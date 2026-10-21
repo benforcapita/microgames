@@ -65,6 +65,9 @@ describe('client path: never the query string or hash', () => {
       [`%252Fp%252F${token}`, /%252Fp%252F\[redacted\]/],
       [`%25252Fp%25252F${token}`, /%25252Fp%25252F\[redacted\]/],
       [`%2fp%2f${token}`, /%2fp%2f\[redacted\]/],
+      [`/P/${token}`, /\/p\/\[redacted\]/],
+      [`%2FP%2F${token}`, /%2Fp%2F\[redacted\]/],
+      [`\\/p\\/${token}`, /\\\/p\\\/\[redacted\]/],
       [`/p/${token} /p/${again}`, /\/p\/\[redacted\] \/p\/\[redacted\]/],
     ];
     for (const [raw, want] of cases) {

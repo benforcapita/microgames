@@ -323,13 +323,13 @@ export async function replaceGameBundle(
 }
 
 /** Deletes a game owned by `ownerId`, including its bundle in storage. Returns false if not found / not owned. */
-export async function deleteGame(gameId: string, ownerId: string): Promise<boolean> {
+export async function deleteGame(gameId: string, ownerId: string, storage: Pick<BundleStorage, 'remove'> = bundleStorage()): Promise<boolean> {
   const versions = await sql<{ version: number }[]>`
     select version from game_validations where game_id = ${gameId}`;
   const [row] = await sql<{ id: string; thumb: string | null }[]>`
     delete from games where id = ${gameId} and owner_id = ${ownerId} returning id, thumb`;
   if (!row) return false;
-  await bucket().remove([
+  await storage.remove([
     `${row.id}/index.html`,
     ...versions.map((v) => `${row.id}/${v.version}/index.html`),
     ...(row.thumb ? [`${row.id}/${row.thumb}`] : []),

@@ -197,10 +197,10 @@ function lruCache({ now, ttlMs, maxBytes }) {
 /** Runs `fn` once per key at a time; concurrent callers share the in-flight promise. */
 function coalesce(fn) {
   const inflight = new Map();
-  return (key) => {
+  return (key, ...rest) => {
     let p = inflight.get(key);
     if (!p) {
-      p = fn(key).finally(() => inflight.delete(key));
+      p = fn(key, ...rest).finally(() => inflight.delete(key));
       inflight.set(key, p);
     }
     return p;
@@ -237,22 +237,16 @@ export function createHandler(cfg) {
   const headers = { apikey: SECRET };
   if (SECRET.startsWith('eyJ')) headers.Authorization = `Bearer ${SECRET}`;
 
-  const loadObject = coalesce(async (key) => {
-    const storageKey = key.includes('\n') ? key.slice(0, key.indexOf('\n')) : key;
+  const loadObject = coalesce(async (cacheKey, storageKey) => {
     const res = await doFetch(`${SUPABASE_URL}/storage/v1/object/authenticated/games/${storageKey}`, { headers });
-    if (!res.ok) return objects.set(key, null);
+    if (!res.ok) return { value: null };
     const body = Buffer.from(await res.arrayBuffer());
     const etag = `"${crypto.createHash('sha1').update(body).digest('base64url').slice(0, 16)}"`;
-    return objects.set(key, { body, etag, variants: new Map() }, body.length);
+    return objects.set(cacheKey, { body, etag, variants: new Map() }, body.length);
   });
-  /**
-   * Cache entry for a bundle object; `entry.value` is null when Storage has no such object.
-   * Asset entries are keyed by content_at so a later copy cannot be served from an entry
-   * that was approved for the previous bytes. The Storage URL stays the object path.
-   */
-  const fetchObject = async (storageKey, contentAt) => {
-    const key = contentAt == null ? storageKey : `${storageKey}\n${contentAt}`;
-    return objects.get(key) ?? loadObject(key);
+  const fetchObject = async (storageKey, generation) => {
+    const cacheKey = generation == null ? storageKey : `${storageKey}\n${generation}`;
+    return objects.get(cacheKey) ?? loadObject(cacheKey, storageKey);
   };
 
   /** A derived body (injected HTML, compressed bytes) memoized on the object's cache entry. */
@@ -289,9 +283,12 @@ export function createHandler(cfg) {
     return versions.set(id, Number.isSafeInteger(version) && version >= 1 ? version : 1).value;
   });
   /** The game's current bundle version. Throws on lookup errors (not cached, fail closed). */
-  async function gameVersion(id) {
-    const hit = versions.get(id);
-    return hit ? hit.value : loadVersion(id);
+  async function gameVersion(id, fresh = false) {
+    if (!fresh) {
+      const hit = versions.get(id);
+      if (hit) return hit.value;
+    }
+    return loadVersion(id);
   }
 
   /**
@@ -383,9 +380,10 @@ export function createHandler(cfg) {
       const pinnedDoc = grant?.kind === 'pinned' && isDoc && asset?.version === grant.version;
       let entry;
       if (pinnedDoc && asset) {
-        const archived = await fetchObject(`${id}/${asset.version}/index.html`, null);
+        const versionKey = String(asset.version);
+        const archived = await fetchObject(`${id}/${asset.version}/index.html`, versionKey);
         if (archived.value) entry = archived;
-        else if (asset.version === (await gameVersion(id))) entry = await fetchObject(`${id}/index.html`, null);
+        else if (asset.version === (await gameVersion(id, true))) entry = await fetchObject(`${id}/index.html`, versionKey);
         else return send(res, 404, 'Not found');
       } else {
         entry = await fetchObject(`${id}/${asset ? (isDoc ? 'index.html' : asset.key) : file}`, contentAt);
