@@ -80,7 +80,7 @@ The plaintext token is returned once, from `create_preview_link`. The database s
 
 `preview_links.view_count` increases only when `resolve_preview_link` returns the game. An unknown token, a revoked link, an expired link, a validation that has not passed, a rejected game, or a confirmed NSFW bundle returns no row and leaves the count unchanged. Those misses look the same to the caller.
 
-`preview_link_audit` is the creator's record of `created`, `revoked`, and `expired_hit` (the token was presented after `expires_at`). Each event is stored once per link. The columns are `event`, `link_id`, `actor`, and `at`. `actor` is the creator's profile id, including when an anonymous player hits an expired link. The table has no IP address, email, or token. A signed-in creator can read their own rows. The preview-link functions are the writers.
+`preview_link_audit` records `created`, `revoked`, and `expired_hit` (the token was presented after `expires_at`, including when the link was already revoked or the version's check has not passed). Each event is stored once per link, and a second request leaves the original time in place. The columns are `event`, `link_id`, `actor`, and `at`. `actor` is the creator's profile id, including an anonymous expired hit and an admin revoke. The table has no IP address, email, or token. Row security returns a signed-in creator's own rows. A trigger on the link writes created and revoked. `resolve_preview_link` writes an expired hit. Both writers are security-definer functions with an empty search path.
 
 Creator page: `/preview-links`.
 
