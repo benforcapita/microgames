@@ -262,7 +262,7 @@ def test_two_hundred_files_are_accepted() -> None:
 
 @pytest.mark.parametrize(
     "path",
-    ["../x", "foo/../../etc", "foo..bar", "/abs", "a\\b", "", "p" * 513],
+    ["../x", "foo/../../etc", "foo..bar", "/abs", "a\\b", "", "a\x00b", "p" * 513],
 )
 def test_illegal_path_is_bundle_path_before_open(path: str) -> None:
     transport = _MapTransport({path: b"alpha"})
