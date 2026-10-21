@@ -112,6 +112,10 @@ begin
 end;
 $$;
 
+alter table public.admin_actions drop constraint admin_actions_action_check;
+alter table public.admin_actions add constraint admin_actions_action_check
+  check (action in ('approve', 'reject', 'go_live', 'unlist', 'edit_metadata', 'revoke_preview'));
+
 create function public.admin_revoke_preview_link(p_id uuid)
 returns void
 language plpgsql
@@ -121,6 +125,8 @@ as $$
 declare
   v_uid uuid := auth.uid();
   v_role text;
+  v_game_id text;
+  v_revoked timestamptz;
 begin
   if v_uid is null then
     raise exception 'preview_link_denied' using errcode = '42501';
@@ -131,12 +137,28 @@ begin
   if v_role is distinct from 'admin' then
     raise exception 'preview_link_denied' using errcode = '42501';
   end if;
-  update public.preview_links as l
-     set revoked_at = coalesce(l.revoked_at, pg_catalog.now())
-   where l.id = p_id;
+  select gv.game_id, l.revoked_at into v_game_id, v_revoked
+    from public.preview_links as l
+    join public.game_validations as gv on gv.id = l.version_id
+   where l.id = p_id
+   for update of l;
   if not found then
     raise exception 'preview_link_denied' using errcode = '42501';
   end if;
+  if v_revoked is not null then
+    return;
+  end if;
+  update public.preview_links as l
+     set revoked_at = pg_catalog.now()
+   where l.id = p_id
+  returning l.revoked_at into v_revoked;
+  insert into public.admin_actions (action, game_id, before, after)
+  values (
+    'revoke_preview',
+    v_game_id,
+    pg_catalog.jsonb_build_object('preview_link_id', p_id, 'revoked_at', null),
+    pg_catalog.jsonb_build_object('preview_link_id', p_id, 'revoked_at', v_revoked)
+  );
 end;
 $$;
 
