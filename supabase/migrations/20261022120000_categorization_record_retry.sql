@@ -62,7 +62,8 @@ begin
   if not coalesce(v_ok, false) then
     raise exception 'lease_lost' using errcode = 'P0001';
   end if;
-  if (select count(*) from public.categories where status = 'proposed') >= 50 then
+  perform pg_advisory_xact_lock(hashtext('cat_propose_categories'));
+  if (select count(*) from public.categories where status = 'proposed') > 50 then
     raise exception 'too_many_proposals' using errcode = 'P0001';
   end if;
   v_props := case
@@ -128,7 +129,7 @@ begin
            t.tag ->> 'version',
            t.tag -> 'evidence'
     from jsonb_array_elements(coalesce(p -> 'tags', '[]'::jsonb)) as t(tag)
-    join public.categories c on c.slug = t.tag ->> 'slug'
+    join public.categories c on c.slug = t.tag ->> 'slug' and c.status = 'approved'
     on conflict (game_id, bundle_sha256, category_slug) do update
       set status = excluded.status,
           applies = excluded.applies,

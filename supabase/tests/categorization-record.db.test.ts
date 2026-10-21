@@ -132,6 +132,26 @@ async function failRun(sql: Sql, runId: string, token: string, code: string, ret
   return row.s;
 }
 
+async function propose(sql: Sql, runId: string, token: string, p: object): Promise<number> {
+  const [row] = await sql<{ n: number }[]>`
+    select private.cat_propose_categories(${runId}::bigint, ${token}::uuid, ${JSON.stringify(p)}::text::jsonb) as n
+  `;
+  return row.n;
+}
+
+async function breakerOpenWindow(sql: Sql, provider: string): Promise<{ consecutive_failures: number; open_in_window: boolean | null } | undefined> {
+  const [row] = await sql<{ consecutive_failures: number; open_in_window: boolean | null }[]>`
+    select consecutive_failures,
+           (open_until between now() + interval '14 minutes 59 seconds'
+                           and now() + interval '15 minutes 1 second') as open_in_window
+    from private.categorization_breaker where provider = ${provider}
+  `;
+  return row;
+}
+
+const tooManyProposals = (err: unknown) =>
+  err instanceof postgres.PostgresError && err.code === 'P0001' && err.message === 'too_many_proposals';
+
 type RunRow = {
   status: string;
   attempts: number;
@@ -844,7 +864,7 @@ describe('categorization record, retry and purge (CAT-2b)', { concurrency: false
     }
   });
 
-  it('proposes up to three valid categories and refuses when 50 proposals are open', async (t) => {
+  it('proposes up to three valid categories and refuses when more than 50 proposals are open', async (t) => {
     const sql = await connect(t);
     if (!sql) return;
     const gameId = gid();
@@ -909,17 +929,414 @@ describe('categorization record, retry and purge (CAT-2b)', { concurrency: false
         await tx`
           insert into public.categories (slug, description, status)
           select 'flood_' || i, 'flood proposal', 'proposed'
-          from generate_series(1, 50) as i
+          from generate_series(1, 51) as i
         `;
         await assert.rejects(
           tx.savepoint((sp) => sp`
             select private.cat_propose_categories(${runId}::bigint, ${c.lease_token}::uuid, ${JSON.stringify(p)}::text::jsonb)
           `),
-          refused('P0001'),
+          tooManyProposals,
         );
       });
     } finally {
       await sql.end({ timeout: 1 });
+    }
+  });
+
+  it('opens the breaker for exactly 15 minutes on the fifth failure and at once on auth and credits errors', async (t) => {
+    const sql = await connect(t);
+    if (!sql) return;
+    const gameId = gid();
+    try {
+      await rollback(sql, async (tx) => {
+        const running = async (bundle: string) => {
+          const token = randomUUID();
+          const id = await insertRun(tx, gameId, bundle, {
+            status: 'running',
+            attempts: 1,
+            token,
+            leaseUntil: iso(600_000),
+            started: iso(-60_000),
+            next: iso(3_600_000),
+          });
+          return { id, token };
+        };
+        await enable(tx, true);
+        await setCap(tx, (await startedToday(tx)) + 30);
+        await setMaxAttempts(tx, 20);
+        await insertGame(tx, gameId);
+        const runId = await insertRun(tx, gameId, sha('a'));
+        for (let i = 0; i < 5; i++) {
+          const { claim: c } = await failAndCheck(tx, runId);
+          assert.equal(await failRun(tx, c.run_id, c.lease_token, 'haiku_5xx', true), 'queued');
+          await backdateNextAttempt(tx, runId);
+        }
+        assert.deepEqual(await breakerOpenWindow(tx, 'openrouter'), { consecutive_failures: 5, open_in_window: true });
+        assert.equal(await breaker(tx, 'typesafe'), undefined);
+
+        await tx`delete from private.categorization_breaker`;
+        const auth = await running(sha('b'));
+        assert.equal(await failRun(tx, auth.id, auth.token, 'haiku_auth', false), 'failed');
+        assert.deepEqual(await breakerOpenWindow(tx, 'openrouter'), { consecutive_failures: 0, open_in_window: true });
+        assert.equal(await breaker(tx, 'typesafe'), undefined);
+
+        await tx`delete from private.categorization_breaker`;
+        const credits = await running(sha('c'));
+        assert.equal(await failRun(tx, credits.id, credits.token, 'haiku_credits', false), 'failed');
+        assert.deepEqual(await breakerOpenWindow(tx, 'openrouter'), { consecutive_failures: 0, open_in_window: true });
+        assert.equal(await breaker(tx, 'typesafe'), undefined);
+
+        await tx`delete from private.categorization_breaker`;
+        const jev = await running(sha('d'));
+        assert.equal(await failRun(tx, jev.id, jev.token, 'jev_auth', false), 'failed');
+        assert.deepEqual(await breakerOpenWindow(tx, 'typesafe'), { consecutive_failures: 0, open_in_window: true });
+        assert.equal(await breaker(tx, 'openrouter'), undefined);
+      });
+    } finally {
+      await sql.end({ timeout: 1 });
+    }
+  });
+
+  it('re-opens a half-open breaker for 15 minutes and refreshes open_until on further failures', async (t) => {
+    const sql = await connect(t);
+    if (!sql) return;
+    const gameId = gid();
+    try {
+      await rollback(sql, async (tx) => {
+        await enable(tx, true);
+        await setCap(tx, (await startedToday(tx)) + 30);
+        await setMaxAttempts(tx, 20);
+        await insertGame(tx, gameId);
+        const runId = await insertRun(tx, gameId, sha('a'));
+        for (let i = 0; i < 5; i++) {
+          const { claim: c } = await failAndCheck(tx, runId);
+          assert.equal(await failRun(tx, c.run_id, c.lease_token, 'haiku_5xx', true), 'queued');
+          await backdateNextAttempt(tx, runId);
+        }
+        assert.equal((await breaker(tx, 'openrouter'))?.consecutive_failures, 5);
+        await tx`update private.categorization_breaker set open_until = now() - interval '1 second' where provider = 'openrouter'`;
+        const { claim: c6 } = await failAndCheck(tx, runId);
+        assert.equal(await failRun(tx, c6.run_id, c6.lease_token, 'haiku_5xx', true), 'queued');
+        assert.deepEqual(await breakerOpenWindow(tx, 'openrouter'), { consecutive_failures: 6, open_in_window: true });
+        await tx`update private.categorization_breaker set open_until = now() + interval '10 minutes' where provider = 'openrouter'`;
+        const token = randomUUID();
+        const runId2 = await insertRun(tx, gameId, sha('b'), {
+          status: 'running',
+          attempts: 2,
+          token,
+          leaseUntil: iso(600_000),
+          started: iso(-60_000),
+          next: iso(3_600_000),
+        });
+        assert.equal(await failRun(tx, runId2, token, 'haiku_5xx', true), 'queued');
+        assert.deepEqual(await breakerOpenWindow(tx, 'openrouter'), { consecutive_failures: 7, open_in_window: true });
+        assert.equal(await breaker(tx, 'typesafe'), undefined);
+      });
+    } finally {
+      await sql.end({ timeout: 1 });
+    }
+  });
+
+  it('lets claims through exactly at open_until and blocks them a microsecond later', async (t) => {
+    const sql = await connect(t);
+    if (!sql) return;
+    const gameId = gid();
+    try {
+      await rollback(sql, async (tx) => {
+        await enable(tx, true);
+        await setCap(tx, (await startedToday(tx)) + 10);
+        await insertGame(tx, gameId);
+        const runId = await insertRun(tx, gameId, sha('a'));
+        await tx`insert into private.categorization_breaker (provider, open_until) values ('openrouter', now())`;
+        const [c] = await claim(tx);
+        assert.equal(c?.run_id, runId);
+        const runId2 = await insertRun(tx, gameId, sha('b'));
+        await tx`update private.categorization_breaker set open_until = now() + interval '1 microsecond' where provider = 'openrouter'`;
+        assert.deepEqual(await claim(tx), []);
+        await tx`update private.categorization_breaker set open_until = now() + interval '1 second' where provider = 'openrouter'`;
+        assert.deepEqual(await claim(tx), []);
+        assert.equal((await runRow(tx, runId2)).status, 'queued');
+      });
+    } finally {
+      await sql.end({ timeout: 1 });
+    }
+  });
+
+  it('ignores a providers field that is not a jsonb array', async (t) => {
+    const sql = await connect(t);
+    if (!sql) return;
+    const gameId = gid();
+    try {
+      await rollback(sql, async (tx) => {
+        await enable(tx, true);
+        await setCap(tx, (await startedToday(tx)) + 10);
+        await insertGame(tx, gameId);
+        await tx`
+          insert into private.categorization_breaker (provider, consecutive_failures)
+          values ('openrouter', 4), ('typesafe', 2)
+        `;
+        const base = { tags: [{ slug: 'nsfw', status: 'rejected', applies: false }], usage: {} };
+        for (const [i, providers] of ['openrouter', { provider: 'openrouter' }, 7, null].entries()) {
+          const runId = await insertRun(tx, gameId, sha(String(i + 5)));
+          const { claim: c } = await failAndCheck(tx, runId);
+          assert.equal(await recordResult(tx, c.run_id, c.lease_token, { ...base, providers }), 'succeeded');
+        }
+        assert.equal((await breaker(tx, 'openrouter'))?.consecutive_failures, 4);
+        assert.equal((await breaker(tx, 'typesafe'))?.consecutive_failures, 2);
+      });
+    } finally {
+      await sql.end({ timeout: 1 });
+    }
+  });
+
+  it('purges shadow rows strictly older than 90 days and evidence strictly older than 30 days on updated_at', async (t) => {
+    const sql = await connect(t);
+    if (!sql) return;
+    const gameId = gid();
+    try {
+      await rollback(sql, async (tx) => {
+        await insertGame(tx, gameId);
+        const rEdge = await insertRun(tx, gameId, sha('a'), { status: 'succeeded' });
+        const rUnder = await insertRun(tx, gameId, sha('b'), { status: 'succeeded' });
+        const rOver = await insertRun(tx, gameId, sha('c'), { status: 'succeeded' });
+        const rOld = await insertRun(tx, gameId, sha('d'), { status: 'succeeded' });
+        await tx`
+          insert into private.categorization_shadow_results (run_id, game_id, result, created_at)
+          values
+            (${rEdge}::bigint, ${gameId}, '{}', now() - interval '90 days'),
+            (${rUnder}::bigint, ${gameId}, '{}', now() - interval '89 days 23 hours 30 minutes'),
+            (${rOver}::bigint, ${gameId}, '{}', now() - interval '90 days 1 second'),
+            (${rOld}::bigint, ${gameId}, '{}', now() - interval '91 days')
+        `;
+        const [{ deleted }] = await tx<{ deleted: number }[]>`
+          select private.cat_purge_shadow_results() as deleted
+        `;
+        assert.equal(deleted, 2);
+        const remaining = await tx<{ run_id: string }[]>`
+          select run_id::text from private.categorization_shadow_results order by run_id
+        `;
+        assert.deepEqual(remaining.map((r) => r.run_id), [rEdge, rUnder]);
+
+        await tx`insert into public.categories (slug, description, status) values ('edgecat', 'edge', 'approved')`;
+        await tx`
+          insert into public.game_tags (game_id, bundle_sha256, category_slug, status, applies, evidence, created_at, updated_at)
+          values
+            (${gameId}, ${sha('e')}, 'nsfw', 'confirmed', true, '{"k":"edge"}', now() - interval '30 days', now() - interval '30 days'),
+            (${gameId}, ${sha('e')}, 'kid_safe', 'confirmed', true, '{"k":"under"}', now() - interval '29 days 23 hours 30 minutes', now() - interval '29 days 23 hours 30 minutes'),
+            (${gameId}, ${sha('e')}, 'edgecat', 'confirmed', true, '{"k":"over"}', now() - interval '30 days 1 second', now() - interval '30 days 1 second'),
+            (${gameId}, ${sha('f')}, 'nsfw', 'confirmed', true, '{"k":"created_old"}', now() - interval '60 days', now()),
+            (${gameId}, ${sha('f')}, 'kid_safe', 'confirmed', true, '{"k":"updated_old"}', now(), now() - interval '31 days'),
+            (${gameId}, ${sha('0')}, 'nsfw', 'confirmed', true, null, now() - interval '40 days', now() - interval '40 days')
+        `;
+        const [{ nulled }] = await tx<{ nulled: number }[]>`
+          select private.cat_purge_tag_evidence() as nulled
+        `;
+        assert.equal(nulled, 2);
+        const tags = await tx<{ category_slug: string; bundle_sha256: string; evidence: unknown }[]>`
+          select category_slug, bundle_sha256, evidence
+          from public.game_tags where game_id = ${gameId}
+          order by bundle_sha256, category_slug
+        `;
+        assert.equal(tags.length, 6);
+        const ev = (bundle: string, slug: string) =>
+          tags.find((r) => r.bundle_sha256 === bundle && r.category_slug === slug)?.evidence;
+        assert.deepEqual(ev(sha('e'), 'nsfw'), { k: 'edge' });
+        assert.deepEqual(ev(sha('e'), 'kid_safe'), { k: 'under' });
+        assert.equal(ev(sha('e'), 'edgecat'), null);
+        assert.deepEqual(ev(sha('f'), 'nsfw'), { k: 'created_old' });
+        assert.equal(ev(sha('f'), 'kid_safe'), null);
+        assert.equal(ev(sha('0'), 'nsfw'), null);
+      });
+    } finally {
+      await sql.end({ timeout: 1 });
+    }
+  });
+
+  it('never links proposed or unknown categories to game_tags in active mode', async (t) => {
+    const sql = await connect(t);
+    if (!sql) return;
+    const gameId = gid();
+    try {
+      await rollback(sql, async (tx) => {
+        await enable(tx, true);
+        await setCap(tx, (await startedToday(tx)) + 10);
+        await insertGame(tx, gameId);
+        await tx`
+          insert into public.categories (slug, description, status)
+          values ('fresh_idea', 'model proposal', 'proposed'), ('retired_cat', 'old', 'retired')
+        `;
+        const bundle = sha('1');
+        const runId = await insertRun(tx, gameId, bundle, { mode: 'active' });
+        const { claim: c } = await failAndCheck(tx, runId);
+        const p = {
+          tags: [
+            { slug: 'nsfw', status: 'rejected', applies: false, confidence: 0.01 },
+            { slug: 'fresh_idea', status: 'confirmed', applies: true, confidence: 0.9 },
+            { slug: 'retired_cat', status: 'confirmed', applies: true, confidence: 0.9 },
+            { slug: 'no_such_cat', status: 'confirmed', applies: true, confidence: 0.9 },
+          ],
+          usage: { dropped: 3 },
+        };
+        assert.equal(await recordResult(tx, c.run_id, c.lease_token, p), 'succeeded');
+        const tags = await tx<{ category_slug: string; status: string }[]>`
+          select category_slug, status from public.game_tags where game_id = ${gameId}
+        `;
+        assert.deepEqual(tags.map((r) => ({ ...r })), [{ category_slug: 'nsfw', status: 'rejected' }]);
+      });
+    } finally {
+      await sql.end({ timeout: 1 });
+    }
+  });
+
+  it('propose stores crafted input as proposed non-safety, keeps existing slugs and refuses an expired lease', async (t) => {
+    const sql = await connect(t);
+    if (!sql) return;
+    const gameId = gid();
+    const p = {
+      proposed_categories: [
+        { slug: 'craft_flag', name: 'n', definition: 'crafted proposal', status: 'approved', is_safety: true, confirm_threshold: 1, reject_threshold: 0.9, game_id: gameId },
+        { slug: 'kept_slug', name: 'n', definition: 'overwrite attempt', status: 'retired', is_safety: true },
+        { slug: 'Craft_Retired', definition: 'second crafted', status: 'retired', is_safety: true },
+      ],
+    };
+    try {
+      await rollback(sql, async (tx) => {
+        await enable(tx, true);
+        await setCap(tx, (await startedToday(tx)) + 10);
+        await insertGame(tx, gameId);
+        await tx`
+          insert into public.categories (slug, description, status, is_safety)
+          values ('kept_slug', 'original description', 'approved', true)
+        `;
+        const runId = await insertRun(tx, gameId, sha('1'));
+        const { claim: c } = await failAndCheck(tx, runId);
+        assert.equal(await propose(tx, runId, c.lease_token, p), 2);
+        const rows = await tx<{ slug: string; status: string; is_safety: boolean; description: string; confirm_threshold: string; reject_threshold: string }[]>`
+          select slug, status, is_safety, description, confirm_threshold::text, reject_threshold::text
+          from public.categories
+          where slug in ('craft_flag', 'craft_retired', 'kept_slug')
+          order by slug
+        `;
+        assert.deepEqual(
+          rows.map((r) => ({ ...r })),
+          [
+            { slug: 'craft_flag', status: 'proposed', is_safety: false, description: 'crafted proposal', confirm_threshold: '0.85', reject_threshold: '0.15' },
+            { slug: 'craft_retired', status: 'proposed', is_safety: false, description: 'second crafted', confirm_threshold: '0.85', reject_threshold: '0.15' },
+            { slug: 'kept_slug', status: 'approved', is_safety: true, description: 'original description', confirm_threshold: '0.85', reject_threshold: '0.15' },
+          ],
+        );
+        const expiredToken = randomUUID();
+        const runExp = await insertRun(tx, gameId, sha('2'), {
+          status: 'running',
+          attempts: 1,
+          token: expiredToken,
+          leaseUntil: iso(-60_000),
+          started: iso(-120_000),
+          next: iso(3_600_000),
+        });
+        await assert.rejects(tx.savepoint((sp) => propose(sp, runExp, expiredToken, p)), leaseLost);
+      });
+    } finally {
+      await sql.end({ timeout: 1 });
+    }
+  });
+
+  it('allows proposals while at most 50 are open and refuses once more are open', async (t) => {
+    const sql = await connect(t);
+    if (!sql) return;
+    const gameId = gid();
+    const p = { proposed_categories: [{ slug: 'edge_one', definition: 'one' }, { slug: 'edge_two', definition: 'two' }] };
+    try {
+      await rollback(sql, async (tx) => {
+        await enable(tx, true);
+        await setCap(tx, (await startedToday(tx)) + 10);
+        await insertGame(tx, gameId);
+        const runId = await insertRun(tx, gameId, sha('1'));
+        const { claim: c } = await failAndCheck(tx, runId);
+        const [{ open }] = await tx<{ open: number }[]>`
+          select count(*)::int as open from public.categories where status = 'proposed'
+        `;
+        await tx`
+          insert into public.categories (slug, description, status)
+          select 'cap_' || i, 'filler', 'proposed'
+          from generate_series(${open + 1}, 50) as i
+        `;
+        assert.equal(await propose(tx, runId, c.lease_token, p), 2);
+        await assert.rejects(tx.savepoint((sp) => propose(sp, runId, c.lease_token, p)), tooManyProposals);
+        await tx`delete from public.categories where slug in ('edge_one', 'edge_two')`;
+        await tx`insert into public.categories (slug, description, status) values ('cap_51', 'filler', 'proposed')`;
+        await assert.rejects(tx.savepoint((sp) => propose(sp, runId, c.lease_token, p)), tooManyProposals);
+      });
+    } finally {
+      await sql.end({ timeout: 1 });
+    }
+  });
+
+  it('serializes concurrent propose calls so two racing connections cannot both pass the cap', async (t) => {
+    const a = await connect(t);
+    const b = await connect(t);
+    if (!a || !b) {
+      await a?.end({ timeout: 1 });
+      await b?.end({ timeout: 1 });
+      return;
+    }
+    const gameId = gid();
+    try {
+      const [{ open }] = await a<{ open: number }[]>`
+        select count(*)::int as open from public.categories where status = 'proposed'
+      `;
+      await a.begin(async (tx) => {
+        await enable(tx, true);
+        await setCap(tx, (await startedToday(tx)) + 10);
+        await insertGame(tx, gameId);
+        await tx`
+          insert into public.categories (slug, description, status)
+          select 'race_' || i, 'filler', 'proposed'
+          from generate_series(${open + 1}, 50) as i
+        `;
+      });
+      const runA = await insertRun(a, gameId, sha('a'));
+      const [cA] = await claim(a);
+      assert.equal(cA?.run_id, runA);
+      const runB = await insertRun(a, gameId, sha('b'));
+      const [cB] = await claim(b);
+      assert.equal(cB?.run_id, runB);
+      let held!: () => void;
+      const aHolds = new Promise<void>((r) => {
+        held = r;
+      });
+      const txA = a
+        .begin(async (tx) => {
+          try {
+            assert.equal(await propose(tx, runA, cA.lease_token, { proposed_categories: [{ slug: 'race_a', definition: 'a' }] }), 1);
+          } finally {
+            held();
+          }
+          await tx`select pg_sleep(0.5)`;
+        })
+        .then(() => 'ok' as const, (err: unknown) => err);
+      await aHolds;
+      const resB = await propose(b, runB, cB.lease_token, { proposed_categories: [{ slug: 'race_b', definition: 'b' }] }).then(
+        () => 'ok' as const,
+        (err: unknown) => err,
+      );
+      assert.equal(await txA, 'ok');
+      assert.ok(tooManyProposals(resB), `expected too_many_proposals, got ${JSON.stringify(resB)}`);
+      const [{ n }] = await a<{ n: number }[]>`
+        select count(*)::int as n from public.categories where slug in ('race_a', 'race_b')
+      `;
+      assert.equal(n, 1);
+      const [{ open: openAfter }] = await a<{ open: number }[]>`
+        select count(*)::int as open from public.categories where status = 'proposed'
+      `;
+      assert.equal(openAfter, 51);
+    } finally {
+      await a`delete from public.games where id = ${gameId}`.catch(() => {});
+      await a`delete from public.categories where slug like 'race\_%'`.catch(() => {});
+      await a`update private.settings set value = 'false' where key = 'categorization_enabled'`.catch(() => {});
+      await a`update private.settings set value = '50' where key = 'categorization_daily_run_cap'`.catch(() => {});
+      await a.end({ timeout: 1 });
+      await b.end({ timeout: 1 });
     }
   });
 });
