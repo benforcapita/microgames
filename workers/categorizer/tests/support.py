@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import base64
 import io
+import socket
+import time
 from datetime import UTC, datetime
+from pathlib import Path
 
 from categorizer import Deps, FakeQueue, Settings, Stop, Workload, main
 
@@ -67,3 +70,40 @@ def boot(
     )
     code = main(dict(env), deps)
     return code, buf.getvalue(), owned, handled
+
+
+def echo(_work_dir: Path, payload: object) -> object:
+    return payload
+
+
+def explode(_work_dir: Path, _payload: object) -> str:
+    raise RuntimeError("boom")
+
+
+def burn_cpu(_work_dir: Path, _payload: object) -> str:
+    ticks = 0
+    while True:
+        ticks += 1
+    return str(ticks)
+
+
+def eat_memory(work_dir: Path, _payload: object) -> str:
+    chunks: list[bytearray] = []
+    remaining = 1_500 * 1024 * 1024
+    step = 64 * 1024 * 1024
+    while remaining > 0:
+        chunks.append(bytearray(step))
+        remaining -= step
+    (work_dir / "survived").write_text("x", encoding="ascii")
+    return str(len(chunks))
+
+
+def sleep_seconds(_work_dir: Path, payload: object) -> str:
+    time.sleep(float(payload))
+    return "slept"
+
+
+def open_socket(_work_dir: Path, _payload: object) -> str:
+    sock = socket.socket()
+    sock.close()
+    return "connected"
