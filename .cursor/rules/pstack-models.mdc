@@ -1,0 +1,24 @@
+---
+description: pstack per-role model choices (overrides skill defaults)
+alwaysApply: true
+---
+# pstack model configuration. One line per role. Delete a line to fall back to the skill default.
+# `inherit-parent` or `auto` as a value: the role runs on the parent chat model (omit Task `model`). Alias entries in a panel list still count toward its fan-out.
+# budget: large (xhigh)
+feature, refactoring: grok-4.7-xhigh
+bug-fix: grok-4.7-xhigh
+perf-issue: grok-4.7-xhigh
+hillclimb: grok-4.7-xhigh
+judgment and prose: grok-4.7-xhigh
+hardest tasks: grok-4.7-xhigh
+how explorer: grok-4.7-xhigh
+how explainer: composer-2.5
+why investigators: grok-4.7-xhigh
+why synthesizer: composer-2.5
+reflect tooling: grok-4.7-xhigh
+reflect judgment, divergent, synthesizer: composer-2.5
+arena runners: grok-4.7-xhigh, composer-2.5
+arena cross-judge pool: grok-4.7-xhigh, composer-2.5
+swarm workers: grok-4.7-xhigh
+architect runners: grok-4.7-xhigh, composer-2.5
+interrogate reviewers: grok-4.7-xhigh, composer-2.5
