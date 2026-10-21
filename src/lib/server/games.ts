@@ -386,7 +386,7 @@ async function upsertSessionEvent(
   sessionId: string,
   gameId: string,
   columns: SessionEventColumn[],
-  admitNewSession?: (db: GameDb) => Promise<boolean>,
+  admitNewSession?: (db: postgres.TransactionSql) => Promise<boolean>,
 ) {
   const where = sql`where id = ${sessionId} and game_id = ${gameId}`;
   const update = comma(columns.map((c) => sql`${sql(c.col)} = ${c.merge(sql`${sql(c.col)}`, c.value)}`));
@@ -423,7 +423,7 @@ export async function recordTelemetry(
    * pooled connection is held. Unset callers keep the old semantics: session_start
    * always writes, the other events never create a row.
    */
-  admitNewSession?: (db: GameDb) => Promise<boolean>,
+  admitNewSession?: (db: postgres.TransactionSql) => Promise<boolean>,
 ) {
   switch (type) {
     case 'session_start':

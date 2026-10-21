@@ -599,8 +599,8 @@ describe('session telemetry ordering (db)', () => {
     // Same shape the route builds: inside the session lock it may only read via `db`
     // (the lock-holding transaction) — the pool could be exhausted by other sessions.
     const admit =
-      (uid: string, ip: string) => async (db: postgres.Sql | postgres.TransactionSql) =>
-        Boolean(await getGame(GAME, { db })) && admitSessionStart(uid, ip, GAME);
+      (uid: string, ip: string) => async (db: postgres.TransactionSql) =>
+        Boolean(await getGame(GAME, { db })) && (await admitSessionStart(db, { uid, ip, gameId: GAME }));
     const withTimeout = (p: Promise<unknown>, label: string) =>
       Promise.race([
         p,

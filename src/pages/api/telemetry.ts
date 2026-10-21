@@ -1,4 +1,5 @@
 import type { APIRoute } from 'astro';
+import type postgres from 'postgres';
 import {
   MG_UID_COOKIE,
   admitSessionStart,
@@ -8,7 +9,7 @@ import {
   parseUid,
   telemetryByUid,
 } from '../../lib/server/abuse';
-import { getGame, recordTelemetry, type GameDb, type TelemetryType } from '../../lib/server/games';
+import { getGame, recordTelemetry, type TelemetryType } from '../../lib/server/games';
 import { parseableAuthCookie, sessionUserId } from '../../lib/server/session-user';
 
 const TYPES = new Set<TelemetryType>(['session_start', 'first_frame', 'start', 'complete', 'crash', 'heartbeat', 'ready']);
@@ -63,8 +64,8 @@ export const POST: APIRoute = async (context) => {
   // first — must pass the same admission: known game plus the session-start rate limits.
   // It runs inside recordTelemetry's session lock, so reads must go through `db`, the
   // lock-holding transaction — never the pool, which could be exhausted by other sessions.
-  const admitNewSession = async (db: GameDb) =>
-    Boolean(await getGame(gameId, { db })) && admitSessionStart(uid, ip, gameId);
+  const admitNewSession = async (db: postgres.TransactionSql) =>
+    Boolean(await getGame(gameId, { db })) && (await admitSessionStart(db, { uid, ip, gameId }));
   await recordTelemetry(sessionId, gameId, type, body?.value, userId, admitNewSession);
   return new Response(null, { status: 204 });
 };
