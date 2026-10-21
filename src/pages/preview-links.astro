@@ -1,0 +1,48 @@
+---
+import Layout from '../layouts/Layout.astro';
+---
+
+<Layout title="Preview links" description="Share one version of an unreviewed game with a link that expires. Views are a count, and the record stores no IP address, email, or token.">
+  <section class="section wrap narrow">
+    <span class="eyebrow">For creators</span>
+    <h1>Share a build before it is live.</h1>
+    <p class="lede muted">
+      A preview link lets anyone with the URL play one version of your game, without an account. The game stays out of the arcade until it is approved.
+    </p>
+
+    <h2>The link</h2>
+    <ul class="feature-list">
+      <li><b>One version.</b> The link stays on the upload you shared. A newer upload does not move it.</li>
+      <li><b>Seven days.</b> That is the usual lifetime. You can revoke the link sooner. Revoking it again leaves the original time in place.</li>
+      <li><b>Five at a time.</b> A link counts toward the cap while it is not revoked and not past its lifetime.</li>
+      <li><b>Shown once.</b> Copy the URL when it is created. Meshground keeps a hash of the token, not the token itself.</li>
+    </ul>
+
+    <h2>What a player sees</h2>
+    <p class="muted">
+      A working link opens the game with a banner that it is unreviewed and not yet approved. An unknown, revoked, expired, or blocked link is the same not-found page. The page does not say which of those it was.
+    </p>
+
+    <h2>Views</h2>
+    <p class="muted">
+      The view count goes up only when the game actually opens. A miss leaves the count where it was. The count is a number on the link, not a list of players.
+    </p>
+
+    <h2>Your record</h2>
+    <p class="muted">
+      You can read three facts for each of your links: created, revoked, and that someone opened it after it expired. Each fact is stored once. It names you, the link, and the time. It does not store an IP address, an email address, or the token. Another creator cannot read your rows.
+    </p>
+
+    <div class="row cta">
+      <a class="btn" href="/creators">Back to creators</a>
+    </div>
+  </section>
+</Layout>
+
+<style>
+  .narrow { max-width: 880px; }
+  .lede { font-size: 1.1rem; }
+  h2 { margin-top: 2.5rem; }
+  .feature-list { padding-left: 1.2rem; display: grid; gap: 0.6rem; }
+  .cta { margin-top: 2.5rem; }
+</style>
