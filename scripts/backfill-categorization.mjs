@@ -1,21 +1,48 @@
 import postgres from 'postgres';
 
-const raw = process.env.DATABASE_URL ?? 'postgresql://postgres:postgres@127.0.0.1:54322/postgres';
-
-let host;
-try {
-  host = new URL(raw).hostname;
-} catch {
-  process.stderr.write('[backfill-categorization] refusing invalid database URL\n');
-  process.exit(2);
-}
-
-if (host !== '127.0.0.1' && host !== 'localhost' && host !== '::1' && host !== '[::1]') {
+function refuse() {
   process.stderr.write('[backfill-categorization] refusing non-loopback host\n');
   process.exit(2);
 }
 
-const sql = postgres(raw, {
+const raw = process.env.DATABASE_URL;
+if (!raw) {
+  refuse();
+}
+
+let u;
+try {
+  u = new URL(raw);
+} catch {
+  refuse();
+}
+
+if (u.protocol !== 'postgres:' && u.protocol !== 'postgresql:') {
+  refuse();
+}
+
+const schemeEnd = raw.indexOf('://');
+if (schemeEnd === -1) {
+  refuse();
+}
+
+const rest = raw.slice(schemeEnd + 3);
+const delimIdx = rest.search(/[/?#]/);
+const authority = delimIdx === -1 ? rest : rest.slice(0, delimIdx);
+if (authority.includes(',')) {
+  refuse();
+}
+
+if (u.hostname !== '127.0.0.1' && u.hostname !== 'localhost') {
+  refuse();
+}
+
+const sql = postgres({
+  host: u.hostname,
+  port: Number(u.port || 5432),
+  database: decodeURIComponent(u.pathname.slice(1)) || 'postgres',
+  username: decodeURIComponent(u.username),
+  password: decodeURIComponent(u.password),
   connect_timeout: 3,
   max: 1,
   idle_timeout: 1,

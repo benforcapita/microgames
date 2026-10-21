@@ -113,7 +113,7 @@ describe('categorization enqueue (CAT-4)', { concurrency: false }, () => {
         assert.equal(initialRuns[0].game_id, gameId);
         assert.equal(initialRuns[0].version, 1);
         assert.equal(initialRuns[0].bundle_sha256, shaA);
-        assert.equal(initialRuns[0].pipeline_version, 'v1');
+        assert.equal(initialRuns[0].pipeline_version, 'cat-v1');
         assert.equal(initialRuns[0].mode, 'shadow');
         assert.equal(initialRuns[0].status, 'queued');
 
@@ -363,26 +363,73 @@ describe('categorization enqueue (CAT-4)', { concurrency: false }, () => {
   });
 
   it('backfill script refuses non-loopback host with exit code 2 and never prints the URL', async () => {
-    let exitCode: number | undefined;
-    let stderr = '';
-    const secretUrl = 'postgresql://user:secretpassword@evil.com:5432/db';
-    try {
-      await execFileAsync('node', ['scripts/backfill-categorization.mjs'], {
-        env: { ...process.env, DATABASE_URL: secretUrl },
-      });
-    } catch (err: unknown) {
-      if (err !== null && typeof err === 'object' && 'code' in err && typeof err.code === 'number') {
-        exitCode = err.code;
+    const refusedCases: Array<{ url?: string; secrets?: string[] }> = [
+      { url: 'postgresql://a@evil.invalid:5432,x@127.0.0.1:55861/postgres', secrets: ['evil.invalid'] },
+      { url: 'postgresql://u@evil.invalid/127.0.0.1', secrets: ['evil.invalid'] },
+      { url: 'postgresql://user:secretpassword@evil.invalid:5432/db', secrets: ['evil.invalid', 'secretpassword'] },
+      { url: 'postgresql://u@localhost.evil.invalid/db', secrets: ['localhost.evil.invalid'] },
+      { url: 'postgresql://u@127.0.0.1,evil.invalid/db', secrets: ['evil.invalid'] },
+      { url: 'not a url' },
+      { url: '' },
+      { url: undefined },
+      { url: 'http://127.0.0.1:5432/db' },
+    ];
+
+    for (const testCase of refusedCases) {
+      let exitCode: number | undefined;
+      let stderr = '';
+      const env: Record<string, string | undefined> = {
+        ...process.env,
+        NODE_OPTIONS: '--import ./supabase/tests/fixtures/deny-net.mjs',
+      };
+      if (testCase.url !== undefined) {
+        env.DATABASE_URL = testCase.url;
+      } else {
+        delete env.DATABASE_URL;
       }
-      if (err !== null && typeof err === 'object' && 'stderr' in err && typeof err.stderr === 'string') {
-        stderr = err.stderr;
+      try {
+        await execFileAsync('node', ['scripts/backfill-categorization.mjs'], { env });
+      } catch (err: unknown) {
+        if (err !== null && typeof err === 'object') {
+          if ('code' in err && typeof err.code === 'number') {
+            exitCode = err.code;
+          }
+          if ('stderr' in err && typeof err.stderr === 'string') {
+            stderr = err.stderr;
+          }
+        }
+      }
+      assert.equal(exitCode, 2);
+      assert.equal(stderr.includes('CONNECT_ATTEMPT'), false);
+      assert.equal(stderr.includes('DNS_LOOKUP'), false);
+      assert.ok(stderr.includes('[backfill-categorization] refusing non-loopback host'));
+      if (testCase.url) {
+        assert.equal(stderr.includes(testCase.url), false);
+      }
+      if (testCase.secrets) {
+        for (const secret of testCase.secrets) {
+          assert.equal(stderr.includes(secret), false);
+        }
       }
     }
-    assert.equal(exitCode, 2);
-    assert.equal(stderr.includes(secretUrl), false);
-    assert.equal(stderr.includes('secretpassword'), false);
-    assert.equal(stderr.includes('evil.com'), false);
-    assert.ok(stderr.includes('[backfill-categorization] refusing non-loopback host'));
+
+    let allowedStderr = '';
+    try {
+      const res = await execFileAsync('node', ['scripts/backfill-categorization.mjs'], {
+        env: {
+          ...process.env,
+          DATABASE_URL: 'postgresql://postgres:postgres@127.0.0.1:1/postgres',
+          NODE_OPTIONS: '--import ./supabase/tests/fixtures/deny-net.mjs',
+        },
+      });
+      allowedStderr = res.stderr;
+    } catch (err: unknown) {
+      if (err !== null && typeof err === 'object' && 'stderr' in err && typeof err.stderr === 'string') {
+        allowedStderr = err.stderr;
+      }
+    }
+    assert.ok(allowedStderr.includes('CONNECT_ATTEMPT 127.0.0.1'));
+    assert.equal(allowedStderr.includes('[backfill-categorization] refusing non-loopback host'), false);
   });
 
   it('new functions revoke execute from public, anon, and authenticated', async (t) => {

@@ -1,5 +1,5 @@
 insert into private.settings (key, value)
-values ('categorization_pipeline_version', 'v1')
+values ('categorization_pipeline_version', 'cat-v1')
 on conflict (key) do nothing;
 
 create or replace function private.cat_enqueue_run(
@@ -16,7 +16,7 @@ declare
   v_pipeline_version text;
   v_mode text;
 begin
-  select coalesce((select value from private.settings where key = 'categorization_pipeline_version'), 'v1') into v_pipeline_version;
+  select coalesce((select value from private.settings where key = 'categorization_pipeline_version'), 'cat-v1') into v_pipeline_version;
   select coalesce((select value from private.settings where key = 'categorization_mode'), 'shadow') into v_mode;
 
   insert into private.categorization_runs (
@@ -70,7 +70,7 @@ declare
   v_mode text;
   v_count int;
 begin
-  select coalesce((select value from private.settings where key = 'categorization_pipeline_version'), 'v1') into v_pipeline_version;
+  select coalesce((select value from private.settings where key = 'categorization_pipeline_version'), 'cat-v1') into v_pipeline_version;
   select coalesce((select value from private.settings where key = 'categorization_mode'), 'shadow') into v_mode;
 
   with latest_passed as (
