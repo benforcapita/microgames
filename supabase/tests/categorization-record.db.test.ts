@@ -106,7 +106,7 @@ async function insertTag(
 ): Promise<void> {
   await sql`
     insert into public.game_tags (game_id, bundle_sha256, category_slug, status, applies, confidence, evidence)
-    values (${gameId}, ${bundle}, ${slug}, ${status}, ${applies}, ${fields.confidence ?? null}, ${fields.evidence ?? null}::jsonb)
+    values (${gameId}, ${bundle}, ${slug}, ${status}, ${applies}, ${fields.confidence ?? null}, ${fields.evidence === undefined ? null : JSON.stringify(fields.evidence)}::text::jsonb)
   `;
   if (fields.updatedDaysAgo !== undefined) {
     await sql`
@@ -118,9 +118,9 @@ async function insertTag(
   }
 }
 
-async function recordResult(sql: Sql, runId: string, token: string, p: unknown): Promise<string> {
+async function recordResult(sql: Sql, runId: string, token: string, p: object): Promise<string> {
   const [row] = await sql<{ s: string }[]>`
-    select private.cat_record_result(${runId}::bigint, ${token}::uuid, ${p}::jsonb) as s
+    select private.cat_record_result(${runId}::bigint, ${token}::uuid, ${JSON.stringify(p)}::text::jsonb) as s
   `;
   return row.s;
 }
@@ -648,7 +648,7 @@ describe('categorization record, retry and purge (CAT-2b)', { concurrency: false
 
       const recordA = a
         .begin(async (tx) => {
-          await tx`select private.cat_record_result(${runId}::bigint, ${c.lease_token}::uuid, ${result}::jsonb)`;
+          await tx`select private.cat_record_result(${runId}::bigint, ${c.lease_token}::uuid, ${JSON.stringify(result)}::text::jsonb)`;
           await tx`select pg_sleep(0.4)`;
         })
         .then(() => 'ok' as const, (err: unknown) => err);
@@ -715,7 +715,7 @@ describe('categorization record, retry and purge (CAT-2b)', { concurrency: false
         const runId = await insertRun(tx, gameId, sha('1'));
         const { claim: c } = await failAndCheck(tx, runId);
         const [ins] = await tx<{ n: number }[]>`
-          select private.cat_propose_categories(${runId}::bigint, ${c.lease_token}::uuid, ${p}::jsonb) as n
+          select private.cat_propose_categories(${runId}::bigint, ${c.lease_token}::uuid, ${JSON.stringify(p)}::text::jsonb) as n
         `;
         assert.equal(ins.n, 2);
         const proposed = await tx<{ slug: string; status: string; is_safety: boolean }[]>`
@@ -731,12 +731,12 @@ describe('categorization record, retry and purge (CAT-2b)', { concurrency: false
           ],
         );
         const [again] = await tx<{ n: number }[]>`
-          select private.cat_propose_categories(${runId}::bigint, ${c.lease_token}::uuid, ${p}::jsonb) as n
+          select private.cat_propose_categories(${runId}::bigint, ${c.lease_token}::uuid, ${JSON.stringify(p)}::text::jsonb) as n
         `;
         assert.equal(again.n, 0);
         await assert.rejects(
           tx.savepoint((sp) => sp`
-            select private.cat_propose_categories(${runId}::bigint, ${randomUUID()}::uuid, ${p}::jsonb)
+            select private.cat_propose_categories(${runId}::bigint, ${randomUUID()}::uuid, ${JSON.stringify(p)}::text::jsonb)
           `),
           leaseLost,
         );
@@ -747,7 +747,7 @@ describe('categorization record, retry and purge (CAT-2b)', { concurrency: false
         `;
         await assert.rejects(
           tx.savepoint((sp) => sp`
-            select private.cat_propose_categories(${runId}::bigint, ${c.lease_token}::uuid, ${p}::jsonb)
+            select private.cat_propose_categories(${runId}::bigint, ${c.lease_token}::uuid, ${JSON.stringify(p)}::text::jsonb)
           `),
           refused('P0001'),
         );
