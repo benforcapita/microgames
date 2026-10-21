@@ -218,12 +218,6 @@ def test_model_comes_from_jev_model() -> None:
     assert json.loads(api.requests[0].content)["model"] == "jev-9.9.9"
 
 
-def test_an_empty_model_falls_back_to_the_pinned_default() -> None:
-    api = Api([_ok()])
-    judge(_jev(api, model=""), STATE, [NSFW], [])
-    assert json.loads(api.requests[0].content)["model"] == "jev-1.13.0"
-
-
 def test_response_model_usage_request_id_and_answers_are_captured() -> None:
     api = Api([_ok({"t_nsfw": 0.9}, request_id="req-77")])
     result = judge(_jev(api), STATE, [NSFW], [])

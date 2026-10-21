@@ -29,7 +29,6 @@ JevCode = Literal[
     "jev_timeout", "jev_connection", "jev_missing_answer",
 ]
 
-_DEFAULT_MODEL = "jev-1.13.0"
 _TIMEOUT = 30.0
 _MAX_RETRIES = 2
 _MAX_DELAY = 60.0
@@ -110,7 +109,7 @@ class TypeSafeJev:
         transport: httpx2.BaseTransport | None = None,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
-        self._model = settings.jev_model or _DEFAULT_MODEL
+        self._model = settings.jev_model
         self._sleep = sleep
         self._client = TypeSafeClient(
             api_key=settings.typesafe_api_key.reveal(),
