@@ -17,6 +17,7 @@
     "seed": "node scripts/seed.mjs",
     "admin:grant": "node scripts/grant-admin.mjs",
     "test": "node --experimental-strip-types --disable-warning=ExperimentalWarning --import ./scripts/register-ts.mjs --test \"src/**/*.test.ts\" \"mcp/**/*.test.ts\" \"cdn/**/*.test.ts\" \"scripts/**/*.test.ts\" && node --experimental-strip-types --disable-warning=ExperimentalWarning --import ./scripts/register-ts.mjs --test --test-concurrency=1 \"supabase/**/*.test.ts\"",
+    "test:mutation": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/ci/mutation-diff.ts",
     "db:start": "npx -y supabase@2.120.0 start -x vector,logflare,edge-runtime,imgproxy,realtime",
     "db:stop": "npx -y supabase@2.120.0 stop",
     "check": "astro check",
@@ -43,6 +44,7 @@
   "devDependencies": {
     "@astrojs/check": "0.9.10",
     "@playwright/test": "^1.64.1",
+    "@stryker-mutator/core": "^10.0.0",
     "@types/node": "24.19.1",
     "sharp": "^0.35.5",
     "typescript": "6.0.3"
