@@ -485,7 +485,27 @@ describe('preview play', () => {
       assert.equal(unversioned.status, 404);
       assert.equal(wrong.body.includes('BUNDLE-V3-FAILED'), false);
       assert.equal(unversioned.body.includes('BUNDLE-V3-FAILED'), false);
-      assert.equal((await openPreviewLink({ token: link.token, ip: `lane-${gameId}-secret`, previewSecret: '' })).kind, 'error');
+      const blank = await openPreviewLink({ token: link.token, ip: `lane-${gameId}-secret`, previewSecret: '' });
+      const unknown = await openPreviewLink({ token: token(), ip: `lane-${gameId}-miss` });
+      assert.deepEqual(blank, { kind: 'miss' });
+      assert.deepEqual(blank, unknown);
+      await sql`update public.games set stage = 'rejected' where id = ${gameId}`;
+      const rejected = await openPreviewLink({ token: link.token, ip: `lane-${gameId}-rej` });
+      const rejectedMiss = await openPreviewLink({ token: token(), ip: `lane-${gameId}-rej-miss` });
+      assert.deepEqual(rejected, { kind: 'miss' });
+      assert.deepEqual(rejected, rejectedMiss);
+      await sql`update public.games set stage = 'pending' where id = ${gameId}`;
+      const restored = await openPreviewLink({ token: link.token, ip: `lane-${gameId}-back` });
+      assert.equal(restored.kind, 'play');
+      if (restored.kind === 'play') assert.equal(restored.version, 1);
+      await sql`
+        insert into public.game_tags (game_id, bundle_sha256, category_slug, status, applies)
+        values (${gameId}, ${sha}, 'nsfw', 'confirmed', true)
+      `;
+      const tagged = await openPreviewLink({ token: link.token, ip: `lane-${gameId}-nsfw` });
+      const taggedMiss = await openPreviewLink({ token: token(), ip: `lane-${gameId}-nsfw-miss` });
+      assert.deepEqual(tagged, { kind: 'miss' });
+      assert.deepEqual(tagged, taggedMiss);
     } finally {
       await sql`delete from public.games where id = ${gameId}`.catch(() => {});
       await sql`delete from public.profiles where id = ${ownerId}::uuid`.catch(() => {});
@@ -493,7 +513,7 @@ describe('preview play', () => {
     }
   });
 
-  it('does not count a preview link once the address is already limited', async (t) => {
+  it('counts a valid preview open and stops the next one before resolving it', async (t) => {
     if (!probeOk || !sql) {
       t.skip('local supabase is not running');
       return;
@@ -523,14 +543,19 @@ describe('preview play', () => {
         await tx.unsafe('set local role authenticated');
         return tx<{ id: string; token: string }[]>`select id, token from public.create_preview_link(${version.id}::uuid)`;
       });
-      for (let n = 0; n < 60; n += 1) {
+      for (let n = 0; n < 59; n += 1) {
         assert.equal((await openPreviewLink({ token: token(), ip, now })).kind, 'miss');
       }
+      assert.equal((await openPreviewLink({ token: link.token, ip, now })).kind, 'play');
+      const [opened] = await sql<{ view_count: number }[]>`
+        select view_count from public.preview_links where id = ${link.id}::uuid
+      `;
+      assert.equal(opened.view_count, 1);
       assert.equal((await openPreviewLink({ token: link.token, ip, now })).kind, 'limited');
       const [row] = await sql<{ view_count: number }[]>`
         select view_count from public.preview_links where id = ${link.id}::uuid
       `;
-      assert.equal(row.view_count, 0);
+      assert.equal(row.view_count, 1);
     } finally {
       const subject = sessionIpSubject(ip, process.env.MG_IP_HASH_SECRET ?? '', new Date(now));
       await sql`delete from public.preview_page_hits where subject = ${subject}`.catch(() => {});
@@ -540,26 +565,25 @@ describe('preview play', () => {
     }
   });
 
-  it('admits exactly 60 concurrent preview opens for one address', async (t) => {
-    if (!probeOk || !dbUrl) {
+  it('admits exactly 60 of 120 parallel preview opens for one address', async (t) => {
+    if (!probeOk || !sql) {
       t.skip('local supabase is not running');
       return;
     }
     const now = Date.UTC(2027, 4, 2, 3, 4, 5);
     const ip = `lane-lock-${randomBytes(4).toString('hex')}`;
     const subject = sessionIpSubject(ip, process.env.MG_IP_HASH_SECRET ?? '', new Date(now));
-    const race = postgres(dbUrl, { max: 10, connect_timeout: 5, onnotice: () => {} });
     try {
-      await race`delete from public.preview_page_hits where subject = ${subject}`;
-      const results = await Promise.all(Array.from({ length: 120 }, () => race.begin((tx) => admitPreviewPage(tx, ip, now))));
-      assert.equal(results.filter(Boolean).length, 60);
-      const [row] = await race<{ n: number }[]>`
+      await sql`delete from public.preview_page_hits where subject = ${subject}`;
+      const results = await Promise.all(Array.from({ length: 120 }, () => openPreviewLink({ token: token(), ip, now })));
+      assert.equal(results.filter((result) => result.kind === 'miss').length, 60);
+      assert.equal(results.filter((result) => result.kind === 'limited').length, 60);
+      const [row] = await sql<{ n: number }[]>`
         select count(*)::int as n from public.preview_page_hits where subject = ${subject}
       `;
       assert.equal(row.n, 60);
     } finally {
-      await race`delete from public.preview_page_hits where subject = ${subject}`.catch(() => {});
-      await race.end({ timeout: 1 }).catch(() => {});
+      await sql`delete from public.preview_page_hits where subject = ${subject}`.catch(() => {});
     }
   });
 

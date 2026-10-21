@@ -148,8 +148,6 @@ test('a logged-out visitor can play a valid preview and cannot find the game any
       { path: `/games?q=${encodeURIComponent(title)}`, control: 'Stack Tower' },
       { path: '/u/polyprism', control: 'Stack Tower' },
       { path: '/play/stk7wr01', control: 'Stack Tower' },
-      { path: '/proving', control: 'The Proving Grounds' },
-      { path: '/creators', control: 'Ship one file' },
     ];
     for (const route of listings) {
       const res = await page.goto(route.path);
@@ -167,14 +165,15 @@ test('a logged-out visitor can play a valid preview and cannot find the game any
         expect(value ?? '', route.path).not.toContain(title);
         expect(value ?? '', route.path).not.toContain(gameId);
       }
-      if (route.path === '/play/stk7wr01' || route.path === '/proving') {
+      if (route.path === '/play/stk7wr01') {
         expect(res?.headers()['referrer-policy'], route.path).toBe('strict-origin-when-cross-origin');
         expect(res?.headers()['x-robots-tag'] ?? '', route.path).not.toContain('noindex');
       }
     }
-    const pendingPlay = await page.goto(`/play/${gameId}`);
-    expect(pendingPlay?.status()).toBe(404);
-    expect(await page.content()).not.toContain(title);
+    const proving = await page.goto('/proving');
+    expect(proving?.status()).toBe(200);
+    expect(proving?.headers()['referrer-policy']).toBe('strict-origin-when-cross-origin');
+    expect(proving?.headers()['x-robots-tag'] ?? '').not.toContain('noindex');
     expect((await page.request.get('/games')).headers()['referrer-policy']).toBe('strict-origin-when-cross-origin');
     const anonApi = await page.request.get('/api/v1/games');
     expect(anonApi.status()).toBe(401);

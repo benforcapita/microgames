@@ -36,7 +36,7 @@ export async function openPreviewLink(input: {
     const version = Number(match[2]);
     if (!gameId || !Number.isSafeInteger(version) || version < 1) return { kind: 'error' };
     const previewToken = mintPreviewToken(input.previewSecret ?? CDN_PREVIEW_SECRET, gameId, { version });
-    if (!previewToken) return { kind: 'error' };
+    if (!previewToken) return { kind: 'miss' };
     return { kind: 'play', gameId, title: row.title, version, previewToken };
   } catch {
     console.error('preview play failed');
