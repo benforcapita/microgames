@@ -125,6 +125,27 @@ def _flip_last_hex(digest: str) -> str:
     return digest[:-1] + ("0" if digest[-1] != "0" else "1")
 
 
+def test_content_hash_last_hex_character_is_bundle_mismatch_and_stops() -> None:
+    first = b"alpha"
+    second = b"beta"
+    actual = _sha(first)
+    expected = _flip_last_hex(actual)
+    assert expected[:8] == actual[:8]
+    assert expected[-1] != actual[-1]
+    transport = _MapTransport({"index.html": first, "notes.txt": second})
+    result = download_files(
+        (
+            FileRequest(path="index.html", content_sha256=expected),
+            FileRequest(path="notes.txt", content_sha256=_sha(second)),
+        ),
+        transport,
+    )
+    assert isinstance(result, DownloadFailure)
+    assert result.code == "bundle_mismatch"
+    assert transport.opened == ["index.html"]
+    assert [cursor.pulled for cursor in transport.cursors] == [len(first)]
+
+
 def test_bundle_hash_mismatch_is_bundle_mismatch_and_stops() -> None:
     transport = _MapTransport({"index.html": b"alpha", "notes.txt": b"beta"})
     result = download_files(
@@ -167,6 +188,22 @@ def test_malformed_hash_is_bundle_mismatch_before_open(digest: str) -> None:
     assert isinstance(result, DownloadFailure)
     assert result.code == "bundle_mismatch"
     assert transport.opened == []
+
+
+def test_hash_with_trailing_newline_is_bundle_mismatch_before_open() -> None:
+    body = b"alpha"
+    transport = _MapTransport({"index.html": body, "notes.txt": b"beta"})
+    result = download_files(
+        (
+            FileRequest(path="index.html", content_sha256=_sha(body) + "\n"),
+            FileRequest(path="notes.txt", content_sha256=_sha(b"beta")),
+        ),
+        transport,
+    )
+    assert isinstance(result, DownloadFailure)
+    assert result.code == "bundle_mismatch"
+    assert transport.opened == []
+    assert transport.cursors == []
 
 
 @pytest.mark.parametrize("digest", ["A" * 64, "ab", ""])
