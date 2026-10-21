@@ -100,6 +100,73 @@ async function setCap(sql: Sql, cap: number): Promise<void> {
   await sql`update private.settings set value = ${String(cap)} where key = 'categorization_daily_run_cap'`;
 }
 
+async function openBreaker(sql: Sql): Promise<void> {
+  await sql`
+    insert into private.categorization_breaker (provider, consecutive_failures, open_until)
+    values ('openrouter', 5, now() + interval '15 minutes')
+    on conflict (provider) do update
+      set consecutive_failures = 5, open_until = now() + interval '15 minutes'
+  `;
+}
+
+async function gatedClaimLocksRun(claimer: postgres.Sql, locker: postgres.Sql, gameId: string, bundle: string): Promise<boolean> {
+  let signalClaimReturned!: () => void;
+  let signalLockerDone!: () => void;
+  const claimReturned = new Promise<void>((resolve) => {
+    signalClaimReturned = resolve;
+  });
+  const lockerDone = new Promise<void>((resolve) => {
+    signalLockerDone = resolve;
+  });
+  const rollback = new Error('ROLLBACK');
+  const open = claimer
+    .begin(async (tx) => {
+      try {
+        const rows = await claim(tx);
+        if (rows.length !== 0) throw new Error('gated claim returned a run');
+        const [stored] = await tx<{ status: string; attempts: number }[]>`
+          select status, attempts from private.categorization_runs
+          where game_id = ${gameId} and bundle_sha256 = ${bundle}
+        `;
+        if (stored?.status !== 'queued' || stored.attempts !== 0) throw new Error('gated claim changed the run');
+      } finally {
+        signalClaimReturned();
+      }
+      await lockerDone;
+      throw rollback;
+    })
+    .then(
+      () => 'committed' as const,
+      (err: unknown) => (err === rollback ? ('rolled back' as const) : err),
+    );
+  await Promise.race([
+    claimReturned,
+    new Promise<never>((_, reject) => {
+      setTimeout(() => reject(new Error('gated claim did not return')), 3000);
+    }),
+  ]);
+  let blocked = false;
+  try {
+    await locker.begin(async (tx) => {
+      await tx`set local lock_timeout = '400ms'`;
+      const [row] = await tx<{ id: string }[]>`
+        select id::text from private.categorization_runs
+        where game_id = ${gameId} and bundle_sha256 = ${bundle}
+        for update
+      `;
+      if (!row) throw new Error('queued run not visible');
+    });
+  } catch (err) {
+    blocked = err instanceof postgres.PostgresError && err.code === '55P03';
+    if (!blocked) throw err;
+  } finally {
+    signalLockerDone();
+  }
+  const outcome = await open;
+  if (outcome !== 'rolled back') throw outcome;
+  return blocked;
+}
+
 describe('categorization queue (CAT-2a)', { concurrency: false }, () => {
   it('two separate connections never claim the same run', async (t) => {
     const a = await connect(t);
@@ -204,6 +271,50 @@ describe('categorization queue (CAT-2a)', { concurrency: false }, () => {
       });
     } finally {
       await sql.end({ timeout: 1 });
+    }
+  });
+
+  it('a disabled, capped or open-breaker claim returns without locking a run', async (t) => {
+    const holder = await connect(t);
+    const claimer = await connect(t);
+    if (!holder || !claimer) {
+      await holder?.end({ timeout: 1 });
+      await claimer?.end({ timeout: 1 });
+      return;
+    }
+    const gameId = gid();
+    try {
+      await holder.begin(async (tx) => {
+        await enable(tx, false);
+        await insertGame(tx, gameId, null);
+        await insertRun(tx, gameId, sha('d'));
+      });
+      assert.equal(await gatedClaimLocksRun(holder, claimer, gameId, sha('d')), false);
+
+      await holder.begin(async (tx) => {
+        await enable(tx, true);
+        await setCap(tx, 1);
+        await insertRun(tx, gameId, sha('e'), {
+          status: 'succeeded',
+          attempts: 1,
+          started: new Date().toISOString(),
+        });
+      });
+      assert.equal(await gatedClaimLocksRun(holder, claimer, gameId, sha('d')), false);
+
+      await holder.begin(async (tx) => {
+        await setCap(tx, 50);
+        await tx`delete from private.categorization_runs where game_id = ${gameId} and status = 'succeeded'`;
+        await openBreaker(tx);
+      });
+      assert.equal(await gatedClaimLocksRun(holder, claimer, gameId, sha('d')), false);
+    } finally {
+      await holder`delete from public.games where id = ${gameId}`.catch(() => {});
+      await holder`delete from private.categorization_breaker where provider = 'openrouter'`.catch(() => {});
+      await holder`update private.settings set value = 'false' where key = 'categorization_enabled'`.catch(() => {});
+      await holder`update private.settings set value = '50' where key = 'categorization_daily_run_cap'`.catch(() => {});
+      await holder.end({ timeout: 1 });
+      await claimer.end({ timeout: 1 });
     }
   });
 

@@ -2,8 +2,7 @@ insert into private.settings (key, value) values
   ('categorization_enabled', 'false'),
   ('categorization_mode', 'shadow'),
   ('categorization_daily_run_cap', '50'),
-  ('categorization_max_attempts', '5'),
-  ('categorization_pipeline_version', 'cat-v1')
+  ('categorization_max_attempts', '5')
 on conflict (key) do nothing;
 
 create table private.categorization_runs (
@@ -66,6 +65,16 @@ declare
   v_id bigint;
   v_token uuid;
 begin
+  if coalesce((select value from private.settings where key = 'categorization_enabled'), '') is distinct from 'true'
+     or (
+       select count(*)
+       from private.categorization_runs
+       where started_at >= date_trunc('day', now() at time zone 'utc') at time zone 'utc'
+     ) >= coalesce((select value::int from private.settings where key = 'categorization_daily_run_cap'), 0)
+     or exists (select 1 from private.categorization_breaker where open_until > now()) then
+    return;
+  end if;
+
   select r.id into v_id
   from private.categorization_runs r
   where (r.status = 'queued' and r.next_attempt_at <= now())
@@ -74,15 +83,6 @@ begin
   for update skip locked
   limit 1;
   if v_id is null then
-    return;
-  end if;
-  if coalesce((select value from private.settings where key = 'categorization_enabled'), '') is distinct from 'true'
-     or (
-       select count(*)
-       from private.categorization_runs
-       where started_at >= date_trunc('day', now() at time zone 'utc') at time zone 'utc'
-     ) >= coalesce((select value::int from private.settings where key = 'categorization_daily_run_cap'), 0)
-     or exists (select 1 from private.categorization_breaker where open_until > now()) then
     return;
   end if;
 
