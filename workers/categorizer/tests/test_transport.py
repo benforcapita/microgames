@@ -7,6 +7,7 @@ from collections.abc import Iterator
 import httpx
 import pytest
 
+import support
 from categorizer.fetch import (
     DownloadFailure,
     DownloadOk,
@@ -166,6 +167,9 @@ def test_open_exposes_http_status_and_body_stays_bounded(status: int, code: str)
 @pytest.mark.parametrize(
     ("status", "code"),
     [
+        (301, "fetch_4xx"),
+        (302, "fetch_4xx"),
+        (307, "fetch_4xx"),
         (404, "fetch_4xx"),
         (418, "fetch_4xx"),
         (500, "fetch_5xx"),
@@ -209,3 +213,163 @@ def test_success_2xx_status_proceeds() -> None:
         transport = HttpxTransport(client=_status_client(status, b"ok"), base_url="https://cdn.test/")
         result = download_files((FileRequest(path="index.html"),), transport)
         assert isinstance(result, DownloadOk), status
+
+
+def test_transport_sends_accept_encoding_identity() -> None:
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers.get("accept-encoding", ""))
+        return httpx.Response(200, content=b"ok")
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    transport = HttpxTransport(client=client, base_url="https://cdn.test/")
+    result = download_files((FileRequest(path="index.html"),), transport)
+    assert isinstance(result, DownloadOk)
+    assert seen == ["identity"]
+
+
+class _FailStream(httpx.SyncByteStream):
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+        self.closed = False
+
+    def __iter__(self) -> Iterator[bytes]:
+        yield b"partial"
+        raise self._error
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _error_client(error: Exception, *, at_send: bool = False) -> httpx.Client:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        if at_send:
+            raise error
+        return httpx.Response(200, stream=_FailStream(error))
+
+    return httpx.Client(transport=httpx.MockTransport(handler))
+
+
+def test_mid_stream_transport_error_is_fetch_5xx_and_closes() -> None:
+    client = _error_client(httpx.ReadError("reset"))
+    transport = HttpxTransport(client=client, base_url="https://cdn.test/")
+    result = download_files((FileRequest(path="index.html"),), transport)
+    assert isinstance(result, DownloadFailure)
+    assert result.code == "fetch_5xx"
+
+
+def test_mid_stream_error_still_closes_response() -> None:
+    stream = _FailStream(httpx.RemoteProtocolError("dropped"))
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=stream)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    transport = HttpxTransport(client=client, base_url="https://cdn.test/")
+    result = download_files((FileRequest(path="index.html"),), transport)
+    assert isinstance(result, DownloadFailure)
+    assert result.code == "fetch_5xx"
+    assert stream.closed
+
+
+def test_send_transport_error_is_fetch_5xx() -> None:
+    client = _error_client(httpx.ConnectError("refused"), at_send=True)
+    transport = HttpxTransport(client=client, base_url="https://cdn.test/")
+    result = download_files((FileRequest(path="index.html"),), transport)
+    assert isinstance(result, DownloadFailure)
+    assert result.code == "fetch_5xx"
+
+
+def test_send_timeout_is_fetch_timeout() -> None:
+    client = _error_client(httpx.ConnectTimeout("slow"), at_send=True)
+    transport = HttpxTransport(client=client, base_url="https://cdn.test/")
+    result = download_files((FileRequest(path="index.html"),), transport)
+    assert isinstance(result, DownloadFailure)
+    assert result.code == "fetch_timeout"
+
+
+def test_mid_stream_timeout_is_fetch_timeout() -> None:
+    client = _error_client(httpx.ReadTimeout("slow"))
+    transport = HttpxTransport(client=client, base_url="https://cdn.test/")
+    result = download_files((FileRequest(path="index.html"),), transport)
+    assert isinstance(result, DownloadFailure)
+    assert result.code == "fetch_timeout"
+
+
+class _DripStream(httpx.SyncByteStream):
+    def __init__(self, clock: support.ManualClock, pulled: list[int], chunks: int = -1) -> None:
+        self._clock = clock
+        self._pulled = pulled
+        self._chunks = chunks
+        self.closed = False
+
+    def __iter__(self) -> Iterator[bytes]:
+        left = self._chunks
+        while left != 0:
+            left -= 1
+            self._clock.advance(2.0)
+            self._pulled.append(_CHUNK)
+            yield b"x" * _CHUNK
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_slow_drip_hits_overall_deadline() -> None:
+    clock = support.ManualClock()
+    pulled: list[int] = []
+    stream = _DripStream(clock, pulled)
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=stream)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    transport = HttpxTransport(client=client, base_url="https://cdn.test/")
+    result = download_files(
+        (FileRequest(path="index.html"),), transport, timeout=5.0, clock=clock.monotonic
+    )
+    assert isinstance(result, DownloadFailure)
+    assert result.code == "fetch_timeout"
+    assert len(pulled) <= 4
+    assert stream.closed
+
+
+def test_zero_deadline_stops_before_any_open() -> None:
+    clock = support.ManualClock()
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        return httpx.Response(200, content=b"ok")
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    transport = HttpxTransport(client=client, base_url="https://cdn.test/")
+    result = download_files(
+        (FileRequest(path="index.html"),), transport, timeout=0.0, clock=clock.monotonic
+    )
+    assert isinstance(result, DownloadFailure)
+    assert result.code == "fetch_timeout"
+    assert calls == []
+
+
+def test_deadline_blocks_opening_the_next_file() -> None:
+    clock = support.ManualClock()
+    pulled: list[int] = []
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        return httpx.Response(200, stream=_DripStream(clock, pulled, chunks=3))
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    transport = HttpxTransport(client=client, base_url="https://cdn.test/")
+    result = download_files(
+        (FileRequest(path="a.txt"), FileRequest(path="b.txt")),
+        transport,
+        timeout=5.0,
+        clock=clock.monotonic,
+    )
+    assert isinstance(result, DownloadFailure)
+    assert result.code == "fetch_timeout"
+    assert calls == ["https://cdn.test/a.txt"]

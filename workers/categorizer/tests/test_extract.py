@@ -11,9 +11,8 @@ import pytest
 from PIL import Image
 
 import support
-from categorizer.extract import bundle as bundle_mod
-from categorizer.extract.bundle import Extract, ExtractFailure, Meta, extract_bundle
-from categorizer.extract.sandbox import Limits
+from categorizer import extract as bundle_mod
+from categorizer.extract import Extract, ExtractFailure, Limits, Meta, extract_bundle
 from categorizer.fetch import DownloadedFile
 from categorizer.stage import stage_files
 

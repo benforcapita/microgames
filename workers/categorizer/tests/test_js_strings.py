@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from categorizer.extract.js_strings import tokenize
+from categorizer.extract import tokenize
 
 
 def test_single_double_and_template_literals() -> None:

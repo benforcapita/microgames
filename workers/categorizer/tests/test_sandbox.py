@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 
 import support
-from categorizer.extract.sandbox import Limits, run_sandboxed
+from categorizer.extract import Limits, run_sandboxed
 
 
 def _gone(pid: int) -> bool:
@@ -21,13 +21,13 @@ def test_child_returns_value(tmp_path: Path) -> None:
     outcome = run_sandboxed(tmp_path, support.echo, {"k": [1, 2]}, limits=Limits())
     assert outcome.code is None
     assert outcome.value == {"k": [1, 2]}
-    assert _gone(outcome.pid)
+    assert _gone(outcome.proc.pid)
 
 
 def test_child_exception_is_extract_crash(tmp_path: Path) -> None:
     outcome = run_sandboxed(tmp_path, support.explode, None, limits=Limits())
     assert outcome.code == "extract_crash"
-    assert _gone(outcome.pid)
+    assert _gone(outcome.proc.pid)
 
 
 def test_cpu_limit_kills_child(tmp_path: Path) -> None:
@@ -40,7 +40,7 @@ def test_cpu_limit_kills_child(tmp_path: Path) -> None:
     )
     assert outcome.code == "extract_limit"
     assert time.monotonic() - started < 12.0
-    assert _gone(outcome.pid)
+    assert _gone(outcome.proc.pid)
 
 
 def test_memory_limit_kills_child(tmp_path: Path) -> None:
@@ -52,7 +52,7 @@ def test_memory_limit_kills_child(tmp_path: Path) -> None:
     )
     assert outcome.code == "extract_limit"
     assert not (tmp_path / "survived").exists()
-    assert _gone(outcome.pid)
+    assert _gone(outcome.proc.pid)
 
 
 def test_wall_clock_kills_child(tmp_path: Path) -> None:
@@ -64,18 +64,18 @@ def test_wall_clock_kills_child(tmp_path: Path) -> None:
         limits=Limits(wall_seconds=0.5),
     )
     assert outcome.code == "extract_limit"
-    assert outcome.exitcode == -signal.SIGKILL
+    assert outcome.proc.exitcode == -signal.SIGKILL
     assert time.monotonic() - started < 15.0
-    assert _gone(outcome.pid)
+    assert _gone(outcome.proc.pid)
 
 
 def test_network_is_denied_in_child(tmp_path: Path) -> None:
     outcome = run_sandboxed(tmp_path, support.open_socket, None, limits=Limits())
     assert outcome.code == "extract_crash"
-    assert _gone(outcome.pid)
+    assert _gone(outcome.proc.pid)
 
 
 def test_bad_worker_is_extract_crash(tmp_path: Path) -> None:
     outcome = run_sandboxed(tmp_path, len, None, limits=Limits())
     assert outcome.code == "extract_crash"
-    assert _gone(outcome.pid)
+    assert _gone(outcome.proc.pid)

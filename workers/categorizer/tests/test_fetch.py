@@ -371,8 +371,11 @@ class _StatusTransport(_MapTransport):
 @pytest.mark.parametrize(
     ("status", "code"),
     [
-        (404, "fetch_4xx"),
+        (301, "fetch_4xx"),
+        (302, "fetch_4xx"),
+        (307, "fetch_4xx"),
         (400, "fetch_4xx"),
+        (404, "fetch_4xx"),
         (500, "fetch_5xx"),
         (502, "fetch_5xx"),
         (401, "fetch_unauthorized"),
