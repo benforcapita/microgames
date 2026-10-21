@@ -282,6 +282,97 @@ describe('categorization enqueue (CAT-4)', { concurrency: false }, () => {
     }
   });
 
+  it('after a pipeline version bump, re-passing the same bundle queues no new run', async (t) => {
+    const sql = await connect(t);
+    if (!sql) return;
+    const gameId = gid();
+    const shaA = sha('a');
+    try {
+      await rollback(sql, async (tx) => {
+        await insertGame(tx, gameId);
+
+        await tx`
+          insert into public.game_validations (game_id, version, bundle_sha256, status)
+          values (${gameId}, 1, ${shaA}, 'passed')
+        `;
+
+        const initialRuns = await tx<CountRow[]>`
+          select count(*)::int as n
+          from private.categorization_runs
+          where game_id = ${gameId}
+        `;
+        assert.equal(initialRuns[0].n, 1);
+
+        await tx`
+          update private.settings
+          set value = 'cat-v2'
+          where key = 'categorization_pipeline_version'
+        `;
+
+        await tx`
+          update public.game_validations
+          set status = 'passed'
+          where game_id = ${gameId} and version = 1
+        `;
+
+        const totalRuns = await tx<CountRow[]>`
+          select count(*)::int as n
+          from private.categorization_runs
+          where game_id = ${gameId}
+        `;
+        assert.equal(totalRuns[0].n, 1);
+
+        const v2Runs = await tx<CountRow[]>`
+          select count(*)::int as n
+          from private.categorization_runs
+          where game_id = ${gameId} and pipeline_version = 'cat-v2'
+        `;
+        assert.equal(v2Runs[0].n, 0);
+      });
+    } finally {
+      await sql.end({ timeout: 1 });
+    }
+  });
+
+  it('a passed validation whose bundle goes from null to a value queues one run', async (t) => {
+    const sql = await connect(t);
+    if (!sql) return;
+    const gameId = gid();
+    const shaB = sha('b');
+    try {
+      await rollback(sql, async (tx) => {
+        await insertGame(tx, gameId);
+
+        await tx`
+          insert into public.game_validations (game_id, version, bundle_sha256, status)
+          values (${gameId}, 1, null, 'passed')
+        `;
+
+        const initialRuns = await tx<CountRow[]>`
+          select count(*)::int as n
+          from private.categorization_runs
+          where game_id = ${gameId}
+        `;
+        assert.equal(initialRuns[0].n, 0);
+
+        await tx`
+          update public.game_validations
+          set bundle_sha256 = ${shaB}
+          where game_id = ${gameId} and version = 1
+        `;
+
+        const runs = await tx<CountRow[]>`
+          select count(*)::int as n
+          from private.categorization_runs
+          where game_id = ${gameId} and bundle_sha256 = ${shaB}
+        `;
+        assert.equal(runs[0].n, 1);
+      });
+    } finally {
+      await sql.end({ timeout: 1 });
+    }
+  });
+
   it('a failure inside the queueing step can never fail the validation write', async (t) => {
     const sql = await connect(t);
     if (!sql) return;
