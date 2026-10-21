@@ -1,3 +1,48 @@
+create or replace function private.cat_claim_run(p_lease_seconds int default 600)
+returns table (run_id bigint, lease_token uuid, game_id text, version int, bundle_sha256 text, mode text)
+language plpgsql security definer set search_path = '' as $$
+declare
+  v_id bigint;
+  v_attempts int;
+begin
+  if coalesce((select value from private.settings where key = 'categorization_enabled'), '') is distinct from 'true'
+     or (select count(*) from private.categorization_runs
+         where started_at >= date_trunc('day', now() at time zone 'utc') at time zone 'utc')
+        >= coalesce((select value::int from private.settings where key = 'categorization_daily_run_cap'), 0)
+     or exists (select 1 from private.categorization_breaker b
+                where b.provider in ('openrouter', 'typesafe') and b.open_until > now()) then
+    return;
+  end if;
+
+  select r.id, r.attempts into v_id, v_attempts
+  from private.categorization_runs r
+  where (r.status = 'queued' and r.next_attempt_at <= now())
+     or (r.status = 'running' and r.lease_until < now())
+  order by r.next_attempt_at
+  for update skip locked
+  limit 1;
+  if v_id is null then
+    return;
+  elsif v_attempts + 1 > coalesce((select value::int from private.settings where key = 'categorization_max_attempts'), 5) then
+    update private.categorization_runs
+    set status = 'failed', error_code = 'max_attempts', finished_at = now(),
+        lease_token = null, lease_until = null
+    where id = v_id;
+    return;
+  end if;
+
+  return query
+  update private.categorization_runs u
+  set status = 'running',
+      attempts = u.attempts + 1,
+      lease_token = gen_random_uuid(),
+      lease_until = now() + make_interval(secs => p_lease_seconds),
+      started_at = now()
+  where u.id = v_id
+  returning u.id, u.lease_token, u.game_id, u.version, u.bundle_sha256, u.mode;
+end
+$$;
+
 create function private.cat_propose_categories(run_id bigint, lease_token uuid, p jsonb)
 returns int
 language plpgsql
@@ -113,7 +158,10 @@ begin
       lease_until = null
   where id = v_run.id;
 
-  update private.categorization_breaker set consecutive_failures = 0, open_until = null;
+  update private.categorization_breaker b
+  set consecutive_failures = 0, open_until = null
+  where jsonb_typeof(p -> 'providers') = 'array'
+    and b.provider in (select jsonb_array_elements_text(p -> 'providers'));
   return v_status;
 end
 $$;
@@ -222,17 +270,13 @@ begin
 end
 $$;
 
-revoke all on function private.cat_propose_categories(bigint, uuid, jsonb) from public, anon, authenticated;
-revoke all on function private.cat_record_result(bigint, uuid, jsonb) from public, anon, authenticated;
-revoke all on function private.cat_fail_run(bigint, uuid, text, boolean) from public, anon, authenticated;
-revoke all on function private.cat_purge_shadow_results() from public, anon, authenticated;
-revoke all on function private.cat_purge_tag_evidence() from public, anon, authenticated;
+revoke all on function private.cat_propose_categories(bigint, uuid, jsonb), private.cat_record_result(bigint, uuid, jsonb),
+  private.cat_fail_run(bigint, uuid, text, boolean), private.cat_purge_shadow_results(), private.cat_purge_tag_evidence()
+  from public, anon, authenticated;
 
-grant execute on function private.cat_propose_categories(bigint, uuid, jsonb) to postgres, service_role;
-grant execute on function private.cat_record_result(bigint, uuid, jsonb) to postgres, service_role;
-grant execute on function private.cat_fail_run(bigint, uuid, text, boolean) to postgres, service_role;
-grant execute on function private.cat_purge_shadow_results() to postgres, service_role;
-grant execute on function private.cat_purge_tag_evidence() to postgres, service_role;
+grant execute on function private.cat_propose_categories(bigint, uuid, jsonb), private.cat_record_result(bigint, uuid, jsonb),
+  private.cat_fail_run(bigint, uuid, text, boolean), private.cat_purge_shadow_results(), private.cat_purge_tag_evidence()
+  to postgres, service_role;
 
 do $$
 begin

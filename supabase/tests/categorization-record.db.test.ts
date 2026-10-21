@@ -471,7 +471,11 @@ describe('categorization record, retry and purge (CAT-2b)', { concurrency: false
         update private.categorization_breaker set open_until = now() - interval '1 second' where provider = 'openrouter'
       `;
       const { claim: c6 } = await failAndCheck(fresh, runX);
-      const success = { tags: [{ slug: 'nsfw', status: 'rejected', applies: false }], usage: {} };
+      const success = {
+        tags: [{ slug: 'nsfw', status: 'rejected', applies: false }],
+        usage: {},
+        providers: ['openrouter', 'typesafe'],
+      };
       assert.equal(await recordResult(fresh, c6.run_id, c6.lease_token, success), 'succeeded');
       b = await breaker(sql, 'openrouter');
       assert.equal(b?.consecutive_failures, 0);
@@ -497,6 +501,7 @@ describe('categorization record, retry and purge (CAT-2b)', { concurrency: false
       b = await breaker(sql, 'openrouter');
       assert.equal(b?.consecutive_failures, 4);
       assert.ok(b?.open_until && b.open_until.getTime() > Date.now() + 14 * 60_000);
+      assert.equal(await breaker(sql, 'typesafe'), undefined);
       const runY = await insertRun(sql, gameId, sha('f'));
       assert.deepEqual(await claim(sql), []);
       assert.deepEqual(await claim(fresh), []);
@@ -515,9 +520,153 @@ describe('categorization record, retry and purge (CAT-2b)', { concurrency: false
       const tyOpen = await breaker(sql, 'typesafe');
       assert.equal(tyOpen?.consecutive_failures, 0);
       assert.ok(tyOpen?.open_until && tyOpen.open_until.getTime() > Date.now() + 14 * 60_000);
+      const orClosed = await breaker(sql, 'openrouter');
+      assert.equal(orClosed?.consecutive_failures, 4);
+      assert.ok(!orClosed?.open_until || orClosed.open_until.getTime() <= Date.now());
       await insertRun(sql, gameId, sha('0'));
       assert.deepEqual(await claim(sql), []);
       assert.deepEqual(await claim(fresh), []);
+    } finally {
+      await sql`delete from public.games where id = ${gameId}`.catch(() => {});
+      await sql`delete from private.categorization_breaker`.catch(() => {});
+      await sql`update private.settings set value = 'false' where key = 'categorization_enabled'`.catch(() => {});
+      await sql`update private.settings set value = '5' where key = 'categorization_max_attempts'`.catch(() => {});
+      await sql`update private.settings set value = '50' where key = 'categorization_daily_run_cap'`.catch(() => {});
+      await sql.end({ timeout: 1 });
+      await fresh.end({ timeout: 1 });
+    }
+  });
+
+  it('keeps breaker state per provider and gates claims on the full required provider set', async (t) => {
+    const sql = await connect(t);
+    const fresh = await connect(t);
+    if (!sql || !fresh) {
+      await sql?.end({ timeout: 1 });
+      await fresh?.end({ timeout: 1 });
+      return;
+    }
+    const gameId = gid();
+    const park = () =>
+      sql`update private.categorization_runs set next_attempt_at = now() + interval '1 day' where game_id = ${gameId} and status = 'queued'`;
+    const expireOpen = (provider: string) =>
+      sql`update private.categorization_breaker set open_until = now() - interval '1 second' where provider = ${provider}`;
+    const failOn = async (runId: string, code: string) => {
+      const { claim: c } = await failAndCheck(sql, runId);
+      await failRun(sql, c.run_id, c.lease_token, code, true);
+      await backdateNextAttempt(sql, runId);
+    };
+    const result = (providers?: string[]) => ({
+      tags: [{ slug: 'nsfw', status: 'rejected', applies: false }],
+      usage: {},
+      ...(providers ? { providers } : {}),
+    });
+    const closed = (b: { consecutive_failures: number; open_until: Date | null } | undefined) =>
+      !b || !b.open_until || b.open_until.getTime() <= Date.now();
+    try {
+      await sql.begin(async (tx) => {
+        await enable(tx, true);
+        await setCap(tx, (await startedToday(tx)) + 80);
+        await setMaxAttempts(tx, 30);
+        await insertGame(tx, gameId);
+        await tx`delete from private.categorization_breaker`;
+      });
+      const newRun = (bundle: string) => insertRun(sql, gameId, sha(bundle), { next: iso(-31_536_000_000) });
+
+      const runOR = await newRun('a');
+      for (let i = 0; i < 5; i++) await failOn(runOR, 'haiku_5xx');
+      let orRow = await breaker(sql, 'openrouter');
+      assert.equal(orRow?.consecutive_failures, 5);
+      assert.ok(orRow?.open_until && orRow.open_until.getTime() > Date.now() + 14 * 60_000);
+      assert.equal(await breaker(sql, 'typesafe'), undefined);
+      assert.deepEqual(await claim(sql), []);
+      assert.deepEqual(await claim(fresh), []);
+      await expireOpen('openrouter');
+
+      await park();
+      const runTS = await newRun('b');
+      for (let i = 0; i < 5; i++) await failOn(runTS, 'jev_5xx');
+      let tsRow = await breaker(sql, 'typesafe');
+      assert.equal(tsRow?.consecutive_failures, 5);
+      assert.ok(tsRow?.open_until && tsRow.open_until.getTime() > Date.now() + 14 * 60_000);
+      orRow = await breaker(sql, 'openrouter');
+      assert.equal(orRow?.consecutive_failures, 5);
+      assert.ok(!orRow?.open_until || orRow.open_until.getTime() <= Date.now());
+      assert.deepEqual(await claim(sql), []);
+      assert.deepEqual(await claim(fresh), []);
+      await expireOpen('typesafe');
+
+      await park();
+      const runReset = await newRun('c');
+      let [c] = await claim(sql);
+      assert.equal(c?.run_id, runReset);
+      assert.equal(await recordResult(sql, c.run_id, c.lease_token, result(['openrouter', 'typesafe'])), 'succeeded');
+      assert.equal((await breaker(sql, 'openrouter'))?.consecutive_failures, 0);
+      assert.equal((await breaker(sql, 'typesafe'))?.consecutive_failures, 0);
+
+      await park();
+      const runBoth = await newRun('d');
+      for (let i = 0; i < 4; i++) await failOn(runBoth, 'haiku_5xx');
+      for (let i = 0; i < 4; i++) await failOn(runBoth, 'jev_5xx');
+      assert.equal((await breaker(sql, 'openrouter'))?.consecutive_failures, 4);
+      assert.equal((await breaker(sql, 'typesafe'))?.consecutive_failures, 4);
+
+      await park();
+      const runNone = await newRun('e');
+      [c] = await claim(sql);
+      assert.equal(c?.run_id, runNone);
+      assert.equal(await recordResult(sql, c.run_id, c.lease_token, result()), 'succeeded');
+      assert.equal((await breaker(sql, 'openrouter'))?.consecutive_failures, 4);
+      assert.equal((await breaker(sql, 'typesafe'))?.consecutive_failures, 4);
+
+      await park();
+      const runResetOR = await newRun('f');
+      [c] = await claim(sql);
+      assert.equal(c?.run_id, runResetOR);
+      assert.equal(await recordResult(sql, c.run_id, c.lease_token, result(['openrouter'])), 'succeeded');
+      orRow = await breaker(sql, 'openrouter');
+      assert.equal(orRow?.consecutive_failures, 0);
+      assert.equal(orRow?.open_until, null);
+      assert.equal((await breaker(sql, 'typesafe'))?.consecutive_failures, 4);
+      await park();
+      const runTSOpen = await newRun('0');
+      await failOn(runTSOpen, 'jev_5xx');
+      tsRow = await breaker(sql, 'typesafe');
+      assert.equal(tsRow?.consecutive_failures, 5);
+      assert.ok(tsRow?.open_until && tsRow.open_until.getTime() > Date.now() + 14 * 60_000);
+      assert.deepEqual(await claim(sql), []);
+      assert.deepEqual(await claim(fresh), []);
+      await expireOpen('typesafe');
+
+      await park();
+      const runOR4 = await newRun('1');
+      for (let i = 0; i < 4; i++) await failOn(runOR4, 'haiku_5xx');
+      assert.equal((await breaker(sql, 'openrouter'))?.consecutive_failures, 4);
+      await park();
+      const runResetTS = await newRun('2');
+      [c] = await claim(sql);
+      assert.equal(c?.run_id, runResetTS);
+      assert.equal(await recordResult(sql, c.run_id, c.lease_token, result(['typesafe'])), 'succeeded');
+      tsRow = await breaker(sql, 'typesafe');
+      assert.equal(tsRow?.consecutive_failures, 0);
+      assert.equal(tsRow?.open_until, null);
+      assert.equal((await breaker(sql, 'openrouter'))?.consecutive_failures, 4);
+      await park();
+      const runOROpen = await newRun('3');
+      await failOn(runOROpen, 'haiku_5xx');
+      orRow = await breaker(sql, 'openrouter');
+      assert.equal(orRow?.consecutive_failures, 5);
+      assert.ok(orRow?.open_until && orRow.open_until.getTime() > Date.now() + 14 * 60_000);
+      assert.equal((await breaker(sql, 'typesafe'))?.consecutive_failures, 0);
+      assert.deepEqual(await claim(sql), []);
+      assert.deepEqual(await claim(fresh), []);
+      await expireOpen('openrouter');
+
+      assert.ok(closed(await breaker(sql, 'openrouter')));
+      assert.ok(closed(await breaker(sql, 'typesafe')));
+      await park();
+      const runOK = await newRun('4');
+      const [cok] = await claim(fresh);
+      assert.equal(cok?.run_id, runOK);
     } finally {
       await sql`delete from public.games where id = ${gameId}`.catch(() => {});
       await sql`delete from private.categorization_breaker`.catch(() => {});
@@ -714,6 +863,9 @@ describe('categorization record, retry and purge (CAT-2b)', { concurrency: false
         await insertGame(tx, gameId);
         const runId = await insertRun(tx, gameId, sha('1'));
         const { claim: c } = await failAndCheck(tx, runId);
+        const [{ n: tagsBefore }] = await tx<{ n: number }[]>`
+          select count(*)::int as n from public.game_tags where game_id = ${gameId}
+        `;
         const [ins] = await tx<{ n: number }[]>`
           select private.cat_propose_categories(${runId}::bigint, ${c.lease_token}::uuid, ${JSON.stringify(p)}::text::jsonb) as n
         `;
@@ -730,6 +882,20 @@ describe('categorization record, retry and purge (CAT-2b)', { concurrency: false
             { slug: 'ok_slug', status: 'proposed', is_safety: false },
           ],
         );
+        const [{ n: approved }] = await tx<{ n: number }[]>`
+          select count(*)::int as n from public.categories
+          where slug in ('new_slug', 'ok_slug', 'fourth') and status <> 'proposed'
+        `;
+        assert.equal(approved, 0);
+        const [{ n: tagsAfter }] = await tx<{ n: number }[]>`
+          select count(*)::int as n from public.game_tags where game_id = ${gameId}
+        `;
+        assert.equal(tagsAfter, tagsBefore);
+        const [{ n: proposedTags }] = await tx<{ n: number }[]>`
+          select count(*)::int as n from public.game_tags
+          where game_id = ${gameId} and category_slug in ('new_slug', 'ok_slug', 'fourth')
+        `;
+        assert.equal(proposedTags, 0);
         const [again] = await tx<{ n: number }[]>`
           select private.cat_propose_categories(${runId}::bigint, ${c.lease_token}::uuid, ${JSON.stringify(p)}::text::jsonb) as n
         `;
