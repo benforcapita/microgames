@@ -419,10 +419,6 @@ describe('categorization queue (CAT-2a)', { concurrency: false }, () => {
             (${gameId}, 2, 'other.png', 'image', 'uploaded', 9, ${sha('2')})
         `;
         await tx`
-          insert into public.game_validations (game_id, version, bundle_sha256, status, screenshot_paths)
-          values (${gameId}, 1, ${sha('9')}, 'passed', ${['shots/1.png', 'shots/2.png']})
-        `;
-        await tx`
           insert into public.categories (slug, description, status, is_safety, confirm_threshold, reject_threshold)
           values
             ('puzzle', 'puzzle and logic games', 'approved', false, 0.7, 0.1),
@@ -435,6 +431,10 @@ describe('categorization queue (CAT-2a)', { concurrency: false }, () => {
           token: randomUUID(),
           leaseUntil: new Date(Date.now() + 600_000).toISOString(),
         });
+        await tx`
+          insert into public.game_validations (game_id, version, bundle_sha256, status, screenshot_paths)
+          values (${gameId}, 1, ${sha('9')}, 'passed', ${['shots/1.png', 'shots/2.png']})
+        `;
         const [held] = await tx<{ lease_token: string }[]>`select lease_token::text from private.categorization_runs where id = ${runId}::bigint`;
         const [ctx] = await tx<{ context: postgres.JSONValue }[]>`
           select private.cat_get_context(${runId}::bigint, ${held.lease_token}::uuid) as context
