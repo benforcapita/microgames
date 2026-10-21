@@ -1313,6 +1313,89 @@ describe('categorization record, retry and purge (CAT-2b)', { concurrency: false
     }
   });
 
+  it('counts every new valid unique slug among the first three toward the cap at the boundary', async (t) => {
+    const sql = await connect(t);
+    if (!sql) return;
+    const gameId = gid();
+    const p = (proposed_categories: object[]) => ({ proposed_categories });
+    const d = (slug: string, definition = 'def ' + slug) => ({ slug, definition });
+    try {
+      await rollback(sql, async (tx) => {
+        await enable(tx, true);
+        await setCap(tx, (await startedToday(tx)) + 10);
+        await insertGame(tx, gameId);
+        const runId = await insertRun(tx, gameId, sha('1'));
+        const { claim: c } = await failAndCheck(tx, runId);
+        const openCount = async () =>
+          (await tx<{ n: number }[]>`select count(*)::int as n from public.categories where status = 'proposed'`)[0].n;
+        const setOpen = async (target: number) => {
+          await tx`delete from public.categories where slug like 'cb\_fill\_%'`;
+          const base = await openCount();
+          assert.ok(base <= target, `baseline open ${base} exceeds target ${target}`);
+          await tx`
+            insert into public.categories (slug, description, status)
+            select 'cb_fill_' || i, 'filler', 'proposed'
+            from generate_series(${base + 1}::int, ${target}::int) as i
+          `;
+          assert.equal(await openCount(), target);
+        };
+        const absent = async (...slugs: string[]) => {
+          const [{ n }] = await tx<{ n: number }[]>`
+            select count(*)::int as n from public.categories where slug = any(${slugs})
+          `;
+          assert.equal(n, 0);
+        };
+
+        await setOpen(48);
+        await assert.rejects(
+          tx.savepoint((sp) => propose(sp, runId, c.lease_token, p([d('cb_a1'), d('cb_a2'), d('cb_a3')]))),
+          tooManyProposals,
+        );
+        await absent('cb_a1', 'cb_a2', 'cb_a3');
+        assert.equal(await openCount(), 48);
+
+        assert.equal(
+          await propose(tx, runId, c.lease_token, p([d('cb_b1'), d('cb_b2'), { slug: 'bad slug!', definition: 'invalid but defined' }])),
+          2,
+        );
+        await absent('bad slug!');
+        assert.equal(await openCount(), 50);
+
+        await setOpen(48);
+        assert.equal(
+          await propose(tx, runId, c.lease_token, p([d('cb_c1'), d('cb_c2'), { slug: 'cb_nod', definition: '' }])),
+          2,
+        );
+        await absent('cb_nod');
+        assert.equal(await openCount(), 50);
+
+        await setOpen(47);
+        assert.equal(
+          await propose(tx, runId, c.lease_token, p([d('cb_d1'), d('cb_d2'), d('cb_d3'), d('cb_d4'), d('cb_d5')])),
+          3,
+        );
+        await absent('cb_d4', 'cb_d5');
+        assert.equal(await openCount(), 50);
+
+        await assert.rejects(
+          tx.savepoint((sp) => propose(sp, runId, c.lease_token, p([{ slug: 'UPNEW', definition: 'upper new' }]))),
+          tooManyProposals,
+        );
+        await absent('upnew', 'UPNEW');
+        assert.equal(await openCount(), 50);
+
+        assert.equal(await propose(tx, runId, c.lease_token, p([{ slug: 'cb_b1', definition: 'changed' }])), 0);
+        assert.equal(await openCount(), 50);
+        const [kept] = await tx<{ description: string; status: string }[]>`
+          select description, status from public.categories where slug = 'cb_b1'
+        `;
+        assert.deepEqual({ ...kept }, { description: 'def cb_b1', status: 'proposed' });
+      });
+    } finally {
+      await sql.end({ timeout: 1 });
+    }
+  });
+
   it('serializes concurrent propose calls so two racing connections cannot both pass the cap', async (t) => {
     const a = await connect(t);
     const b = await connect(t);
@@ -1375,6 +1458,85 @@ describe('categorization record, retry and purge (CAT-2b)', { concurrency: false
     } finally {
       await a`delete from public.games where id = ${gameId}`.catch(() => {});
       await a`delete from public.categories where slug like 'race\_%'`.catch(() => {});
+      await a`update private.settings set value = 'false' where key = 'categorization_enabled'`.catch(() => {});
+      await a`update private.settings set value = '50' where key = 'categorization_daily_run_cap'`.catch(() => {});
+      await a.end({ timeout: 1 });
+      await b.end({ timeout: 1 });
+    }
+  });
+
+  it('returns 0 to the loser of a same-slug propose race at 49 open instead of refusing or exceeding the cap', async (t) => {
+    const a = await connect(t);
+    const b = await connect(t);
+    if (!a || !b) {
+      await a?.end({ timeout: 1 });
+      await b?.end({ timeout: 1 });
+      return;
+    }
+    const gameId = gid();
+    try {
+      const [{ open }] = await a<{ open: number }[]>`
+        select count(*)::int as open from public.categories where status = 'proposed'
+      `;
+      await a.begin(async (tx) => {
+        await enable(tx, true);
+        await setCap(tx, (await startedToday(tx)) + 10);
+        await insertGame(tx, gameId);
+        await tx`
+          insert into public.categories (slug, description, status)
+          select 'same_' || i, 'filler', 'proposed'
+          from generate_series(${open + 1}, 49) as i
+        `;
+      });
+      const runA = await insertRun(a, gameId, sha('a'), { next: iso(-2000) });
+      const [cA] = await claim(a);
+      assert.equal(cA?.run_id, runA);
+      const runB = await insertRun(a, gameId, sha('b'));
+      const [cB] = await claim(b);
+      assert.equal(cB?.run_id, runB);
+      await b`set statement_timeout = '15s'`;
+      let held!: () => void;
+      const aHolds = new Promise<void>((r) => {
+        held = r;
+      });
+      const txA = a
+        .begin(async (tx) => {
+          try {
+            assert.equal(
+              await propose(tx, runA, cA.lease_token, {
+                proposed_categories: [{ slug: 'same_new', definition: 'winner' }],
+              }),
+              1,
+            );
+          } finally {
+            held();
+          }
+          await tx`select pg_sleep(0.5)`;
+        })
+        .then(() => 'ok' as const, (err: unknown) => err);
+      await aHolds;
+      const resB = await propose(b, runB, cB.lease_token, {
+        proposed_categories: [{ slug: 'same_new', definition: 'loser' }],
+      }).then(
+        (n) => n,
+        (err: unknown) => err,
+      );
+      assert.equal(await txA, 'ok');
+      assert.equal(resB, 0);
+      const rows = await a<{ slug: string; description: string; status: string }[]>`
+        select slug, description, status from public.categories where slug = 'same_new'
+      `;
+      assert.deepEqual(
+        rows.map((r) => ({ ...r })),
+        [{ slug: 'same_new', description: 'winner', status: 'proposed' }],
+      );
+      const [{ open: openAfter }] = await a<{ open: number }[]>`
+        select count(*)::int as open from public.categories where status = 'proposed'
+      `;
+      assert.equal(openAfter, 50);
+    } finally {
+      await a`delete from public.games where id = ${gameId}`.catch(() => {});
+      await a`delete from public.categories where slug like 'same\_%'`.catch(() => {});
       await a`update private.settings set value = 'false' where key = 'categorization_enabled'`.catch(() => {});
       await a`update private.settings set value = '50' where key = 'categorization_daily_run_cap'`.catch(() => {});
       await a.end({ timeout: 1 });
