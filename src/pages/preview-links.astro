@@ -13,14 +13,14 @@ import Layout from '../layouts/Layout.astro';
     <h2>The link</h2>
     <ul class="feature-list">
       <li><b>One version.</b> The link stays on the upload you shared. A newer upload does not move it.</li>
-      <li><b>Seven days.</b> That is the usual lifetime. You can revoke the link sooner. Revoking it again leaves the original time in place.</li>
-      <li><b>Five at a time.</b> A link counts toward the cap while it is not revoked and not past its lifetime.</li>
+      <li><b>Seven days.</b> You can revoke the link sooner. Revoking it again leaves the original time in place.</li>
+      <li><b>Five at a time.</b> A link counts toward that cap while it is not revoked and not past its lifetime. Ten can be created in an hour.</li>
       <li><b>Shown once.</b> Copy the URL when it is created. Meshground keeps a hash of the token, not the token itself.</li>
     </ul>
 
     <h2>What a player sees</h2>
     <p class="muted">
-      A working link opens the game with a banner that it is unreviewed and not yet approved. An unknown, revoked, expired, or blocked link is the same not-found page. The page does not say which of those it was.
+      A working link opens the game once that version's check has passed, with a banner that it is unreviewed and not yet approved. An unknown, revoked, expired, or blocked link is the same not-found page. The page does not say which of those it was.
     </p>
 
     <h2>Views</h2>

@@ -1024,6 +1024,24 @@ describe('preview link audit', () => {
         { event: 'expired_hit', actor: ownerId },
       ]);
 
+      const adminId = randomUUID();
+      await tx`
+        insert into auth.users (instance_id, id, aud, role, email, encrypted_password, created_at, updated_at)
+        values ('00000000-0000-0000-0000-000000000000', ${adminId}::uuid, 'authenticated', 'authenticated', ${`${adminId}@example.test`}, '', now(), now())
+      `;
+      await tx`insert into public.profiles (id, handle, role) values (${adminId}::uuid, ${`a${gameId.slice(2)}`}, 'admin')`;
+      const byAdmin = await mint(tx, ownerId, versionId);
+      await asRole(tx, 'authenticated', adminId);
+      await tx`select public.admin_revoke_preview_link(${byAdmin.id}::uuid)`;
+      await tx`select public.admin_revoke_preview_link(${byAdmin.id}::uuid)`;
+      await tx.unsafe('reset role');
+      assert.equal(await views(tx, byAdmin.id), 0);
+      assert.deepEqual(await play(tx, byAdmin.token), []);
+      assert.deepEqual(await auditFacts(tx, ownerId, byAdmin.id), [
+        { event: 'created', actor: ownerId },
+        { event: 'revoked', actor: ownerId },
+      ]);
+
       const columns = (await tx<{ column_name: string }[]>`
         select column_name from information_schema.columns
         where table_schema = 'public' and table_name = 'preview_link_audit'
@@ -1031,12 +1049,6 @@ describe('preview link audit', () => {
       `).map((column) => column.column_name);
       assert.deepEqual(columns, ['actor', 'at', 'event', 'link_id']);
 
-      const adminId = randomUUID();
-      await tx`
-        insert into auth.users (instance_id, id, aud, role, email, encrypted_password, created_at, updated_at)
-        values ('00000000-0000-0000-0000-000000000000', ${adminId}::uuid, 'authenticated', 'authenticated', ${`${adminId}@example.test`}, '', now(), now())
-      `;
-      await tx`insert into public.profiles (id, handle, role) values (${adminId}::uuid, ${`a${gameId.slice(2)}`}, 'admin')`;
       for (const uid of [otherId, adminId]) {
         await asRole(tx, 'authenticated', uid);
         assert.deepEqual([...(await tx<{ event: string }[]>`select event from public.preview_link_audit`)], []);
