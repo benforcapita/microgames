@@ -250,23 +250,46 @@ describe('preview links', () => {
     });
   });
 
-  db('denies the wrong owner create, revoke, list, insert, and update', async (sql) => {
+  db('denies create, list, and revoke to another user, an admin, and anon', async (sql) => {
     await rollback(sql, async (tx) => {
-      const { ownerId, otherId, versionId } = await seed(tx);
+      const { ownerId, otherId, gameId, versionId } = await seed(tx);
       const link = await mint(tx, ownerId, versionId);
+      const adminId = randomUUID();
+      await tx`
+        insert into auth.users (instance_id, id, aud, role, email, encrypted_password, created_at, updated_at)
+        values ('00000000-0000-0000-0000-000000000000', ${adminId}::uuid, 'authenticated', 'authenticated', ${`${adminId}@example.test`}, '', now(), now())
+      `;
+      await tx`insert into public.profiles (id, handle, role) values (${adminId}::uuid, ${`a${gameId.slice(2)}`}, 'admin')`;
+      const [admin] = await tx<{ role: string }[]>`select role from public.profiles where id = ${adminId}::uuid`;
+      assert.equal(admin.role, 'admin');
+      const callers: Array<['authenticated', string] | ['anon']> = [
+        ['authenticated', otherId],
+        ['authenticated', adminId],
+        ['anon'],
+      ];
+      for (const caller of callers) {
+        await asRole(tx, caller[0], caller[1]);
+        assert.equal(await codeOf(tx, (sp) => sp`select * from public.create_preview_link(${versionId}::uuid)`), '42501');
+        assert.equal(await codeOf(tx, (sp) => sp`select public.revoke_preview_link(${link.id}::uuid)`), '42501');
+        if (caller[0] === 'anon') {
+          assert.equal(await codeOf(tx, (sp) => sp`select id from public.preview_links`), '42501');
+        } else {
+          assert.deepEqual([...(await tx<{ id: string }[]>`select id from public.preview_links`)], []);
+        }
+      }
       await asRole(tx, 'authenticated', otherId);
-      assert.equal(await codeOf(tx, (sp) => sp`select * from public.create_preview_link(${versionId}::uuid)`), '42501');
-      assert.equal(await codeOf(tx, (sp) => sp`select public.revoke_preview_link(${link.id}::uuid)`), '42501');
-      assert.deepEqual([...(await tx<{ id: string }[]>`select id from public.preview_links`)], []);
       assert.equal(await codeOf(tx, (sp) => sp`
         insert into public.preview_links (version_id, owner_id, token_hash, expires_at)
         values (${versionId}::uuid, ${otherId}::uuid, decode(${bundle('11')}, 'hex'), now() + interval '1 day')
       `), '42501');
       assert.equal(await codeOf(tx, (sp) => sp`update public.preview_links set view_count = 0`), '42501');
-      await asRole(tx, 'anon');
-      assert.equal(await codeOf(tx, (sp) => sp`select * from public.create_preview_link(${versionId}::uuid)`), '42501');
-      assert.equal(await codeOf(tx, (sp) => sp`select id from public.preview_links`), '42501');
       await tx.unsafe('reset role');
+      const [kept] = await tx<{ n: number; revoked_at: Date | null }[]>`
+        select count(*)::int as n, max(revoked_at) as revoked_at
+        from public.preview_links where owner_id = ${ownerId}::uuid
+      `;
+      assert.equal(kept.n, 1);
+      assert.equal(kept.revoked_at, null);
       await asRole(tx, 'authenticated', ownerId);
       assert.deepEqual([...(await tx<{ id: string }[]>`select id from public.preview_links`)], [{ id: link.id }]);
     });
