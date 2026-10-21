@@ -25,6 +25,7 @@
     "smoke": "node scripts/smoke.mjs",
     "thumbs": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/capture-thumbs.mjs",
     "backfill:input": "node --experimental-strip-types --disable-warning=ExperimentalWarning --import ./scripts/register-ts.mjs scripts/backfill-input-support.mjs",
+    "backfill:categorization": "node scripts/backfill-categorization.mjs",
     "launch:video": "node launch/render.mjs",
     "check:copy": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/check-site-copy.mjs",
     "maintenance": "node --experimental-strip-types --disable-warning=ExperimentalWarning --import ./scripts/register-ts.mjs scripts/asset-maintenance.mjs",
