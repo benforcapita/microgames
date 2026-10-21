@@ -25,13 +25,8 @@ from categorizer import Settings
 from categorizer.decide import Category
 
 JevCode = Literal[
-    "jev_auth",
-    "jev_bad_request",
-    "jev_rate_limited",
-    "jev_5xx",
-    "jev_timeout",
-    "jev_connection",
-    "jev_missing_answer",
+    "jev_auth", "jev_bad_request", "jev_rate_limited", "jev_5xx",
+    "jev_timeout", "jev_connection", "jev_missing_answer",
 ]
 
 _DEFAULT_MODEL = "jev-1.13.0"
@@ -42,29 +37,18 @@ _CHUNK = 8
 _MAX_TAGS = 14
 _SAFETY = ("nsfw", "kid_safe")
 _REQUEST_ID = "x-typesafe-request-id"
-
 _STATUS: dict[int, JevCode] = {
-    400: "jev_bad_request",
-    401: "jev_auth",
-    403: "jev_bad_request",
-    404: "jev_bad_request",
-    413: "jev_bad_request",
-    415: "jev_bad_request",
-    422: "jev_bad_request",
-    429: "jev_rate_limited",
+    400: "jev_bad_request", 401: "jev_auth", 403: "jev_bad_request",
+    404: "jev_bad_request", 413: "jev_bad_request", 415: "jev_bad_request",
+    422: "jev_bad_request", 429: "jev_rate_limited",
 }
-
 _RETRYABLE = frozenset({"jev_rate_limited", "jev_5xx", "jev_timeout", "jev_connection"})
 
 
 class JevError(Exception):
     def __init__(
-        self,
-        code: JevCode,
-        *,
-        http_status: int | None = None,
-        retry_after: float | None = None,
-        request_id: str | None = None,
+        self, code: JevCode, *, http_status: int | None = None,
+        retry_after: float | None = None, request_id: str | None = None,
     ) -> None:
         super().__init__(code)
         self.code = code
@@ -94,16 +78,15 @@ class JevResult:
 
 
 class AsksJev(Protocol):
-    def ask(self, state: JSONContent, questions: Mapping[str, Question]) -> JevCall: ...
+    def ask(
+        self, state: JSONContent, questions: Mapping[str, Question]
+    ) -> JevCall: ...
 
 
 class FakeJev:
     def __init__(
-        self,
-        answers: Mapping[str, float] | None = None,
-        *,
-        model: str = "fake-jev",
-        usage: Mapping[str, int] | None = None,
+        self, answers: Mapping[str, float] | None = None, *,
+        model: str = "fake-jev", usage: Mapping[str, int] | None = None,
     ) -> None:
         self._answers = dict(answers or {})
         self._model = model
@@ -115,9 +98,7 @@ class FakeJev:
         self.states.append(state)
         self.questions.append(questions)
         return JevCall(
-            answers={
-                name: self._answers[name] for name in questions if name in self._answers
-            },
+            answers={n: self._answers[n] for n in questions if n in self._answers},
             model=self._model,
             usage=dict(self._usage),
             request_id=f"fake-{len(self.questions)}",
@@ -126,9 +107,7 @@ class FakeJev:
 
 class TypeSafeJev:
     def __init__(
-        self,
-        settings: Settings,
-        *,
+        self, settings: Settings, *,
         transport: httpx2.BaseTransport | None = None,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
@@ -170,9 +149,7 @@ def judge(
     asked = _plan(categories, suggested)
     for start in range(0, len(asked), _CHUNK):
         chunk = asked[start : start + _CHUNK]
-        call = asker.ask(
-            state, {f"t_{cat.slug}": _question(cat) for cat in chunk}
-        )
+        call = asker.ask(state, {f"t_{cat.slug}": _question(cat) for cat in chunk})
         calls += 1
         model = model or call.model
         for key, value in call.usage.items():
@@ -258,21 +235,8 @@ def _retry_after(error: TypeSafeAPIError) -> float | None:
 
 
 def _usage(usage: Usage) -> dict[str, int]:
-    out: dict[str, int] = {}
-    for key in ("input_tokens", "output_tokens"):
-        value = getattr(usage, key)
-        if type(value) is int:
-            out[key] = value
-    return out
-
-
-__all__ = (
-    "AsksJev",
-    "FakeJev",
-    "JevCall",
-    "JevCode",
-    "JevError",
-    "JevResult",
-    "TypeSafeJev",
-    "judge",
-)
+    return {
+        key: value
+        for key in ("input_tokens", "output_tokens")
+        if type(value := getattr(usage, key)) is int
+    }

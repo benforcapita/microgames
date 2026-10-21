@@ -66,13 +66,3 @@ def decide_all(
         verdicts["nsfw"] = NEEDS_REVIEW
         verdicts["kid_safe"] = NEEDS_REVIEW
     return verdicts
-
-
-__all__ = (
-    "Category",
-    "Kind",
-    "Lean",
-    "Verdict",
-    "decide",
-    "decide_all",
-)
