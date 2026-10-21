@@ -1,6 +1,7 @@
 ---
 import Layout from '../../layouts/Layout.astro';
 import AssetWarnings from '../../components/AssetWarnings.astro';
+import PreviewLinks from '../../components/PreviewLinks.astro';
 import { summarizeAssets, type AssetInputItem } from '../../lib/asset-limits';
 import { isAdmin } from '../../lib/server/profiles';
 import { loadAssetSummaryInput, sqlSubmissionStore } from '../../lib/server/submissions-db';
@@ -102,30 +103,7 @@ const activeLinks = isOwner
       </p>
     )}
 
-    {isOwner && (
-      <section class="panel share-links" id="share-links">
-        <div class="spread head">
-          <h2>Share preview</h2>
-          <button type="button" class="btn" id="share-preview-btn">Share preview</button>
-        </div>
-        <div id="new-link-panel" class="panel new-link" hidden>
-          <div class="row">
-            <input type="text" id="created-link-url" readonly />
-            <button type="button" class="btn sm" id="copy-preview-link">Copy</button>
-          </div>
-          <p class="muted once-note">This link is shown only once. Copy it now.</p>
-        </div>
-        <p id="share-error" class="muted error" hidden></p>
-        <ul id="active-links-list" class="active-links" aria-label="Active preview links">
-          {activeLinks.map((link) => (
-            <li class="spread link-row" data-link-id={link.id}>
-              <span>Expires {new Date(link.expiresAt).toLocaleDateString()} · {link.viewCount} {link.viewCount === 1 ? 'view' : 'views'}</span>
-              <button type="button" class="btn sm ghost revoke-btn" data-link-id={link.id}>Revoke</button>
-            </li>
-          ))}
-        </ul>
-      </section>
-    )}
+    {isOwner && <PreviewLinks gameId={view.game.id} links={activeLinks} />}
 
     <section class="panel">
       <h2>Static checks</h2>
@@ -232,123 +210,6 @@ const activeLinks = isOwner
     };
     setTimeout(tick, 2000);
   }
-
-  const shareSection = document.getElementById('share-links');
-  if (shareSection) {
-    const root = document.getElementById('submission');
-    const gameId = root?.dataset.id ?? '';
-    const shareBtn = document.getElementById('share-preview-btn');
-    const newLinkPanel = document.getElementById('new-link-panel');
-    const createdLinkUrl = document.getElementById('created-link-url');
-    const copyBtn = document.getElementById('copy-preview-link');
-    const shareError = document.getElementById('share-error');
-    const activeLinksList = document.getElementById('active-links-list');
-
-    const showError = (msg: string) => {
-      if (!shareError) return;
-      shareError.textContent = msg;
-      shareError.hidden = false;
-    };
-
-    const clearError = () => {
-      if (!shareError) return;
-      shareError.textContent = '';
-      shareError.hidden = true;
-    };
-
-    const attachRevoke = (btn: Element) => {
-      btn.addEventListener('click', async () => {
-        if (!(btn instanceof HTMLButtonElement)) return;
-        const linkId = btn.dataset.linkId;
-        if (!linkId) return;
-        btn.disabled = true;
-        try {
-          const res = await fetch(`/api/submissions/${encodeURIComponent(gameId)}/preview-links/${encodeURIComponent(linkId)}/revoke`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-          });
-          if (!res.ok) {
-            btn.disabled = false;
-            showError('Could not revoke preview link');
-            return;
-          }
-          btn.closest('li')?.remove();
-        } catch {
-          btn.disabled = false;
-          showError('Could not revoke preview link');
-        }
-      });
-    };
-
-    shareSection.querySelectorAll('.revoke-btn').forEach(attachRevoke);
-
-    if (copyBtn && createdLinkUrl instanceof HTMLInputElement) {
-      copyBtn.addEventListener('click', async () => {
-        const textToCopy = createdLinkUrl.value;
-        if (!textToCopy) return;
-        try {
-          await navigator.clipboard.writeText(textToCopy);
-        } catch {
-          createdLinkUrl.select();
-        }
-      });
-    }
-
-    if (shareBtn instanceof HTMLButtonElement) {
-      shareBtn.addEventListener('click', async () => {
-        clearError();
-        shareBtn.disabled = true;
-        try {
-          const res = await fetch(`/api/submissions/${encodeURIComponent(gameId)}/preview-links`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-          });
-          const raw = await res.json().catch(() => null);
-          const isObj = typeof raw === 'object' && raw !== null;
-          const errorMsg = isObj && 'error' in raw && typeof raw.error === 'string' ? raw.error : null;
-          const url = isObj && 'url' in raw && typeof raw.url === 'string' ? raw.url : '';
-          const id = isObj && 'id' in raw && typeof raw.id === 'string' ? raw.id : '';
-          const expiresAt = isObj && 'expiresAt' in raw && typeof raw.expiresAt === 'string' ? raw.expiresAt : '';
-          const viewCount = isObj && 'viewCount' in raw && typeof raw.viewCount === 'number' ? raw.viewCount : 0;
-
-          if (!res.ok) {
-            showError(errorMsg || 'Could not create preview link. Please try again.');
-            return;
-          }
-
-          if (createdLinkUrl instanceof HTMLInputElement && newLinkPanel) {
-            createdLinkUrl.value = url;
-            newLinkPanel.hidden = false;
-          }
-
-          if (activeLinksList && id) {
-            const li = document.createElement('li');
-            li.className = 'spread link-row';
-            li.dataset.linkId = id;
-
-            const infoSpan = document.createElement('span');
-            const expStr = expiresAt ? new Date(expiresAt).toLocaleDateString() : '';
-            infoSpan.textContent = `Expires ${expStr} · ${viewCount} ${viewCount === 1 ? 'view' : 'views'}`;
-
-            const revokeBtn = document.createElement('button');
-            revokeBtn.type = 'button';
-            revokeBtn.className = 'btn sm ghost revoke-btn';
-            revokeBtn.dataset.linkId = id;
-            revokeBtn.textContent = 'Revoke';
-            attachRevoke(revokeBtn);
-
-            li.appendChild(infoSpan);
-            li.appendChild(revokeBtn);
-            activeLinksList.prepend(li);
-          }
-        } catch {
-          showError('Could not create preview link. Please try again.');
-        } finally {
-          shareBtn.disabled = false;
-        }
-      });
-    }
-  }
 </script>
 
 <style>
@@ -378,12 +239,4 @@ const activeLinks = isOwner
   .log { list-style: none; padding: 0; margin: 0.5rem 0 0; font: 0.85rem/1.45 var(--mono); color: var(--muted); }
   .poll { margin: 0; }
   h2 { font-size: 1rem; margin: 0; }
-  .share-links { display: grid; gap: 0.75rem; }
-  .share-links [hidden] { display: none; }
-  .new-link { display: grid; gap: 0.5rem; background: var(--bg-alt, rgba(255,255,255,0.03)); padding: 0.75rem; }
-  .new-link input { flex: 1; min-width: 0; font-family: var(--mono); font-size: 0.85rem; padding: 0.4rem 0.6rem; }
-  .once-note { margin: 0; font-size: 0.85rem; }
-  .error { color: var(--bad); margin: 0; }
-  .active-links { list-style: none; padding: 0; margin: 0; display: grid; gap: 0.5rem; }
-  .link-row { align-items: center; padding: 0.5rem 0; border-top: 1px solid var(--line); font-size: 0.9rem; }
 </style>
