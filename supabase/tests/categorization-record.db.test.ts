@@ -111,8 +111,8 @@ async function insertTag(
   if (fields.updatedDaysAgo !== undefined) {
     await sql`
       update public.game_tags
-      set updated_at = now() - make_interval(days => ${fields.updatedDaysAgo}),
-          created_at = now() - make_interval(days => ${fields.updatedDaysAgo})
+      set updated_at = now() - ${fields.updatedDaysAgo} * interval '1 day',
+          created_at = now() - ${fields.updatedDaysAgo} * interval '1 day'
       where game_id = ${gameId} and bundle_sha256 = ${bundle} and category_slug = ${slug}
     `;
   }
@@ -463,14 +463,14 @@ describe('categorization record, retry and purge (CAT-2b)', { concurrency: false
       assert.equal(b?.consecutive_failures, 5);
       assert.ok(b?.open_until);
       assert.ok(b.open_until.getTime() > Date.now() + 14 * 60_000, 'breaker open ~15min');
+      const runX = await insertRun(sql, gameId, sha('e'));
       assert.deepEqual(await claim(sql), []);
       assert.deepEqual(await claim(fresh), []);
 
       await sql`
         update private.categorization_breaker set open_until = now() - interval '1 second' where provider = 'openrouter'
       `;
-      await backdateNextAttempt(sql, runId);
-      const { claim: c6 } = await failAndCheck(fresh, runId);
+      const { claim: c6 } = await failAndCheck(fresh, runX);
       const success = { tags: [{ slug: 'nsfw', status: 'rejected', applies: false }], usage: {} };
       assert.equal(await recordResult(fresh, c6.run_id, c6.lease_token, success), 'succeeded');
       b = await breaker(sql, 'openrouter');
@@ -497,14 +497,14 @@ describe('categorization record, retry and purge (CAT-2b)', { concurrency: false
       b = await breaker(sql, 'openrouter');
       assert.equal(b?.consecutive_failures, 4);
       assert.ok(b?.open_until && b.open_until.getTime() > Date.now() + 14 * 60_000);
+      const runY = await insertRun(sql, gameId, sha('f'));
       assert.deepEqual(await claim(sql), []);
       assert.deepEqual(await claim(fresh), []);
 
       await sql`
         update private.categorization_breaker set open_until = now() - interval '1 second' where provider = 'openrouter'
       `;
-      const runId3 = await insertRun(sql, gameId, sha('c'));
-      const { claim: cBad } = await failAndCheck(sql, runId3);
+      const { claim: cBad } = await failAndCheck(sql, runY);
       assert.equal(await failRun(sql, cBad.run_id, cBad.lease_token, 'jev_bad_request', false), 'failed');
       const ty = await breaker(sql, 'typesafe');
       assert.ok(!ty || (ty.consecutive_failures === 0 && ty.open_until === null));
@@ -515,7 +515,9 @@ describe('categorization record, retry and purge (CAT-2b)', { concurrency: false
       const tyOpen = await breaker(sql, 'typesafe');
       assert.equal(tyOpen?.consecutive_failures, 0);
       assert.ok(tyOpen?.open_until && tyOpen.open_until.getTime() > Date.now() + 14 * 60_000);
+      await insertRun(sql, gameId, sha('0'));
       assert.deepEqual(await claim(sql), []);
+      assert.deepEqual(await claim(fresh), []);
     } finally {
       await sql`delete from public.games where id = ${gameId}`.catch(() => {});
       await sql`delete from private.categorization_breaker`.catch(() => {});
@@ -536,11 +538,13 @@ describe('categorization record, retry and purge (CAT-2b)', { concurrency: false
         await insertGame(tx, gameId);
         const oldRun = await insertRun(tx, gameId, sha('e'), { status: 'succeeded' });
         const newRun = await insertRun(tx, gameId, sha('f'), { status: 'succeeded' });
+        const midRun = await insertRun(tx, gameId, sha('9'), { status: 'succeeded' });
         await tx`
           insert into private.categorization_shadow_results (run_id, game_id, result, created_at)
           values
             (${oldRun}::bigint, ${gameId}, '{}', now() - interval '91 days'),
-            (${newRun}::bigint, ${gameId}, '{}', now() - interval '89 days')
+            (${newRun}::bigint, ${gameId}, '{}', now() - interval '89 days'),
+            (${midRun}::bigint, ${gameId}, '{}', now() - interval '89 days 12 hours')
         `;
         await insertTag(tx, gameId, sha('e'), 'nsfw', 'confirmed', true, { evidence: { keep: true } });
         const [{ deleted }] = await tx<{ deleted: number }[]>`
@@ -550,7 +554,7 @@ describe('categorization record, retry and purge (CAT-2b)', { concurrency: false
         const remaining = await tx<{ run_id: string }[]>`
           select run_id::text from private.categorization_shadow_results order by run_id
         `;
-        assert.deepEqual(remaining.map((r) => r.run_id), [newRun]);
+        assert.deepEqual(remaining.map((r) => r.run_id), [newRun, midRun]);
         const [tagKept] = await tx<{ n: number }[]>`
           select count(*)::int as n from public.game_tags where game_id = ${gameId}
         `;
@@ -558,6 +562,7 @@ describe('categorization record, retry and purge (CAT-2b)', { concurrency: false
 
         await insertTag(tx, gameId, sha('e'), 'kid_safe', 'confirmed', true, { evidence: { old: true }, updatedDaysAgo: 31 });
         await insertTag(tx, gameId, sha('0'), 'nsfw', 'confirmed', true, { evidence: { recent: true }, updatedDaysAgo: 29 });
+        await insertTag(tx, gameId, sha('8'), 'kid_safe', 'confirmed', true, { evidence: { edge: true }, updatedDaysAgo: 29.5 });
         const [{ nulled }] = await tx<{ nulled: number }[]>`
           select private.cat_purge_tag_evidence() as nulled
         `;
@@ -573,7 +578,8 @@ describe('categorization record, retry and purge (CAT-2b)', { concurrency: false
         assert.equal(ev('kid_safe', sha('e'))?.applies, true);
         assert.deepEqual(ev('nsfw', sha('0'))?.evidence, { recent: true });
         assert.deepEqual(ev('nsfw', sha('e'))?.evidence, { keep: true });
-        assert.equal(evidence.length, 3);
+        assert.deepEqual(ev('kid_safe', sha('8'))?.evidence, { edge: true });
+        assert.equal(evidence.length, 4);
         assert.equal(nulled, 1);
       });
     } finally {
