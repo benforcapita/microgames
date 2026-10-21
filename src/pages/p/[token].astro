@@ -1,0 +1,102 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import { clientIp } from '../../lib/server/abuse';
+import { CDN_ORIGIN } from '../../lib/server/config';
+import { openPreviewLink, type PreviewPlay } from '../../lib/server/preview-play';
+
+const token = Astro.params.token ?? '';
+let socketAddress: string | undefined;
+try {
+  socketAddress = Astro.clientAddress;
+} catch {
+  socketAddress = undefined;
+}
+const ip = clientIp(Astro.request.headers, socketAddress, Boolean(process.env.VERCEL));
+const outcome = await openPreviewLink({ token, ip });
+
+const plain = (status: 429 | 500, body: string) =>
+  new Response(body, { status, headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'private, no-store' } });
+
+const MISS_PAGE = `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Not found</title><meta name="robots" content="noindex, nofollow"><meta property="og:title" content="Not found"><meta property="og:description" content="This page is not available."></head><body><main><h1>This cartridge is missing.</h1><p>It may have been removed, or the link is wrong.</p></main></body></html>`;
+
+switch (outcome.kind) {
+  case 'limited':
+    return plain(429, 'Too many requests');
+  case 'error':
+    return plain(500, 'Something went wrong');
+  case 'miss':
+    return new Response(MISS_PAGE, { status: 404, headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'private, no-store' } });
+  case 'play':
+    break;
+  default: {
+    const _exhaustive: never = outcome;
+    throw new Error(_exhaustive);
+  }
+}
+const play: Extract<PreviewPlay, { kind: 'play' }> = outcome;
+
+Astro.response.headers.set('X-Robots-Tag', 'noindex, nofollow');
+Astro.response.headers.set('Cache-Control', 'private, no-store');
+---
+
+<Layout title="Preview" description="An unreviewed game preview on Meshground." noindex bare>
+  <section class="wrap play">
+    <p class="notice" id="preview-banner">Unreviewed, not yet approved</p>
+    <h1>{play.title}</h1>
+    <div
+      id="stage"
+      class="stage"
+      data-game-id={play.gameId}
+      data-game-title={play.title}
+      data-game-stage="pending"
+      data-cdn={CDN_ORIGIN}
+      data-preview={play.previewToken}
+    >
+      <button class="launch" type="button">Play</button>
+    </div>
+  </section>
+</Layout>
+
+<style>
+  .play { padding-top: 1.5rem; }
+  .notice { margin: 0 0 1rem; padding: 0.85rem 1rem; border: 1px solid #c4ff3d55; border-radius: var(--radius); }
+  .stage {
+    position: relative;
+    aspect-ratio: 16 / 9;
+    max-height: 78vh;
+    width: 100%;
+    background: #000;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    overflow: hidden;
+    contain: layout paint;
+  }
+  .launch {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    background: radial-gradient(circle at center, #1a2408, #000 70%);
+    border: 0;
+    color: var(--text);
+    font: 800 1.4rem var(--sans);
+    cursor: pointer;
+  }
+</style>
+
+<script>
+  import { mountPlayer } from '../../client/player';
+
+  const stage = document.getElementById('stage');
+  const button = stage?.querySelector('button');
+  if (stage && button) {
+    const { gameId, gameTitle, cdn, preview } = stage.dataset;
+    button.addEventListener('click', () => {
+      const player = mountPlayer(stage, { id: gameId ?? '', title: gameTitle ?? '', stage: 'pending' }, {
+        cdnOrigin: cdn ?? '',
+        previewToken: preview || null,
+      });
+      player.frame.focus();
+    });
+  }
+</script>

@@ -151,6 +151,19 @@ describe('POST /api/events: decimal-integer IPv4 only in URL parts', () => {
   });
 });
 
+describe('POST /api/events: preview links', () => {
+  it('stores a preview crash without the link token', async () => {
+    const h = harness();
+    const token = 'abcDEF789_-'.repeat(4);
+    const stack = `Error: boom\n    at https://meshground.test/p/${token}:1:1\n    at src/pages/p/[token].astro:12:3`;
+    assert.equal((await h.send({ type: 'error', path: `/p/${token}`, gameId: 'pendingid', details: { message: 'boom', stack } })).status, 204);
+    const stored = JSON.stringify(h.rows);
+    assert.equal(stored.includes(token), false);
+    assert.match(stored, /\/p\/\[redacted\]/);
+    assert.match(stored, /src\/pages\/p\/\[token\]\.astro/);
+  });
+});
+
 describe('POST /api/events: awaited, bounded write', () => {
   const ev = { type: 'error', path: '/x' };
   it('the row is written before the 204 is returned', async () => {

@@ -116,6 +116,12 @@ export function containsPii(s: string): boolean {
 
 export const REDACTED = '[redacted]';
 
+const PREVIEW_LINK = /\/p\/(?![^/?#\s"'<>]*[.\[][^/?#\s"'<>]*)[^/?#\s"'<>]+/g;
+
+export function redactPreviewLink(s: string): string {
+  return s.replace(PREVIEW_LINK, `/p/${REDACTED}`);
+}
+
 /**
  * Same detector, used to clean instead of reject: every whitespace-separated token that holds PII becomes
  * [redacted]; if PII still spans tokens (e.g. "ben at example dot com"), the whole string is redacted.
