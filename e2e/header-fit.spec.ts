@@ -35,3 +35,20 @@ test('logged-out header stays one line and does not scroll sideways', async ({ p
     }
   }
 });
+
+test('logged-out header nav and Upload fit inside a 390px viewport', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/login');
+  const nav = page.locator('header nav');
+  const widths = await nav.evaluate((el) => ({ scrollWidth: el.scrollWidth, clientWidth: el.clientWidth }));
+  expect(widths.scrollWidth, 'nav scrollWidth').toBeLessThanOrEqual(widths.clientWidth);
+  const upload = page.locator('header a.upload');
+  await expect(upload, 'Upload').toBeVisible();
+  const box = await upload.boundingBox();
+  const viewport = page.viewportSize();
+  if (box === null || viewport === null) throw new Error('Upload button has no box');
+  expect(box.x, 'Upload left').toBeGreaterThanOrEqual(0);
+  expect(box.y, 'Upload top').toBeGreaterThanOrEqual(0);
+  expect(box.x + box.width, 'Upload right').toBeLessThanOrEqual(viewport.width);
+  expect(box.y + box.height, 'Upload bottom').toBeLessThanOrEqual(viewport.height);
+});

@@ -74,6 +74,14 @@ jobs:
         run: npx playwright test e2e --reporter=list,json
       - name: Assert no DB e2e tests skipped
         run: node scripts/ci/assert-no-db-skips.mjs "$RUNNER_TEMP/db-e2e.json"
+      - name: Install Playwright WebKit
+        run: npx playwright install --with-deps webkit
+      - name: Fullscreen e2e
+        env:
+          PLAYWRIGHT_JSON_OUTPUT_NAME: ${{ runner.temp }}/fullscreen-e2e.json
+        run: npx playwright test --config=playwright.fullscreen.config.mjs --reporter=list,json
+      - name: Assert no fullscreen e2e tests skipped
+        run: node scripts/ci/assert-no-db-skips.mjs "$RUNNER_TEMP/fullscreen-e2e.json"
       - name: Stop local Supabase
         if: always()
         run: supabase stop

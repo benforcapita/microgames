@@ -156,26 +156,26 @@ test('an unapproved game with an active preview link is absent from browse, sear
 
 test.fixme(
   '/p is noindex and nofollow',
-  pending('SL-2: /p noindex is not on main yet'),
+  pending('SL-2 (#115): /p noindex is not on main yet'),
   async () => {},
 );
 test.fixme(
   'a bad preview link, an expired preview link, and a revoked preview link return the same 404',
-  pending('SL-2: identical preview 404s are not on main yet'),
+  pending('SL-2 (#115): identical preview 404s are not on main yet'),
   async () => {},
 );
 test.fixme(
   'the share-link caps return 429 for an eleventh create in an hour and a sixty-first open in a minute',
-  pending('SL-3 and SL-2: share-link HTTP 429 is not on main yet'),
+  pending('SL-3 (#114) and SL-2 (#115): share-link HTTP 429 is not on main yet'),
   async () => {},
 );
 test.fixme(
   'a preview response sends noindex, no-referrer, nosniff, and does not allow a shared cache',
-  pending('SL-2: preview security headers are not on main yet'),
+  pending('SL-2 (#115): preview security headers are not on main yet'),
   async () => {},
 );
 test.fixme(
   'a preview token is redacted in /P/, %2f, and a JSON \\/p\\/ escape',
-  pending('SL-2: preview token redaction is not on main yet'),
+  pending('SL-2 (#115): preview token redaction is not on main yet'),
   async () => {},
 );

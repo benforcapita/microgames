@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { ALLOWLIST, checkPlaywrightJson } from './assert-no-db-skips.mjs';
+import { ALLOWLIST, TODO_ALLOWLIST, checkPlaywrightJson } from './assert-no-db-skips.mjs';
 
 const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url));
 const GUARD_URL = pathToFileURL(path.join(REPO_ROOT, 'scripts/ci/assert-no-db-skips.mjs')).href;
@@ -991,13 +991,60 @@ console.log(JSON.stringify({ ok }));`;
       ]);
     }
 
-    it('a skipped test with a named todo annotation exits 0', () => {
-      const res = runJsonFixture(skippedWith('a preview page is noindex', [
-        { type: 'todo', description: 'the preview page is not on main yet' },
+    it('TODO_ALLOWLIST is the five named share-link tests and their pull requests', () => {
+      assert.deepStrictEqual(
+        TODO_ALLOWLIST.map((entry) => [entry.name, entry.prs]),
+        [
+          ['/p is noindex and nofollow', ['#115']],
+          ['a bad preview link, an expired preview link, and a revoked preview link return the same 404', ['#115']],
+          ['the share-link caps return 429 for an eleventh create in an hour and a sixty-first open in a minute', ['#114', '#115']],
+          ['a preview response sends noindex, no-referrer, nosniff, and does not allow a shared cache', ['#115']],
+          ['a preview token is redacted in /P/, %2f, and a JSON \\/p\\/ escape', ['#115']],
+        ],
+      );
+    });
+
+    it('a skipped test named in TODO_ALLOWLIST exits 0 when its note names the pull request', () => {
+      const entry = TODO_ALLOWLIST[0];
+      if (!entry) throw new Error('TODO_ALLOWLIST is empty');
+      const res = runJsonFixture(skippedWith(entry.name, [
+        { type: 'todo', description: `waiting on ${entry.prs[0]}` },
       ]));
       assert.equal(res.status, 0);
       assert.match(res.stdout, /^OK: 1 tests; allowed skips: /);
       assert.equal(res.stderr, '');
+    });
+
+    it('a skipped todo whose name is not in TODO_ALLOWLIST exits 1', () => {
+      const title = 'a preview page is noindex';
+      const res = runJsonFixture(skippedWith(title, [
+        { type: 'todo', description: 'waiting on #115' },
+      ]));
+      assert.equal(res.status, 1);
+      assert.match(res.stderr, new RegExp(title));
+    });
+
+    it('a skipped todo named in TODO_ALLOWLIST exits 1 when the pull request is missing', () => {
+      const entry = TODO_ALLOWLIST[0];
+      if (!entry) throw new Error('TODO_ALLOWLIST is empty');
+      const res = runJsonFixture(skippedWith(entry.name, [
+        { type: 'todo', description: 'the preview page is not on main yet' },
+      ]));
+      assert.equal(res.status, 1);
+      assert.match(res.stderr, /todo is not bound to its pull request/);
+    });
+
+    it('the cap todo exits 1 until both #114 and #115 are named', () => {
+      const entry = TODO_ALLOWLIST.find((item) => item.prs.length === 2);
+      if (!entry) throw new Error('no todo requires two pull requests');
+      const one = runJsonFixture(skippedWith(entry.name, [
+        { type: 'todo', description: 'waiting on #114' },
+      ]));
+      assert.equal(one.status, 1);
+      const both = runJsonFixture(skippedWith(entry.name, [
+        { type: 'todo', description: 'waiting on #114 and #115' },
+      ]));
+      assert.equal(both.status, 0);
     });
 
     it('a skipped test with an empty todo description exits 1', () => {
