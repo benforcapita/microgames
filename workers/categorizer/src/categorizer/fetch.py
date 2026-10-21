@@ -60,16 +60,17 @@ class HttpxTransport:
     def __setattr__(self, name: str, value: object) -> None:
         raise AttributeError(name)
 
-    def open(self, path: str) -> ByteSource:
+    def open(self, path: str) -> _HttpxBody:
         request = self._client.build_request("GET", self._base + path)
         return _HttpxBody(self._client.send(request, stream=True))
 
 
 class _HttpxBody:
-    __slots__ = ("_buf", "_chunks", "_response")
+    __slots__ = ("_buf", "_chunks", "_response", "status")
 
     def __init__(self, response: httpx.Response) -> None:
         self._response = response
+        self.status = response.status_code
         self._chunks: Iterator[bytes] = (
             iter((response.content,)) if response.is_stream_consumed else response.iter_raw()
         )
