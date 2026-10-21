@@ -3,7 +3,8 @@ from __future__ import annotations
 import hashlib
 import re
 import secrets
-from collections.abc import Iterator, Sequence
+import time
+from collections.abc import Callable, Iterator, Sequence
 from typing import Literal, NamedTuple, Protocol, runtime_checkable
 
 import httpx
@@ -23,6 +24,10 @@ DownloadCode = Literal[
     "bundle_path",
     "bundle_too_large",
     "bundle_file_count",
+    "fetch_4xx",
+    "fetch_5xx",
+    "fetch_timeout",
+    "fetch_unauthorized",
 ]
 
 
@@ -54,6 +59,7 @@ class HttpxTransport:
     __slots__ = ("_base", "_client")
 
     def __init__(self, *, client: httpx.Client, base_url: str) -> None:
+        client.headers["Accept-Encoding"] = "identity"
         object.__setattr__(self, "_client", client)
         object.__setattr__(self, "_base", base_url.rstrip("/") + "/")
 
@@ -126,6 +132,8 @@ def download_files(
     transport: Transport,
     *,
     bundle_sha256: str | None = None,
+    timeout: float = 60.0,
+    clock: Callable[[], float] = time.monotonic,
 ) -> DownloadOk | DownloadFailure:
     snapshot = tuple(files)
     if len(snapshot) > _CAPS.max_files:
@@ -143,11 +151,26 @@ def download_files(
         return DownloadFailure(code="bundle_mismatch")
     accepted: list[DownloadedFile] = []
     total = 0
+    deadline = clock() + timeout
     for item in snapshot:
         limit = _CAPS.total_bytes - total
-        body = _read_limited(transport.open(item.path), limit)
+        try:
+            if clock() >= deadline:
+                return DownloadFailure(code="fetch_timeout")
+            source = transport.open(item.path)
+            code = _status_code(source)
+            if code is not None:
+                if isinstance(source, _Closeable):
+                    source.close()
+                return DownloadFailure(code=code)
+            body = _read_limited(source, limit, deadline, clock)
+        except httpx.TransportError as err:
+            code = "fetch_timeout" if isinstance(err, httpx.TimeoutException) else "fetch_5xx"
+            return DownloadFailure(code=code)
         if body is None:
             return DownloadFailure(code="bundle_too_large")
+        if isinstance(body, str):
+            return DownloadFailure(code=body)
         digest = item.content_sha256
         check_bundle = bundle_sha256 is not None and item.path == "index.html"
         if digest is not None or check_bundle:
@@ -161,6 +184,17 @@ def download_files(
     return DownloadOk(files=tuple(accepted))
 
 
+def _status_code(source: ByteSource) -> DownloadCode | None:
+    status: object = getattr(source, "status", 200)
+    if type(status) is not int:
+        return "fetch_5xx"
+    if 200 <= status < 300:
+        return None
+    if status in {401, 403}:
+        return "fetch_unauthorized"
+    return "fetch_4xx" if status < 500 else "fetch_5xx"
+
+
 def _same_hash(actual: str, expected: str) -> bool:
     return secrets.compare_digest(actual, expected)
 
@@ -169,12 +203,16 @@ def _path_ok(path: str) -> bool:
     return 1 <= len(path) <= 512 and "\x00" not in path and _PATH.search(path) is None
 
 
-def _read_limited(source: ByteSource, limit: int) -> bytes | None:
+def _read_limited(
+    source: ByteSource, limit: int, deadline: float, clock: Callable[[], float]
+) -> bytes | DownloadCode | None:
     try:
         buf = bytearray()
         while len(buf) <= limit:
+            if clock() >= deadline:
+                return "fetch_timeout"
             need = limit + 1 - len(buf)
-            chunk = source.read(need)
+            chunk = source.read(min(need, 65536))
             if len(chunk) > need:
                 chunk = chunk[:need]
             if chunk == b"":

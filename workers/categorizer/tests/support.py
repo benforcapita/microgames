@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import base64
 import io
+import os
+import signal
+import socket
+import time
 from datetime import UTC, datetime
+from pathlib import Path
+from typing import NamedTuple
 
 from categorizer import Deps, FakeQueue, Settings, Stop, Workload, main
 
@@ -67,3 +73,67 @@ def boot(
     )
     code = main(dict(env), deps)
     return code, buf.getvalue(), owned, handled
+
+
+def echo(_work_dir: Path, payload: object) -> object:
+    return payload
+
+
+def explode(_work_dir: Path, _payload: object) -> str:
+    raise RuntimeError("boom")
+
+
+def burn_cpu(_work_dir: Path, _payload: object) -> str:
+    ticks = 0
+    while True:
+        ticks += 1
+    return str(ticks)
+
+
+def eat_memory(work_dir: Path, payload: int) -> str:
+    chunks: list[bytearray] = []
+    remaining = payload
+    step = 64 * 1024 * 1024
+    while remaining > 0:
+        chunks.append(bytearray(step))
+        remaining -= step
+    (work_dir / "survived").write_text("x", encoding="ascii")
+    return str(len(chunks))
+
+
+def sleep_seconds(_work_dir: Path, payload: float) -> str:
+    time.sleep(payload)
+    return "slept"
+
+
+def open_socket(_work_dir: Path, _payload: object) -> str:
+    sock = socket.socket()
+    sock.close()
+    return "connected"
+
+
+def die_sigxcpu(_work_dir: Path, _payload: object) -> str:
+    signal.raise_signal(signal.SIGXCPU)
+    return "alive"
+
+
+def count_openable(_work_dir: Path, payload: int) -> int:
+    fds: list[int] = []
+    for _ in range(payload):
+        try:
+            fds.append(os.open("/dev/null", os.O_RDONLY))
+        except OSError:
+            break
+    for fd in fds:
+        os.close(fd)
+    return len(fds)
+
+
+def not_extract(_work_dir: Path, _payload: object) -> dict[str, str]:
+    return {"not": "an extract"}
+
+
+class NotMeta(NamedTuple):
+    title: str = ""
+    tagline: str = ""
+    description: str = ""
