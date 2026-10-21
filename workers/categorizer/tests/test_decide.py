@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import itertools
+
 import pytest
 
-from categorizer.decide import Category, decide, decide_all
+from categorizer.decide import Category, Lean, decide, decide_all
 
 NSFW = Category(
     slug="nsfw",
@@ -168,3 +170,51 @@ def test_decide_all_applies_safety_rules_before_the_conflict_rule() -> None:
         {"kid_safe": "no"},
     )
     assert verdicts == {"nsfw": "confirmed", "kid_safe": "needs_review"}
+
+
+def _edges(cat: Category) -> tuple[float | None, ...]:
+    return (
+        0.0,
+        cat.reject_threshold,
+        cat.reject_threshold + 0.01,
+        (cat.reject_threshold + cat.confirm_threshold) / 2,
+        cat.confirm_threshold - 0.01,
+        cat.confirm_threshold,
+        1.0,
+        None,
+    )
+
+
+def test_nsfw_confirmed_never_leaves_kid_safe_confirmed() -> None:
+    combinations = 0
+    for nsfw_p, kid_p, nsfw_lean, kid_lean, injection in itertools.product(
+        _edges(NSFW),
+        _edges(KID_SAFE),
+        ("yes", "no", "unsure", None),
+        ("yes", "no", "unsure", None),
+        (False, True),
+    ):
+        combinations += 1
+        leans: dict[str, Lean] = {}
+        if nsfw_lean is not None:
+            leans["nsfw"] = nsfw_lean
+        if kid_lean is not None:
+            leans["kid_safe"] = kid_lean
+        verdicts = decide_all(
+            [NSFW, KID_SAFE],
+            {"nsfw": nsfw_p, "kid_safe": kid_p},
+            leans,
+            injection=injection,
+        )
+        before_conflict = decide(
+            nsfw_p, NSFW, lean=nsfw_lean, injection=injection
+        )
+        if verdicts["nsfw"] == "confirmed" or before_conflict == "confirmed":
+            assert verdicts["kid_safe"] != "confirmed", (
+                nsfw_p,
+                kid_p,
+                nsfw_lean,
+                kid_lean,
+                injection,
+            )
+    assert combinations == 2048
