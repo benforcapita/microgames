@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { describe, it } from 'node:test';
 import postgres from 'postgres';
 
@@ -284,7 +284,8 @@ describe('preview links', () => {
       await tx`
         insert into public.game_tags (game_id, bundle_sha256, category_slug, status, applies)
         values (${gameId}, ${bundle('cd')}, 'nsfw', 'confirmed', true),
-               (${gameId}, ${sha}, 'nsfw', 'rejected', false)
+               (${gameId}, ${sha}, 'nsfw', 'rejected', false),
+               (${gameId}, ${sha}, 'kid_safe', 'confirmed', true)
       `;
       assert.equal((await play(tx, link.token)).length, 1);
       await tx`
@@ -461,6 +462,23 @@ describe('preview links', () => {
     });
   });
 
+  db('returns no row for a truncated token or a random token of the same length', async (sql) => {
+    await rollback(sql, async (tx) => {
+      const { ownerId, versionId } = await seed(tx);
+      const link = await mint(tx, ownerId, versionId);
+      const truncated = link.token.slice(0, -1);
+      let random = randomBytes(32).toString('base64url');
+      if (random === link.token) random = randomBytes(32).toString('base64url');
+      assert.equal(truncated.length, link.token.length - 1);
+      assert.equal(link.token.startsWith(truncated), true);
+      assert.equal(random.length, link.token.length);
+      assert.deepEqual(await play(tx, truncated), []);
+      assert.deepEqual(await play(tx, random), []);
+      assert.equal(await views(tx, link.id), 0);
+      assert.equal((await play(tx, link.token)).length, 1);
+    });
+  });
+
   db('mints distinct 32-byte tokens that are not a hash of the uid and the time', async (sql) => {
     await rollback(sql, async (tx) => {
       const { ownerId, versionId } = await seed(tx);
@@ -494,6 +512,10 @@ describe('preview links', () => {
         await tx.unsafe('reset role');
       }
       assert.equal(new Set(tokens).size, tokens.length);
+      const [body] = await tx<{ src: string }[]>`
+        select pg_get_functiondef('public.create_preview_link(uuid)'::regprocedure) as src
+      `;
+      assert.match(body.src, /extensions\.gen_random_bytes\(32\)/);
     });
   });
 
@@ -501,6 +523,18 @@ describe('preview links', () => {
     await rollback(sql, async (tx) => {
       const { ownerId } = await seed(tx);
       await asRole(tx, 'authenticated', ownerId);
+      assert.equal(await codeOf(tx, (sp) => sp`select * from public.create_preview_link(${randomUUID()}::uuid)`), '42501');
+      await tx.unsafe('reset role');
+      const [row] = await tx<{ n: number }[]>`select count(*)::int as n from public.preview_links where owner_id = ${ownerId}::uuid`;
+      assert.equal(row.n, 0);
+    });
+  });
+
+  db('rejects a create with no user before it looks up a version', async (sql) => {
+    await rollback(sql, async (tx) => {
+      const { ownerId, versionId } = await seed(tx);
+      await asRole(tx, 'authenticated');
+      assert.equal(await codeOf(tx, (sp) => sp`select * from public.create_preview_link(${versionId}::uuid)`), '42501');
       assert.equal(await codeOf(tx, (sp) => sp`select * from public.create_preview_link(${randomUUID()}::uuid)`), '42501');
       await tx.unsafe('reset role');
       const [row] = await tx<{ n: number }[]>`select count(*)::int as n from public.preview_links where owner_id = ${ownerId}::uuid`;
@@ -528,6 +562,10 @@ describe('preview links', () => {
       assert.equal(await views(tx, link.id), 0);
       const [open] = await tx<{ revoked_at: Date | null }[]>`select revoked_at from public.preview_links where id = ${link.id}::uuid`;
       assert.equal(open.revoked_at, null);
+      const [unaudited] = await tx<{ n: number }[]>`
+        select count(*)::int as n from public.admin_actions where game_id = ${gameId}
+      `;
+      assert.equal(unaudited.n, 0);
       await asRole(tx, 'authenticated', adminId);
       assert.equal(await codeOf(tx, (sp) => sp`select * from public.create_preview_link(${versionId}::uuid)`), '42501');
       assert.deepEqual([...(await tx<{ id: string }[]>`select id from public.preview_links`)], []);
@@ -540,6 +578,18 @@ describe('preview links', () => {
       await tx.unsafe('reset role');
       const [second] = await tx<{ revoked_at: Date }[]>`select revoked_at from public.preview_links where id = ${link.id}::uuid`;
       assert.equal(second.revoked_at.toISOString(), first.revoked_at.toISOString());
+      const [audited] = await tx<{ n: number }[]>`
+        select count(*)::int as n
+        from public.admin_actions as a
+        join public.preview_links as l on l.id = ${link.id}::uuid
+        where a.action = 'revoke_preview'
+          and a.game_id = ${gameId}
+          and a.before->>'preview_link_id' = ${link.id}
+          and a.before->>'revoked_at' is null
+          and a.after->>'preview_link_id' = ${link.id}
+          and (a.after->>'revoked_at')::timestamptz = l.revoked_at
+      `;
+      assert.equal(audited.n, 1);
       assert.deepEqual(await play(tx, link.token), []);
       const [anonExec] = await tx<{ anon_exec: boolean; auth_exec: boolean }[]>`
         select
@@ -548,6 +598,28 @@ describe('preview links', () => {
       `;
       assert.equal(anonExec.anon_exec, false);
       assert.equal(anonExec.auth_exec, true);
+    });
+  });
+
+  db('refuses admin revoke when the caller has no profile', async (sql) => {
+    await rollback(sql, async (tx) => {
+      const { ownerId, versionId, gameId } = await seed(tx);
+      const link = await mint(tx, ownerId, versionId);
+      const strayId = randomUUID();
+      await tx`
+        insert into auth.users (instance_id, id, aud, role, email, encrypted_password, created_at, updated_at)
+        values ('00000000-0000-0000-0000-000000000000', ${strayId}::uuid, 'authenticated', 'authenticated', ${`${strayId}@example.test`}, '', now(), now())
+      `;
+      await asRole(tx, 'authenticated', strayId);
+      assert.equal(await codeOf(tx, (sp) => sp`select public.admin_revoke_preview_link(${link.id}::uuid)`), '42501');
+      await tx.unsafe('reset role');
+      const [open] = await tx<{ revoked_at: Date | null; audits: number }[]>`
+        select l.revoked_at, (select count(*)::int from public.admin_actions where game_id = ${gameId}) as audits
+        from public.preview_links as l
+        where l.id = ${link.id}::uuid
+      `;
+      assert.equal(open.revoked_at, null);
+      assert.equal(open.audits, 0);
     });
   });
 
@@ -581,6 +653,71 @@ describe('preview links', () => {
       assert.equal(row.exact, true);
       assert.equal(row.recent, 1);
       assert.equal(ids.length, 10);
+    });
+  });
+
+  db('counts a create in the past hour and not on the one-hour boundary', async (sql) => {
+    await rollback(sql, async (tx) => {
+      const { ownerId, versionId } = await seed(tx);
+      const plant = async (shift: '61m' | '45m' | 'boundary' | 'inside') => {
+        await tx`delete from public.preview_links where owner_id = ${ownerId}::uuid`;
+        if (shift === '61m') {
+          await tx`
+            insert into public.preview_links (version_id, owner_id, token_hash, expires_at, revoked_at, created_at)
+            select ${versionId}::uuid, ${ownerId}::uuid, extensions.gen_random_bytes(32), now() + interval '7 days', now(), now() - interval '61 minutes'
+            from generate_series(1, 10)
+          `;
+        } else if (shift === '45m') {
+          await tx`
+            insert into public.preview_links (version_id, owner_id, token_hash, expires_at, revoked_at, created_at)
+            select ${versionId}::uuid, ${ownerId}::uuid, extensions.gen_random_bytes(32), now() + interval '7 days', now(), now() - interval '45 minutes'
+            from generate_series(1, 10)
+          `;
+        } else if (shift === 'boundary') {
+          await tx`
+            insert into public.preview_links (version_id, owner_id, token_hash, expires_at, revoked_at, created_at)
+            select ${versionId}::uuid, ${ownerId}::uuid, extensions.gen_random_bytes(32), now() + interval '7 days', now(), now() - interval '1 hour'
+            from generate_series(1, 10)
+          `;
+        } else {
+          await tx`
+            insert into public.preview_links (version_id, owner_id, token_hash, expires_at, revoked_at, created_at)
+            select ${versionId}::uuid, ${ownerId}::uuid, extensions.gen_random_bytes(32), now() + interval '7 days', now(), now() - interval '1 hour' + interval '1 second'
+            from generate_series(1, 10)
+          `;
+        }
+      };
+      const attempt = async (): Promise<string | null> => {
+        await asRole(tx, 'authenticated', ownerId);
+        let code: string | null = null;
+        try {
+          await tx.savepoint(async (sp) => {
+            await sp`select * from public.create_preview_link(${versionId}::uuid)`;
+          });
+        } catch (err) {
+          if (!(err instanceof postgres.PostgresError)) throw err;
+          code = err.code;
+          assert.equal(err.message, 'preview_link_hour');
+        }
+        await tx.unsafe('reset role');
+        return code;
+      };
+      const recent = async () => (await tx<{ n: number }[]>`
+        select count(*)::int as n from public.preview_links
+        where owner_id = ${ownerId}::uuid and created_at > now() - interval '1 hour'
+      `)[0].n;
+      await plant('61m');
+      assert.equal(await attempt(), null);
+      assert.equal(await recent(), 1);
+      await plant('45m');
+      assert.equal(await attempt(), 'P0001');
+      assert.equal(await recent(), 10);
+      await plant('boundary');
+      assert.equal(await attempt(), null);
+      assert.equal(await recent(), 1);
+      await plant('inside');
+      assert.equal(await attempt(), 'P0001');
+      assert.equal(await recent(), 10);
     });
   });
 
@@ -745,14 +882,18 @@ describe('preview links', () => {
     process.env.PUBLIC_SUPABASE_URL ??= 'http://127.0.0.1:54321';
     process.env.PUBLIC_SUPABASE_PUBLISHABLE_KEY ??= 'test';
     process.env.SUPABASE_SECRET_KEY ??= 'test';
-    const { listGames, listGamesByIds } = await import('../../src/lib/server/games.ts');
+    const { listGames, listGamesByIds, listTags, getGame, platformStats } = await import('../../src/lib/server/games.ts');
     const { sql: appSql } = await import('../../src/lib/server/db.ts');
     const ownerId = randomUUID();
     const gameId = `pl${randomUUID().replaceAll('-', '').slice(0, 10)}`;
     const liveId = `lv${randomUUID().replaceAll('-', '').slice(0, 10)}`;
     const tag = `t${gameId.slice(2, 8)}`;
+    const pendingTag = `p${gameId.slice(2, 8)}`;
+    const liveTag = `l${gameId.slice(2, 8)}`;
     const creator = `c${gameId.slice(2)}`;
+    const pendingCreator = `p${gameId.slice(2)}`;
     try {
+      const before = await platformStats();
       await sql`
         insert into auth.users (instance_id, id, aud, role, email, encrypted_password, created_at, updated_at)
         values ('00000000-0000-0000-0000-000000000000', ${ownerId}::uuid, 'authenticated', 'authenticated', ${`${ownerId}@example.test`}, '', now(), now())
@@ -761,8 +902,8 @@ describe('preview links', () => {
       await sql`
         insert into public.games (id, slug, owner_id, creator, title, stage, tags)
         values
-          (${gameId}, ${gameId}, ${ownerId}::uuid, ${creator}, 'Unapproved Preview', 'pending', ${sql.array([tag])}),
-          (${liveId}, ${liveId}, ${ownerId}::uuid, ${creator}, 'Live Control', 'live', ${sql.array([tag])})
+          (${gameId}, ${gameId}, ${ownerId}::uuid, ${pendingCreator}, 'Unapproved Preview', 'pending', ${sql.array([tag, pendingTag])}),
+          (${liveId}, ${liveId}, ${ownerId}::uuid, ${creator}, 'Live Control', 'live', ${sql.array([tag, liveTag])})
       `;
       const [version] = await sql<{ id: string }[]>`
         insert into public.game_validations (game_id, version, bundle_sha256, status)
@@ -776,6 +917,18 @@ describe('preview links', () => {
       assert.deepEqual(ids(await listGames({ tag, limit: 50 })), [liveId]);
       assert.deepEqual(ids(await listGamesByIds([gameId, liveId])), [liveId]);
       assert.deepEqual(ids(await listGames({ creator, includeUnpublished: true, includeUnlisted: true, limit: 50 })), [liveId]);
+      assert.deepEqual(ids(await listGames({ creator: pendingCreator, limit: 50 })), []);
+      const tags = await listTags();
+      assert.equal(tags.some((row) => row.tag === pendingTag), false);
+      assert.equal(tags.find((row) => row.tag === liveTag)?.count, 1);
+      assert.equal(await getGame(gameId), null);
+      assert.equal((await getGame(liveId))?.id, liveId);
+      const after = await platformStats();
+      assert.ok(before);
+      assert.ok(after);
+      assert.equal(after.games, before.games + 1);
+      assert.equal(after.live, before.live + 1);
+      assert.equal(after.creators, before.creators + 1);
       const rpcs = await sql<{ name: string }[]>`
         select p.proname as name
         from pg_proc p
