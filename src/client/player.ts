@@ -5,7 +5,7 @@ import { gameFrameSrc } from './frame-src';
 export interface PlayerGame {
   id: string;
   title: string;
-  stage: 'proving' | 'live';
+  stage: 'pending' | 'rejected' | 'proving' | 'live';
 }
 
 export interface PlayerOptions {

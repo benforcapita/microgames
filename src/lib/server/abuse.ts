@@ -307,6 +307,44 @@ async function hit(
   return row?.admitted === true;
 }
 
+export const PREVIEW_PAGE_WINDOW_MS = 60_000;
+export const PREVIEW_PAGE_MAX = 60;
+
+export async function admitPreviewPage(
+  tx: postgres.TransactionSql,
+  ip: string,
+  now = Date.now(),
+): Promise<boolean> {
+  const secret = process.env.MG_IP_HASH_SECRET?.trim();
+  if (!secret || secret.length < 32) throw new Error('Missing required env var MG_IP_HASH_SECRET (see .env.example)');
+  const at = new Date(now);
+  const subject = sessionIpSubject(ip, secret, at);
+  const cutoff = new Date(now - PREVIEW_PAGE_WINDOW_MS);
+  await tx`select pg_advisory_xact_lock(hashtextextended(${`preview-page:${subject}`}, 0))`;
+  const [row] = await tx<{ admitted: boolean }[]>`
+    with pruned as (
+      delete from public.preview_page_hits
+      where id in (
+        select id from public.preview_page_hits
+        where created_at < ${cutoff}
+        order by id
+        limit ${SWEEP_BATCH}
+        for update skip locked
+      )
+      returning 1
+    ), ins as (
+      insert into public.preview_page_hits (subject, created_at)
+      select ${subject}, ${at}
+      where (
+        select count(*) from public.preview_page_hits s
+        where s.subject = ${subject} and s.created_at > ${cutoff}
+      ) < ${PREVIEW_PAGE_MAX}
+      returning id
+    )
+    select exists(select 1 from ins) as admitted`;
+  return row?.admitted === true;
+}
+
 export async function admitSessionStart(
   tx: postgres.TransactionSql,
   { uid, ip, gameId, now = Date.now() }: SessionAdmission,

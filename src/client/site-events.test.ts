@@ -44,6 +44,16 @@ describe('client path: never the query string or hash', () => {
   it('query strings inside error text are stripped too', () => {
     assert.equal(scrub('at https://x.test/cb?token=abc#frag', 500), 'at https://x.test/cb');
   });
+  it('an error on a preview link drops the token before it is sent or stored', async () => {
+    const token = 'abcDEF789_-'.repeat(4);
+    const sent = await capture(() => sendErrorEvent({ details: { m: 'x' } }), { loc: { pathname: `/p/${token}` } });
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].body.includes(token), false);
+    assert.equal(JSON.parse(sent[0].body).path, '/p/[redacted]');
+    const stored = await serverStores(sent[0].body);
+    assert.equal(stored.status, 204);
+    assert.equal(JSON.stringify(stored.row).includes(token), false);
+  });
 });
 
 describe('client scrub uses the server PII detector', () => {

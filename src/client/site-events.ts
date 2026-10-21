@@ -2,7 +2,7 @@
 // Never blocks or breaks the page: sendBeacon first, fetch keepalive as fallback, every failure dropped.
 // Everything sent is cleaned with the SAME detector the server enforces (../lib/pii): query strings and
 // fragments stripped, PII redacted, text cut by UTF-8 bytes on code-point boundaries under the server caps.
-import { redactPii, redactUrlIntIpv4, truncateText, utf8Bytes } from '../lib/pii';
+import { redactPii, redactPreviewLink, redactUrlIntIpv4, truncateText, utf8Bytes } from '../lib/pii';
 
 /** Server: path <= 512 UTF-16 units; details JSON <= 4000 UTF-8 bytes. */
 export const MAX_PATH_UNITS = 512;
@@ -18,7 +18,7 @@ const QUERY = /[?#][^\s)"'<>]*/g;
 
 /** Strips query strings/fragments, redacts PII, then truncates to maxBytes (code-point safe). Pure; safe on any input. */
 export function scrub(text: unknown, maxBytes: number, maxUnits = Infinity): string {
-  return truncateText(redactPii(String(text ?? '').replace(QUERY, '')), maxBytes, maxUnits);
+  return truncateText(redactPii(redactPreviewLink(String(text ?? '').replace(QUERY, ''))), maxBytes, maxUnits);
 }
 
 /** Pathname only (never the query string or hash), scrubbed and capped at the server's 512 units. */
