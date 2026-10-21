@@ -3,6 +3,8 @@ import { execFile } from 'node:child_process';
 import { describe, it } from 'node:test';
 import { promisify } from 'node:util';
 import postgres from 'postgres';
+import { parseLocalDbUrl } from '../../scripts/lib/parse-local-db-url.mjs';
+import { startSniffServer } from './fixtures/pg-startup-sniff.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -32,24 +34,28 @@ type PrivRow = {
   ok: boolean;
 };
 
-function localDbUrl(): string | undefined {
+type LocalDbConfig = {
+  host: string;
+  port: number;
+  database: string;
+  username: string;
+  password: string;
+};
+
+function localDbUrl(): LocalDbConfig | undefined {
   const raw = process.env.DATABASE_URL ?? 'postgresql://postgres:postgres@127.0.0.1:54322/postgres';
-  try {
-    const host = new URL(raw).hostname;
-    if (host !== '127.0.0.1' && host !== 'localhost') return undefined;
-  } catch {
-    return undefined;
-  }
-  return raw;
+  const parsed = parseLocalDbUrl(raw);
+  if (!parsed) return undefined;
+  return parsed;
 }
 
 async function connect(t: { skip: (message?: string) => void }, max = 1): Promise<postgres.Sql | undefined> {
-  const dbUrl = localDbUrl();
-  if (!dbUrl) {
+  const parsed = localDbUrl();
+  if (!parsed) {
     t.skip('refusing to run categorization enqueue SQL against a non-local database');
     return undefined;
   }
-  const sql = postgres(dbUrl, { connect_timeout: 3, max, idle_timeout: 1 });
+  const sql = postgres({ ...parsed, connect_timeout: 3, max, idle_timeout: 1 });
   try {
     await sql`select 1`;
     return sql;
@@ -199,6 +205,83 @@ describe('categorization enqueue (CAT-4)', { concurrency: false }, () => {
     }
   });
 
+  it('a passed validation updated to a new bundle queues one more run; the same bundle queues none', async (t) => {
+    const sql = await connect(t);
+    if (!sql) return;
+    const gameId = gid();
+    const shaA = sha('a');
+    const shaB = sha('b');
+    const shaC = sha('c');
+    try {
+      await rollback(sql, async (tx) => {
+        await insertGame(tx, gameId);
+
+        await tx`
+          insert into public.game_validations (game_id, version, bundle_sha256, status)
+          values (${gameId}, 1, ${shaA}, 'passed')
+        `;
+
+        const initialRuns = await tx<RunRow[]>`
+          select id::text, game_id, version, bundle_sha256, pipeline_version, mode, status
+          from private.categorization_runs
+          where game_id = ${gameId} and bundle_sha256 = ${shaA}
+        `;
+        assert.equal(initialRuns.length, 1);
+
+        await tx`
+          update public.game_validations
+          set status = 'passed', bundle_sha256 = ${shaB}
+          where game_id = ${gameId} and version = 1
+        `;
+
+        const runsAfterNewBundle = await tx<RunRow[]>`
+          select id::text, game_id, version, bundle_sha256, pipeline_version, mode, status
+          from private.categorization_runs
+          where game_id = ${gameId} and bundle_sha256 = ${shaB}
+        `;
+        assert.equal(runsAfterNewBundle.length, 1);
+
+        const totalRunsAfterNewBundle = await tx<CountRow[]>`
+          select count(*)::int as n
+          from private.categorization_runs
+          where game_id = ${gameId}
+        `;
+        assert.equal(totalRunsAfterNewBundle[0].n, 2);
+
+        await tx`
+          update public.game_validations
+          set status = 'passed', bundle_sha256 = ${shaB}
+          where game_id = ${gameId} and version = 1
+        `;
+
+        const totalRunsAfterSameBundle = await tx<CountRow[]>`
+          select count(*)::int as n
+          from private.categorization_runs
+          where game_id = ${gameId}
+        `;
+        assert.equal(totalRunsAfterSameBundle[0].n, 2);
+
+        await tx`update public.game_validations set bundle_sha256 = ${shaC} where game_id = ${gameId} and version = 1`;
+
+        const runsAfterShaC = await tx<RunRow[]>`
+          select id::text, game_id, version, bundle_sha256, pipeline_version, mode, status
+          from private.categorization_runs
+          where game_id = ${gameId} and bundle_sha256 = ${shaC}
+        `;
+        assert.equal(runsAfterShaC.length, 1);
+
+        const totalRunsAfterShaC = await tx<CountRow[]>`
+          select count(*)::int as n
+          from private.categorization_runs
+          where game_id = ${gameId}
+        `;
+        assert.equal(totalRunsAfterShaC[0].n, 3);
+      });
+    } finally {
+      await sql.end({ timeout: 1 });
+    }
+  });
+
   it('a failure inside the queueing step can never fail the validation write', async (t) => {
     const sql = await connect(t);
     if (!sql) return;
@@ -306,6 +389,10 @@ describe('categorization enqueue (CAT-4)', { concurrency: false }, () => {
         assert.equal(run1.bundle_sha256, sha1b);
         assert.equal(run2.version, 1);
         assert.equal(run2.bundle_sha256, sha2);
+        assert.equal(run1.pipeline_version, 'cat-v1');
+        assert.equal(run1.mode, 'shadow');
+        assert.equal(run2.pipeline_version, 'cat-v1');
+        assert.equal(run2.mode, 'shadow');
 
         const [second] = await tx<CountRow[]>`
           select private.cat_backfill_runs() as n
@@ -369,6 +456,8 @@ describe('categorization enqueue (CAT-4)', { concurrency: false }, () => {
       { url: 'postgresql://user:secretpassword@evil.invalid:5432/db', secrets: ['evil.invalid', 'secretpassword'] },
       { url: 'postgresql://u@localhost.evil.invalid/db', secrets: ['localhost.evil.invalid'] },
       { url: 'postgresql://u@127.0.0.1,evil.invalid/db', secrets: ['evil.invalid'] },
+      { url: 'postgresql://u@[bad:5432/db' },
+      { url: 'postgresql://u@127.0.0.2:5432/db' },
       { url: 'not a url' },
       { url: '' },
       { url: undefined },
@@ -430,6 +519,33 @@ describe('categorization enqueue (CAT-4)', { concurrency: false }, () => {
     }
     assert.ok(allowedStderr.includes('CONNECT_ATTEMPT 127.0.0.1'));
     assert.equal(allowedStderr.includes('[backfill-categorization] refusing non-loopback host'), false);
+
+    const sniff = await startSniffServer();
+    try {
+      let sniffStderr = '';
+      try {
+        const res = await execFileAsync('node', ['scripts/backfill-categorization.mjs'], {
+          env: { ...process.env, DATABASE_URL: `postgresql://postgres:postgres@127.0.0.1:${sniff.port}/postgres?sslmode=require&options=-csearch_path=evil&host=evil.invalid` },
+          timeout: 15000,
+        });
+        sniffStderr = res.stderr;
+      } catch (err: unknown) {
+        if (err !== null && typeof err === 'object' && 'stderr' in err && typeof err.stderr === 'string') sniffStderr = err.stderr;
+      }
+      assert.equal(sniffStderr.includes('[backfill-categorization] refusing non-loopback host'), false);
+      assert.equal(sniff.reports.includes('SNIFF SSLRequest'), false);
+      const startups = sniff.reports.filter((r) => r.startsWith('SNIFF STARTUP '));
+      assert.ok(startups.length >= 1);
+      for (const line of startups) {
+        const keys = line.slice('SNIFF STARTUP '.length).split(',');
+        assert.equal(keys.includes('sslmode'), false);
+        assert.equal(keys.includes('options'), false);
+        assert.equal(keys.includes('host'), false);
+        assert.ok(keys.includes('user'));
+      }
+    } finally {
+      await sniff.close();
+    }
   });
 
   it('new functions revoke execute from public, anon, and authenticated', async (t) => {

@@ -43,7 +43,7 @@ security definer
 set search_path = ''
 as $$
 begin
-  if new.status = 'passed' and new.bundle_sha256 is not null and (TG_OP = 'INSERT' or old.status is distinct from 'passed') then
+  if new.status = 'passed' and new.bundle_sha256 is not null and (TG_OP = 'INSERT' or old.status is distinct from 'passed' or old.bundle_sha256 is distinct from new.bundle_sha256) then
     begin
       perform private.cat_enqueue_run(new.game_id, new.version, new.bundle_sha256);
     exception when others then
@@ -56,7 +56,7 @@ $$;
 
 drop trigger if exists enqueue_categorization_on_pass on public.game_validations;
 create trigger enqueue_categorization_on_pass
-  after insert or update of status on public.game_validations
+  after insert or update of status, bundle_sha256 on public.game_validations
   for each row execute function private.enqueue_categorization_on_pass();
 
 create or replace function private.cat_backfill_runs()

@@ -1,48 +1,18 @@
 import postgres from 'postgres';
+import { parseLocalDbUrl } from './lib/parse-local-db-url.mjs';
 
 function refuse() {
   process.stderr.write('[backfill-categorization] refusing non-loopback host\n');
   process.exit(2);
 }
 
-const raw = process.env.DATABASE_URL;
-if (!raw) {
-  refuse();
-}
-
-let u;
-try {
-  u = new URL(raw);
-} catch {
-  refuse();
-}
-
-if (u.protocol !== 'postgres:' && u.protocol !== 'postgresql:') {
-  refuse();
-}
-
-const schemeEnd = raw.indexOf('://');
-if (schemeEnd === -1) {
-  refuse();
-}
-
-const rest = raw.slice(schemeEnd + 3);
-const delimIdx = rest.search(/[/?#]/);
-const authority = delimIdx === -1 ? rest : rest.slice(0, delimIdx);
-if (authority.includes(',')) {
-  refuse();
-}
-
-if (u.hostname !== '127.0.0.1' && u.hostname !== 'localhost') {
+const parsed = parseLocalDbUrl(process.env.DATABASE_URL);
+if (!parsed) {
   refuse();
 }
 
 const sql = postgres({
-  host: u.hostname,
-  port: Number(u.port || 5432),
-  database: decodeURIComponent(u.pathname.slice(1)) || 'postgres',
-  username: decodeURIComponent(u.username),
-  password: decodeURIComponent(u.password),
+  ...parsed,
   connect_timeout: 3,
   max: 1,
   idle_timeout: 1,

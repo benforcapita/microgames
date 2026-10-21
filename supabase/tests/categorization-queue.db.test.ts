@@ -2,27 +2,32 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { describe, it } from 'node:test';
 import postgres from 'postgres';
+import { parseLocalDbUrl } from '../../scripts/lib/parse-local-db-url.mjs';
 
 type Sql = postgres.Sql | postgres.TransactionSql;
 
-function localDbUrl(): string | undefined {
+type LocalDbConfig = {
+  host: string;
+  port: number;
+  database: string;
+  username: string;
+  password: string;
+};
+
+function localDbUrl(): LocalDbConfig | undefined {
   const raw = process.env.DATABASE_URL ?? 'postgresql://postgres:postgres@127.0.0.1:54322/postgres';
-  try {
-    const host = new URL(raw).hostname;
-    if (host !== '127.0.0.1' && host !== 'localhost') return undefined;
-  } catch {
-    return undefined;
-  }
-  return raw;
+  const parsed = parseLocalDbUrl(raw);
+  if (!parsed) return undefined;
+  return parsed;
 }
 
 async function connect(t: { skip: (message?: string) => void }, max = 1): Promise<postgres.Sql | undefined> {
-  const dbUrl = localDbUrl();
-  if (!dbUrl) {
+  const parsed = localDbUrl();
+  if (!parsed) {
     t.skip('refusing to run categorization queue SQL against a non-local database');
     return undefined;
   }
-  const sql = postgres(dbUrl, { connect_timeout: 3, max, idle_timeout: 1 });
+  const sql = postgres({ ...parsed, connect_timeout: 3, max, idle_timeout: 1 });
   try {
     await sql`select 1`;
     return sql;
