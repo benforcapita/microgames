@@ -71,9 +71,15 @@ jobs:
       - name: DB e2e
         env:
           PLAYWRIGHT_JSON_OUTPUT_NAME: ${{ runner.temp }}/db-e2e.json
-        run: npx playwright test e2e/db-sessions.spec.mjs --reporter=list,json
+        run: npx playwright test e2e/db-sessions.spec.mjs e2e/preview-links.spec.mjs --reporter=list,json
       - name: Assert no DB e2e tests skipped
         run: node scripts/ci/assert-no-db-skips.mjs "$RUNNER_TEMP/db-e2e.json"
+      - name: Upload SL-3 screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sl3-screenshots
+          path: test-results/screenshots/sl-3-*.png
       - name: Stop local Supabase
         if: always()
         run: supabase stop
