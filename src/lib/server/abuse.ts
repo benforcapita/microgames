@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import net from 'node:net';
 import type postgres from 'postgres';
 
 export const MG_UID_COOKIE = 'mg_uid';
@@ -204,9 +205,53 @@ export const SESSION_START_IP_WINDOW_MS = 60 * 60_000;
 export const SESSION_START_IP_MAX = 20;
 const SWEEP_BATCH = 500;
 
+function ipv6Hextets(ip: string): number[] | null {
+  const halves = (ip.split('%', 1)[0] ?? ip).split('::');
+  if (halves.length > 2) return null;
+  const groups = (part: string, allowV4: boolean): number[] | null => {
+    if (part === '') return [];
+    const out: number[] = [];
+    const gs = part.split(':');
+    for (let i = 0; i < gs.length; i++) {
+      const g = gs[i] ?? '';
+      if (g.includes('.')) {
+        if (!allowV4 || i !== gs.length - 1 || !net.isIPv4(g)) return null;
+        const quad = g.split('.').map(Number);
+        out.push(((quad[0] ?? 0) << 8) | (quad[1] ?? 0), ((quad[2] ?? 0) << 8) | (quad[3] ?? 0));
+      } else if (/^[0-9a-f]{1,4}$/i.test(g)) {
+        out.push(parseInt(g, 16));
+      } else {
+        return null;
+      }
+    }
+    return out;
+  };
+  const head = groups(halves[0] ?? '', halves.length === 1);
+  const tail = groups(halves[1] ?? '', true);
+  if (head === null || tail === null) return null;
+  if (halves.length === 1) return head.length === 8 ? head : null;
+  const fill = 8 - head.length - tail.length;
+  if (fill < 1) return null;
+  return [...head, ...Array<number>(fill).fill(0), ...tail];
+}
+
+function normalizeIp(ip: string): string {
+  if (net.isIPv4(ip)) return ip;
+  if (!net.isIPv6(ip)) return ip;
+  const h = ipv6Hextets(ip);
+  if (h === null) return ip;
+  if (h[0] === 0 && h[1] === 0 && h[2] === 0 && h[3] === 0 && h[4] === 0 && h[5] === 0xffff) {
+    return `${(h[6] ?? 0) >> 8}.${(h[6] ?? 0) & 0xff}.${(h[7] ?? 0) >> 8}.${(h[7] ?? 0) & 0xff}`;
+  }
+  return `v6/64:${h
+    .slice(0, 4)
+    .map((n) => n.toString(16).padStart(4, '0'))
+    .join(':')}`;
+}
+
 export function sessionIpSubject(ip: string, secret: string, at: Date): string {
   const dayKey = crypto.createHmac('sha256', secret).update(at.toISOString().slice(0, 10)).digest();
-  return crypto.createHmac('sha256', dayKey).update(ip).digest('hex');
+  return crypto.createHmac('sha256', dayKey).update(normalizeIp(ip)).digest('hex');
 }
 
 export interface SessionAdmission {

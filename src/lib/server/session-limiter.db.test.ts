@@ -223,6 +223,36 @@ describe('shared session-start limiter (db)', () => {
     );
   });
 
+  it('mixed spellings of one v4 address racing across the pools admit exactly the ip cap', async (t) => {
+    if (skip(t)) return;
+    const ip = nextIp();
+    const [n = 0, m = 0] = ip.split('.').slice(2).map(Number);
+    const spellings = [
+      ip,
+      `::ffff:${ip}`,
+      `::FFFF:${ip}`,
+      `0:0:0:0:0:ffff:${ip}`,
+      `::ffff:cb00:${((n << 8) | m).toString(16)}`,
+    ];
+    const results = await Promise.all(
+      Array.from({ length: 40 }, (_, i) =>
+        admit(pools[i % pools.length], { uid: randomUUID(), ip: spellings[i % spellings.length] ?? ip }),
+      ),
+    );
+    assert.equal(results.filter(Boolean).length, SESSION_START_IP_MAX);
+  });
+
+  it('40 distinct hosts in one /64 racing across the pools admit exactly the ip cap', async (t) => {
+    if (skip(t)) return;
+    const hosts = Array.from({ length: 40 }, (_, i) => `2001:db8:a:b:${(i + 1).toString(16)}::1`);
+    await sqlA`delete from public.session_admissions
+      where kind = 'ip' and subject in ${sqlA(ipSubjects(hosts))}`;
+    const results = await Promise.all(
+      hosts.map((ip, i) => admit(pools[i % pools.length], { uid: randomUUID(), ip })),
+    );
+    assert.equal(results.filter(Boolean).length, SESSION_START_IP_MAX);
+  });
+
   it('many parallel starts from one device admit exactly once and spend exactly one ip row', async (t) => {
     if (skip(t)) return;
     const uid = randomUUID();
@@ -251,6 +281,33 @@ describe('shared session-start limiter (db)', () => {
       true,
       'a second game has its own ip budget',
     );
+  });
+
+  it('a held uid/ip advisory lock on one game does not block the same pair on another game', async (t) => {
+    if (skip(t)) return;
+    const uid = randomUUID();
+    const ip = nextIp();
+    let held!: () => void;
+    let release!: () => void;
+    const locksHeld = new Promise<void>((resolve) => { held = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const holding = sqlA.begin(async (tx) => {
+      assert.equal(await admitSessionStart(tx, { uid, ip, gameId: GAME }), true);
+      held();
+      await gate;
+    });
+    await locksHeld;
+    let admitted: boolean | undefined;
+    try {
+      admitted = await sqlB.begin(async (tx) => {
+        await tx`set local lock_timeout = '200ms'`;
+        return admitSessionStart(tx, { uid, ip, gameId: GAME2 });
+      });
+    } finally {
+      release();
+    }
+    await holding;
+    assert.equal(admitted, true, 'same uid+ip on a different game must not wait on the held lock');
   });
 
   it('stores a daily-rotating hmac of the ip, never the ip itself', async (t) => {

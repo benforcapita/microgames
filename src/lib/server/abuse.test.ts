@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHmac } from 'node:crypto';
 import { describe, it } from 'node:test';
 import {
   DEVICE_RATING_MESSAGE,
@@ -230,6 +231,83 @@ describe('secureCookie', () => {
 describe('sessionIpSubject', () => {
   const ip = '203.0.113.44';
   const noon = new Date(Date.UTC(2026, 9, 19, 12));
+
+  it('hashes a plain IPv4 verbatim, byte-identical to the unnormalized input', () => {
+    const dayKey = createHmac('sha256', 's1').update(noon.toISOString().slice(0, 10)).digest();
+    const expected = createHmac('sha256', dayKey).update('203.0.113.44').digest('hex');
+    assert.equal(sessionIpSubject('203.0.113.44', 's1', noon), expected);
+  });
+
+  it('folds IPv4-mapped IPv6 onto the plain IPv4 subject', () => {
+    const plain = sessionIpSubject('192.0.2.1', 's1', noon);
+    assert.equal(sessionIpSubject('::ffff:192.0.2.1', 's1', noon), plain);
+    assert.equal(sessionIpSubject('::FFFF:192.0.2.1', 's1', noon), plain);
+    assert.equal(sessionIpSubject('0:0:0:0:0:ffff:192.0.2.1', 's1', noon), plain);
+    assert.equal(sessionIpSubject('::ffff:c000:0201', 's1', noon), plain);
+    assert.equal(sessionIpSubject('::FFFF:C000:201', 's1', noon), plain);
+  });
+
+  it('keys IPv6 by its /64: same prefix same subject, different prefix different subject', () => {
+    const a = sessionIpSubject('2001:db8:abcd:1234::1', 's1', noon);
+    assert.equal(sessionIpSubject('2001:db8:abcd:1234:ffff:ffff:ffff:ffff', 's1', noon), a);
+    assert.notEqual(sessionIpSubject('2001:db8:abcd:1235::1', 's1', noon), a);
+    assert.notEqual(sessionIpSubject('2001:db8:abce:1234::1', 's1', noon), a);
+  });
+
+  it('does not fold non-canonical IPv4-mapped spellings onto the IPv4 subject', () => {
+    const plain = sessionIpSubject('192.0.2.1', 's1', noon);
+    for (const ip of [
+      '1::ffff:192.0.2.1',
+      '0:1::ffff:192.0.2.1',
+      '0:0:1::ffff:192.0.2.1',
+      '0:0:0:1:0:ffff:c000:201',
+      '::1:ffff:192.0.2.1',
+      '::ffff:0:192.0.2.1',
+      '::192.0.2.1',
+    ]) {
+      assert.notEqual(sessionIpSubject(ip, 's1', noon), plain, ip);
+    }
+  });
+
+  it('folds IPv4-mapped IPv6 written in hex hextets onto the IPv4 subject', () => {
+    const plain = sessionIpSubject('198.51.100.254', 's1', noon);
+    assert.equal(sessionIpSubject('::ffff:198.51.100.254', 's1', noon), plain);
+    assert.equal(sessionIpSubject('::ffff:c633:64fe', 's1', noon), plain);
+  });
+
+  it('ignores a zone id when keying IPv6', () => {
+    assert.equal(sessionIpSubject('fe80::1%eth0', 's1', noon), sessionIpSubject('fe80::2', 's1', noon));
+    assert.equal(sessionIpSubject('::ffff:192.0.2.1%eth0', 's1', noon), sessionIpSubject('192.0.2.1', 's1', noon));
+  });
+
+  it('hashes non-IP input verbatim under the day key', () => {
+    const dayKey = createHmac('sha256', 's1').update(noon.toISOString().slice(0, 10)).digest();
+    const expected = createHmac('sha256', dayKey).update('unknown').digest('hex');
+    assert.equal(sessionIpSubject('unknown', 's1', noon), expected);
+    assert.notEqual(sessionIpSubject('junk-a', 's1', noon), sessionIpSubject('junk-b', 's1', noon));
+  });
+
+  it('hashes a dangling zone id as-is', () => {
+    const dayKey = createHmac('sha256', 's1').update(noon.toISOString().slice(0, 10)).digest();
+    const expected = createHmac('sha256', dayKey).update('fe80::1%').digest('hex');
+    assert.equal(sessionIpSubject('fe80::1%', 's1', noon), expected);
+  });
+
+  it('does not let a non-IP string collide with a /64 subject key', () => {
+    assert.notEqual(sessionIpSubject('fe80:0000:0000:0000', 's1', noon), sessionIpSubject('fe80::1', 's1', noon));
+  });
+
+  it('matches different spellings of the same /64', () => {
+    const a = sessionIpSubject('2001:db8:abcd:1234::1', 's1', noon);
+    assert.equal(sessionIpSubject('2001:0DB8:ABCD:1234:0:0:0:99', 's1', noon), a);
+    assert.equal(sessionIpSubject('2001:db8:abcd:1234:0000:0000:0000:0001', 's1', noon), a);
+  });
+
+  it('keeps distinct IPv4s distinct and passes unparseable input through', () => {
+    assert.notEqual(sessionIpSubject('192.0.2.1', 's1', noon), sessionIpSubject('192.0.2.2', 's1', noon));
+    assert.match(sessionIpSubject('unknown', 's1', noon), /^[0-9a-f]{64}$/);
+    assert.equal(sessionIpSubject('unknown', 's1', noon), sessionIpSubject('unknown', 's1', noon));
+  });
 
   it('is stable within a UTC day and rotates across UTC days', () => {
     const day = sessionIpSubject(ip, 's1', noon);
