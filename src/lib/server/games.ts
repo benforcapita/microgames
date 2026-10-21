@@ -211,7 +211,34 @@ function bundleStorage(): BundleStorage {
   return {
     upload: (path, bytes, contentType) => bucket().upload(path, bytes, { contentType, upsert: true }),
     remove: (paths) => bucket().remove(paths),
+    download: async (path) => {
+      const { data, error } = await bucket().download(path);
+      if (error || !data) return { data: null, error: { message: error?.message ?? 'Object not found' } };
+      return { data: new Uint8Array(await data.arrayBuffer()), error: null };
+    },
   };
+}
+
+async function archiveBundleVersion(storage: BundleStorage, gameId: string): Promise<void> {
+  if (!storage.download) throw new Error('Storage upload failed: previous bundle cannot be kept');
+  const [row] = await sql<{ version: number }[]>`
+    select version from game_validations where game_id = ${gameId} order by version desc limit 1`;
+  const version = row && row.version >= 1 ? row.version : 1;
+  const archivedPath = `${gameId}/${version}/index.html`;
+  const archived = await storage.download(archivedPath);
+  if (archived.data) return;
+  if (archived.error && !/not found/i.test(archived.error.message)) {
+    throw new Error(`Storage upload failed: ${archived.error.message}`);
+  }
+  const current = await storage.download(`${gameId}/index.html`);
+  if (!current.data) {
+    if (current.error && !/not found/i.test(current.error.message)) {
+      throw new Error(`Storage upload failed: ${current.error.message}`);
+    }
+    return;
+  }
+  const put = await storage.upload(archivedPath, current.data, 'text/html; charset=utf-8');
+  if (put.error) throw new Error(`Storage upload failed: ${put.error.message}`);
 }
 
 export interface NewGame {
@@ -273,6 +300,7 @@ export async function replaceGameBundle(
 
   const thumb = input.thumb ? `thumb.${input.thumb.ext}` : game.thumb;
   const { html } = input;
+  if (html) await archiveBundleVersion(storage, game.id);
   const puts = await Promise.all([
     ...(html ? [storage.upload(`${game.id}/index.html`, html, 'text/html; charset=utf-8')] : []),
     ...(input.thumb ? [storage.upload(`${game.id}/${thumb}`, input.thumb.bytes, input.thumb.type)] : []),
@@ -296,10 +324,16 @@ export async function replaceGameBundle(
 
 /** Deletes a game owned by `ownerId`, including its bundle in storage. Returns false if not found / not owned. */
 export async function deleteGame(gameId: string, ownerId: string): Promise<boolean> {
+  const versions = await sql<{ version: number }[]>`
+    select version from game_validations where game_id = ${gameId}`;
   const [row] = await sql<{ id: string; thumb: string | null }[]>`
     delete from games where id = ${gameId} and owner_id = ${ownerId} returning id, thumb`;
   if (!row) return false;
-  await bucket().remove([`${row.id}/index.html`, ...(row.thumb ? [`${row.id}/${row.thumb}`] : [])]);
+  await bucket().remove([
+    `${row.id}/index.html`,
+    ...versions.map((v) => `${row.id}/${v.version}/index.html`),
+    ...(row.thumb ? [`${row.id}/${row.thumb}`] : []),
+  ]);
   return true;
 }
 

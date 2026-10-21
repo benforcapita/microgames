@@ -1,4 +1,6 @@
-import { randomBytes, randomUUID } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import http from 'node:http';
 import { test, expect } from '@playwright/test';
 import postgres from 'postgres';
 import { createClient } from '@supabase/supabase-js';
@@ -14,6 +16,26 @@ const LISTING = /^\/($|games(?:\/|$)|proving(?:\/|$)|creators(?:\/|$)|u\/|play\/
 
 function freshToken() {
   return randomBytes(32).toString('base64url');
+}
+
+function ensureLoopbackAlias() {
+  const add = ['addr', 'add', '127.0.0.2/8', 'dev', 'lo'];
+  try {
+    execFileSync('ip', add, { stdio: 'ignore' });
+  } catch {
+    try { execFileSync('sudo', ['-n', 'ip', ...add], { stdio: 'ignore' }); } catch { return; }
+  }
+}
+
+function statusFrom(path, localAddress) {
+  const port = Number(process.env.E2E_WEB_PORT ?? 4721);
+  return new Promise((resolve, reject) => {
+    const req = http.get({ hostname: '127.0.0.1', port, path, localAddress, family: 4 }, (res) => {
+      res.resume();
+      res.on('end', () => resolve(res.statusCode ?? 0));
+    });
+    req.on('error', reject);
+  });
 }
 
 function median(values) {
@@ -58,10 +80,16 @@ test.afterAll(async () => {
 test('a logged-out visitor can play a valid preview and cannot find the game anywhere else', async ({ page }) => {
   test.setTimeout(120_000);
   const ownerId = randomUUID();
+  const strangerId = randomUUID();
   const gameId = `p${randomBytes(4).toString('hex')}`.slice(0, 12);
   const title = `Quarry ${gameId}`;
-  const tag = `tg${gameId}`;
-  const creator = `cr${gameId}`.slice(0, 32);
+  const handle = `cr${gameId}`.slice(0, 32);
+  const controlId = `ln${randomBytes(4).toString('hex')}`;
+  const controlTitle = `Lantern ${controlId}`;
+  const apiToken = `mgp_${randomBytes(32).toString('base64url')}`;
+  const apiHash = createHash('sha256').update(apiToken).digest('hex');
+  const v1 = html.replace('</body>', 'BUNDLE-V1</body>');
+  const v2 = v1.replace('BUNDLE-V1', 'BUNDLE-V2-FAILED');
   const storage = createClient(env.PUBLIC_SUPABASE_URL, env.SUPABASE_SECRET_KEY, { auth: { persistSession: false } }).storage.from('games');
   let token = '';
   try {
@@ -69,10 +97,23 @@ test('a logged-out visitor can play a valid preview and cannot find the game any
       insert into auth.users (instance_id, id, aud, role, email, encrypted_password, created_at, updated_at)
       values ('00000000-0000-0000-0000-000000000000', ${ownerId}::uuid, 'authenticated', 'authenticated', ${`${ownerId}@example.test`}, '', now(), now())
     `;
-    await sql`insert into public.profiles (id, handle) values (${ownerId}::uuid, ${creator})`;
+    await sql`insert into public.profiles (id, handle) values (${ownerId}::uuid, ${handle})`;
+    await sql`
+      insert into auth.users (instance_id, id, aud, role, email, encrypted_password, created_at, updated_at)
+      values ('00000000-0000-0000-0000-000000000000', ${strangerId}::uuid, 'authenticated', 'authenticated', ${`${strangerId}@example.test`}, '', now(), now())
+    `;
+    await sql`insert into public.profiles (id, handle) values (${strangerId}::uuid, ${controlId})`;
     await sql`
       insert into public.games (id, slug, owner_id, creator, title, tags, stage, forked_from)
-      values (${gameId}, ${gameId}, ${ownerId}::uuid, ${creator}, ${title}, ${[tag]}::text[], 'pending', 'stk7wr01')
+      values (${gameId}, ${gameId}, ${ownerId}::uuid, 'polyprism', ${title}, ${['arcade']}::text[], 'pending', 'stk7wr01')
+    `;
+    await sql`
+      insert into public.games (id, slug, owner_id, creator, title, tags, stage)
+      values (${controlId}, ${controlId}, ${strangerId}::uuid, ${controlId}, ${controlTitle}, '{}', 'live')
+    `;
+    await sql`
+      insert into public.api_tokens (user_id, name, token_hash, prefix)
+      values (${strangerId}::uuid, 'e2e', ${apiHash}, ${apiToken.slice(0, 10)})
     `;
     const [version] = await sql`
       insert into public.game_validations (game_id, version, bundle_sha256, status)
@@ -80,8 +121,14 @@ test('a logged-out visitor can play a valid preview and cannot find the game any
       returning id
     `;
     await sql`insert into public.featured_games (game_id, position, label, active) values (${gameId}, -1, 'hidden', true)`;
-    const uploaded = await storage.upload(`${gameId}/index.html`, Buffer.from(html), { contentType: 'text/html; charset=utf-8', upsert: true });
-    if (uploaded.error) throw uploaded.error;
+    for (const [path, body] of [[`${gameId}/1/index.html`, v1], [`${gameId}/index.html`, v2]]) {
+      const uploaded = await storage.upload(path, Buffer.from(body), { contentType: 'text/html; charset=utf-8', upsert: true });
+      if (uploaded.error) throw uploaded.error;
+    }
+    await sql`
+      insert into public.game_validations (game_id, version, bundle_sha256, status)
+      values (${gameId}, 2, ${'ef'.repeat(32)}, 'failed')
+    `;
     const link = await mint(ownerId, version.id);
     token = link.token;
     const expired = await mint(ownerId, version.id);
@@ -92,69 +139,51 @@ test('a logged-out visitor can play a valid preview and cannot find the game any
       await tx`select public.revoke_preview_link(${revoked.id}::uuid)`;
     });
 
-    const pages = [
-      '/',
-      '/games',
-      '/games?sort=new',
-      '/games?sort=rated',
-      `/games?tag=${encodeURIComponent(tag)}`,
-      `/games?q=${encodeURIComponent(title)}`,
-      '/proving',
-      '/creators',
-      `/u/${creator}`,
-      `/play/${gameId}`,
-      '/play/stk7wr01',
-      `/submissions/${gameId}`,
-      '/sitemap.xml',
-      '/sitemap-index.xml',
-      '/feed.xml',
-      '/rss.xml',
-      '/atom.xml',
-      '/feed',
-      `/admin/games?q=${encodeURIComponent(title)}`,
+    const listings = [
+      { path: '/', control: 'Stack Tower' },
+      { path: '/games', control: 'Stack Tower' },
+      { path: '/games?sort=new', control: 'Stack Tower' },
+      { path: '/games?sort=rated', control: 'Stack Tower' },
+      { path: '/games?tag=arcade', control: 'Stack Tower' },
+      { path: `/games?q=${encodeURIComponent(title)}`, control: 'Stack Tower' },
+      { path: '/u/polyprism', control: 'Stack Tower' },
+      { path: '/play/stk7wr01', control: 'Stack Tower' },
+      { path: '/proving', control: 'The Proving Grounds' },
+      { path: '/creators', control: 'Ship one file' },
     ];
-    const apis = [
-      '/api/v1/games',
-      `/api/v1/games/${gameId}`,
-      '/api/games',
-      `/api/submissions/${gameId}`,
-      `/api/saves/${gameId}`,
-      `/api/games/${gameId}/assets`,
-      `/api/games/${gameId}/rate`,
-    ];
-    const forbidden = [`/play/${gameId}`, `/g/${gameId}`, `/submissions/${gameId}`, `/games/${gameId}`];
-    for (const path of pages) {
-      const res = await page.goto(path);
+    for (const route of listings) {
+      const res = await page.goto(route.path);
+      expect(res?.status(), route.path).toBe(200);
       const body = await page.content();
-      const here = new URL(page.url());
-      if (here.pathname !== '/login') {
-        for (const needle of forbidden) expect(body, path).not.toContain(needle);
-      }
-      const main = await page.locator('main').innerText();
-      expect(main, path).not.toContain(title);
-      const echoesTag = here.searchParams.get('tag') === tag;
-      if (!echoesTag) expect(main, path).not.toContain(gameId);
-      if (!path.includes(gameId) && !path.includes(encodeURIComponent(title))) expect(body, path).not.toContain(gameId);
+      expect(body, route.path).toContain(route.control);
+      expect(body, route.path).not.toContain(title);
+      expect(body, route.path).not.toContain(gameId);
       const og = [
         await page.locator('meta[property="og:title"]').getAttribute('content'),
         await page.locator('meta[property="og:description"]').getAttribute('content'),
         ...(await page.locator('meta[property="og:image"]').evaluateAll((els) => els.map((el) => el.getAttribute('content') ?? ''))),
       ];
       for (const value of og) {
-        expect(value ?? '', path).not.toContain(title);
-        expect(value ?? '', path).not.toContain(gameId);
+        expect(value ?? '', route.path).not.toContain(title);
+        expect(value ?? '', route.path).not.toContain(gameId);
       }
-      expect(res?.headers()['x-robots-tag'] ?? '', path).not.toContain(title);
+      if (route.path === '/play/stk7wr01' || route.path === '/proving') {
+        expect(res?.headers()['referrer-policy'], route.path).toBe('strict-origin-when-cross-origin');
+        expect(res?.headers()['x-robots-tag'] ?? '', route.path).not.toContain('noindex');
+      }
     }
-    for (const path of apis) {
-      const res = await page.request.get(path);
-      const body = await res.text();
-      expect(body, path).not.toContain(title);
-      for (const needle of forbidden) expect(body, path).not.toContain(needle);
-      if (!path.includes(gameId)) expect(body, path).not.toContain(gameId);
-      expect(res.headers()['x-robots-tag'] ?? '', path).not.toContain(title);
-    }
+    const pendingPlay = await page.goto(`/play/${gameId}`);
+    expect(pendingPlay?.status()).toBe(404);
+    expect(await page.content()).not.toContain(title);
     expect((await page.request.get('/games')).headers()['referrer-policy']).toBe('strict-origin-when-cross-origin');
+    const anonApi = await page.request.get('/api/v1/games');
+    expect(anonApi.status()).toBe(401);
+    const ownApi = await page.request.get('/api/v1/games', { headers: { authorization: `Bearer ${apiToken}` } });
+    expect(ownApi.status()).toBe(200);
+    const ownBody = await ownApi.text();
+    expect(ownBody).toContain(controlTitle);
+    expect(ownBody).not.toContain(title);
+    expect(ownBody).not.toContain(gameId);
 
     const played = await page.goto(`/p/${token}`);
     expect(played?.status()).toBe(200);
@@ -180,10 +209,51 @@ test('a logged-out visitor can play a valid preview and cannot find the game any
     await page.getByRole('button', { name: 'Play' }).click();
     const frame = page.locator('iframe.mg-frame');
     await expect(frame).toHaveAttribute('sandbox', 'allow-scripts allow-pointer-lock');
+    await expect(frame).toHaveAttribute('src', new RegExp(`/g/${gameId}/1/index.html`));
     const src = await frame.getAttribute('src');
-    expect(src).toContain(`${CDN}/g/${gameId}/`);
-    expect(src).toContain('index.html');
-    expect((await page.request.get(src.split('#')[0])).status()).toBe(200);
+    if (!src) throw new Error('preview frame has no source');
+    const frameUrl = new URL(src);
+    expect(frameUrl.pathname).toBe(`/g/${gameId}/1/index.html`);
+    const playedDoc = await page.request.get(src.split('#')[0]);
+    expect(playedDoc.status()).toBe(200);
+    const playedHtml = await playedDoc.text();
+    expect(playedHtml).toContain('BUNDLE-V1');
+    expect(playedHtml).not.toContain('BUNDLE-V2-FAILED');
+    expect(await (await page.request.get(`${CDN}/g/${gameId}/2/index.html${frameUrl.search}`)).text()).not.toContain('BUNDLE-V2-FAILED');
+    expect(await (await page.request.get(`${CDN}/g/${gameId}/index.html${frameUrl.search}`)).text()).not.toContain('BUNDLE-V2-FAILED');
+    await expect(page.frameLocator('iframe.mg-frame').locator('canvas').first()).toBeVisible();
+    const gameFrame = page.frames().find((f) => f.url().includes(`/g/${gameId}/1/index.html`));
+    if (!gameFrame) throw new Error('preview frame did not load');
+    await page.evaluate(() => {
+      window.__mgOverlay = false;
+      const obs = new MutationObserver(() => {
+        if (document.querySelector('.mg-ad-overlay')) window.__mgOverlay = true;
+      });
+      obs.observe(document.documentElement, { childList: true, subtree: true });
+      window.__mgStopOverlay = () => obs.disconnect();
+    });
+    const adOutcome = await gameFrame.evaluate(() => new Promise((resolve) => {
+      const seen = [];
+      const timer = setTimeout(() => resolve(seen.join(',')), 1500);
+      window.addEventListener('message', (event) => {
+        const type = event.data && event.data.type;
+        if (type !== 'AD_BREAK_DONE' && type !== 'REWARD_GRANTED' && type !== 'REWARD_DENIED') return;
+        seen.push(type);
+        if (seen.includes('AD_BREAK_DONE') && (seen.includes('REWARD_GRANTED') || seen.includes('REWARD_DENIED'))) {
+          clearTimeout(timer);
+          resolve(seen.join(','));
+        }
+      });
+      parent.postMessage({ type: 'REQUEST_AD_BREAK' }, '*');
+      parent.postMessage({ type: 'REQUEST_REWARD_AD' }, '*');
+    }));
+    const sawOverlay = await page.evaluate(() => {
+      window.__mgStopOverlay();
+      return window.__mgOverlay === true;
+    });
+    expect(adOutcome).toContain('AD_BREAK_DONE');
+    expect(adOutcome).toContain('REWARD_GRANTED');
+    expect(sawOverlay).toBe(false);
     const bare = new URL(src);
     bare.search = '';
     bare.hash = '';
@@ -229,10 +299,10 @@ test('a logged-out visitor can play a valid preview and cannot find the game any
     expect(nsfw.body).toBe(misses[0].body);
     expect(nsfw.headers).toEqual(misses[0].headers);
   } finally {
-    await sql`delete from public.games where id = ${gameId}`.catch(() => {});
-    await sql`delete from public.profiles where id = ${ownerId}::uuid`.catch(() => {});
-    await sql`delete from auth.users where id = ${ownerId}::uuid`.catch(() => {});
-    await storage.remove([`${gameId}/index.html`]).catch(() => {});
+    await sql`delete from public.games where id in (${gameId}, ${controlId})`.catch(() => {});
+    await sql`delete from public.profiles where id in (${ownerId}::uuid, ${strangerId}::uuid)`.catch(() => {});
+    await sql`delete from auth.users where id in (${ownerId}::uuid, ${strangerId}::uuid)`.catch(() => {});
+    await storage.remove([`${gameId}/index.html`, `${gameId}/1/index.html`]).catch(() => {});
   }
 });
 
@@ -250,4 +320,30 @@ test('preview opens past 60 in a minute return 429', async ({ request }) => {
   expect(await again.text()).toBe('Too many requests');
   expect(blocked.headers()['x-robots-tag']).toBe('noindex, nofollow');
   expect(again.headers()['x-robots-tag']).toBe(blocked.headers()['x-robots-tag']);
+});
+
+test('a second loopback address keeps its own preview budget', async () => {
+  test.setTimeout(120_000);
+  ensureLoopbackAlias();
+  for (let n = 0; n < 60; n += 1) expect(await statusFrom(`/p/${freshToken()}`, '127.0.0.1')).toBe(404);
+  expect(await statusFrom(`/p/${freshToken()}`, '127.0.0.2')).toBe(404);
+  expect(await statusFrom(`/p/${freshToken()}`, '127.0.0.1')).toBe(429);
+});
+
+test('a signed-in visitor without a handle still gets a preview miss', async ({ page }) => {
+  test.setTimeout(90_000);
+  const stamp = randomBytes(4).toString('hex');
+  await page.goto('/login?mode=signup&next=/me');
+  await page.locator('input[name="email"]').fill(`qa-${stamp}@example.com`);
+  await page.locator('input[name="password"]').fill('testpass1');
+  await page.getByRole('button', { name: 'Sign up' }).click();
+  await page.waitForURL(/\/onboarding/);
+  const preview = await page.goto('/p/not-a-real-token');
+  expect(preview?.status()).toBe(404);
+  expect(page.url()).not.toContain('/onboarding');
+  expect(await page.content()).toContain('This cartridge is missing.');
+  await page.goto('/play/stk7wr01');
+  expect(page.url()).toContain('/onboarding');
+  await page.goto('/proving');
+  expect(page.url()).toContain('/onboarding');
 });

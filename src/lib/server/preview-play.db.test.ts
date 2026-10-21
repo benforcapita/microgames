@@ -2,6 +2,10 @@ import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { after, describe, it } from 'node:test';
 import postgres from 'postgres';
+import { createHandler } from '../../../cdn/handler.mjs';
+import { mintPreviewToken } from '../../../cdn/preview-token.mjs';
+import { gameFrameSrc } from '../../client/frame-src.ts';
+import type { BundleStorage } from './bundle-store.ts';
 
 const SECRET = 'preview-play-test-secret-0000000000';
 const rawUrl = process.env.DATABASE_URL ?? 'postgresql://postgres:postgres@127.0.0.1:54322/postgres';
@@ -45,24 +49,91 @@ type ListGames = typeof import('./games.ts').listGames;
 type ListGamesByIds = typeof import('./games.ts').listGamesByIds;
 type ListTags = typeof import('./games.ts').listTags;
 type GetGame = typeof import('./games.ts').getGame;
+type ReplaceBundle = typeof import('./games.ts').replaceGameBundle;
 type IpSubject = typeof import('./abuse.ts').sessionIpSubject;
+type AdmitPreview = typeof import('./abuse.ts').admitPreviewPage;
 
 let openPreviewLink: OpenPreview;
 let listGames: ListGames;
 let listGamesByIds: ListGamesByIds;
 let listTags: ListTags;
 let getGame: GetGame;
+let replaceGameBundle: ReplaceBundle;
 let sessionIpSubject: IpSubject;
+let admitPreviewPage: AdmitPreview;
 let sql: postgres.Sql;
 
 if (probeOk && dbUrl) {
   ({ openPreviewLink } = await import('./preview-play.ts'));
-  ({ listGames, listGamesByIds, listTags, getGame } = await import('./games.ts'));
-  ({ sessionIpSubject } = await import('./abuse.ts'));
+  ({ listGames, listGamesByIds, listTags, getGame, replaceGameBundle } = await import('./games.ts'));
+  ({ sessionIpSubject, admitPreviewPage } = await import('./abuse.ts'));
   ({ sql } = await import('./db.ts'));
 }
 
 const sha = 'ab'.repeat(32);
+const failedSha = 'ef'.repeat(32);
+
+function htmlBytes(marker: string): Uint8Array {
+  return new TextEncoder().encode(`<!doctype html><html><body>${marker}</body></html>`);
+}
+
+function memoryBundles(): BundleStorage & { files: Map<string, Uint8Array> } {
+  const files = new Map<string, Uint8Array>();
+  return {
+    files,
+    async upload(path, bytes) {
+      files.set(path, new Uint8Array(bytes));
+      return { error: null };
+    },
+    async remove(paths) {
+      for (const path of paths) files.delete(path);
+      return { error: null };
+    },
+    async download(path) {
+      const data = files.get(path);
+      if (!data) return { data: null, error: { message: 'Object not found' } };
+      return { data, error: null };
+    },
+  };
+}
+
+function playCdn(files: Map<string, Uint8Array>, version: number) {
+  const previewSecret = process.env.CDN_PREVIEW_SECRET ?? SECRET;
+  const fakeFetch: typeof fetch = async (input) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+    const u = new URL(url);
+    if (u.pathname === '/rest/v1/games') return Response.json([{ stage: 'pending' }]);
+    if (u.pathname === '/rest/v1/game_validations') return Response.json([{ version }]);
+    const prefix = '/storage/v1/object/authenticated/games/';
+    if (u.pathname.startsWith(prefix)) {
+      const body = files.get(decodeURIComponent(u.pathname.slice(prefix.length)));
+      if (body) return new Response(new TextDecoder().decode(body));
+    }
+    return new Response('missing', { status: 404 });
+  };
+  const handle = createHandler({
+    supabaseUrl: 'http://sb.local',
+    secret: 'sb_secret_x',
+    webOrigins: 'http://portal.test',
+    previewSecret,
+    cdnOrigin: 'http://cdn.test',
+    fetch: fakeFetch,
+  });
+  return async (path: string) => {
+    let status = 0;
+    let body = '';
+    const headers: Record<string, string> = {};
+    const res = {
+      writeHead(code: number, h: Record<string, string>) {
+        status = code;
+        for (const [key, value] of Object.entries(h)) headers[key.toLowerCase()] = value;
+      },
+      end(chunk?: unknown) { body = chunk === undefined ? '' : String(chunk); },
+    };
+    await handle({ method: 'GET', url: path, headers: {} } as never, res as never);
+    return { status, body, headers };
+  };
+}
 
 function token(): string {
   return randomBytes(32).toString('base64url');
@@ -141,7 +212,10 @@ describe('preview play', () => {
       if (play.kind !== 'play') return;
       assert.equal(play.gameId, gameId);
       assert.equal(play.title, title);
-      assert.equal(play.previewToken.split('.').length, 2);
+      assert.equal(play.version, 1);
+      const parts = play.previewToken.split('.');
+      assert.equal(parts.length, 3);
+      assert.equal(Number(parts[1]), 1);
       for (const snap of [before, after]) {
         for (const rows of [snap.byCreator, snap.byTag, snap.optedIn, snap.byFork, snap.byId]) {
           assert.equal(rows.some((game) => game.id === gameId || game.title === title), false);
@@ -339,5 +413,172 @@ describe('preview play', () => {
         await tx.unsafe('reset role');
       }
     });
+  });
+
+  it('serves the linked bundle after a later upload fails validation', async (t) => {
+    if (!probeOk || !sql || !dbUrl) {
+      t.skip('local supabase is not running');
+      return;
+    }
+    const ownerId = randomUUID();
+    const gameId = `pv${randomBytes(4).toString('hex')}`;
+    const title = `Quarry ${gameId}`;
+    const creator = `cr${gameId}`.slice(0, 32);
+    const bundles = memoryBundles();
+    const v1 = htmlBytes('BUNDLE-V1');
+    const v2 = htmlBytes('BUNDLE-V2-FAILED');
+    const v3 = htmlBytes('BUNDLE-V3-FAILED');
+    try {
+      await sql`
+        insert into auth.users (instance_id, id, aud, role, email, encrypted_password, created_at, updated_at)
+        values ('00000000-0000-0000-0000-000000000000', ${ownerId}::uuid, 'authenticated', 'authenticated', ${`${ownerId}@example.test`}, '', now(), now())
+      `;
+      await sql`insert into public.profiles (id, handle) values (${ownerId}::uuid, ${creator})`;
+      await sql`
+        insert into public.games (id, slug, owner_id, creator, title, stage)
+        values (${gameId}, ${gameId}, ${ownerId}::uuid, ${creator}, ${title}, 'pending')
+      `;
+      const [version] = await sql<{ id: string }[]>`
+        insert into public.game_validations (game_id, version, bundle_sha256, status)
+        values (${gameId}, 1, ${sha}, 'passed')
+        returning id
+      `;
+      bundles.files.set(`${gameId}/index.html`, v1);
+      const replaced = await replaceGameBundle({ gameKey: gameId, ownerId, html: v2 }, bundles);
+      assert.equal(replaced.ok, true);
+      assert.equal(new TextDecoder().decode(bundles.files.get(`${gameId}/1/index.html`)), new TextDecoder().decode(v1));
+      assert.equal(new TextDecoder().decode(bundles.files.get(`${gameId}/index.html`)), new TextDecoder().decode(v2));
+      const again = await replaceGameBundle({ gameKey: gameId, ownerId, html: v3 }, bundles);
+      assert.equal(again.ok, true);
+      assert.equal(new TextDecoder().decode(bundles.files.get(`${gameId}/1/index.html`)), new TextDecoder().decode(v1));
+      assert.equal(new TextDecoder().decode(bundles.files.get(`${gameId}/index.html`)), new TextDecoder().decode(v3));
+      await sql`
+        insert into public.game_validations (game_id, version, bundle_sha256, status)
+        values (${gameId}, 2, ${failedSha}, 'failed')
+      `;
+      const [link] = await sql.begin(async (tx) => {
+        await tx`select set_config('request.jwt.claim.sub', ${ownerId}, true)`;
+        await tx`select set_config('request.jwt.claims', ${JSON.stringify({ sub: ownerId, role: 'authenticated' })}, true)`;
+        await tx.unsafe('set local role authenticated');
+        return tx<{ token: string }[]>`select token from public.create_preview_link(${version.id}::uuid)`;
+      });
+      const play = await openPreviewLink({ token: link.token, ip: `lane-${gameId}` });
+      assert.equal(play.kind, 'play');
+      if (play.kind !== 'play') return;
+      assert.equal(play.version, 1);
+      const src = new URL(gameFrameSrc('http://cdn.test', play.gameId, 'http://portal.test', '{}', play.previewToken, play.version));
+      assert.equal(src.pathname, `/g/${gameId}/1/index.html`);
+      const get = playCdn(bundles.files, 2);
+      const doc = await get(`${src.pathname}${src.search}`);
+      assert.equal(doc.status, 200);
+      assert.match(doc.body, /BUNDLE-V1/);
+      assert.equal(doc.body.includes('BUNDLE-V2-FAILED'), false);
+      assert.equal(doc.body.includes('BUNDLE-V3-FAILED'), false);
+      const owner = mintPreviewToken(process.env.CDN_PREVIEW_SECRET ?? SECRET, gameId);
+      const latest = await get(`/g/${gameId}/2/index.html?pt=${owner}`);
+      assert.equal(latest.status, 200);
+      assert.match(latest.body, /BUNDLE-V3-FAILED/);
+      assert.equal(latest.body.includes('BUNDLE-V1'), false);
+      const wrong = await get(`/g/${gameId}/2/index.html?pt=${encodeURIComponent(play.previewToken)}`);
+      const unversioned = await get(`/g/${gameId}/index.html?pt=${encodeURIComponent(play.previewToken)}`);
+      assert.equal(wrong.status, 404);
+      assert.equal(unversioned.status, 404);
+      assert.equal(wrong.body.includes('BUNDLE-V3-FAILED'), false);
+      assert.equal(unversioned.body.includes('BUNDLE-V3-FAILED'), false);
+      assert.equal((await openPreviewLink({ token: link.token, ip: `lane-${gameId}-secret`, previewSecret: '' })).kind, 'error');
+    } finally {
+      await sql`delete from public.games where id = ${gameId}`.catch(() => {});
+      await sql`delete from public.profiles where id = ${ownerId}::uuid`.catch(() => {});
+      await sql`delete from auth.users where id = ${ownerId}::uuid`.catch(() => {});
+    }
+  });
+
+  it('does not count a preview link once the address is already limited', async (t) => {
+    if (!probeOk || !sql) {
+      t.skip('local supabase is not running');
+      return;
+    }
+    const ownerId = randomUUID();
+    const gameId = `lm${randomBytes(4).toString('hex')}`;
+    const now = Date.UTC(2026, 9, 22, 8, 0, 0);
+    const ip = `lane-${gameId}`;
+    try {
+      await sql`
+        insert into auth.users (instance_id, id, aud, role, email, encrypted_password, created_at, updated_at)
+        values ('00000000-0000-0000-0000-000000000000', ${ownerId}::uuid, 'authenticated', 'authenticated', ${`${ownerId}@example.test`}, '', now(), now())
+      `;
+      await sql`insert into public.profiles (id, handle) values (${ownerId}::uuid, ${gameId})`;
+      await sql`
+        insert into public.games (id, slug, owner_id, creator, title, stage)
+        values (${gameId}, ${gameId}, ${ownerId}::uuid, ${gameId}, 'Limited', 'pending')
+      `;
+      const [version] = await sql<{ id: string }[]>`
+        insert into public.game_validations (game_id, version, bundle_sha256, status)
+        values (${gameId}, 1, ${sha}, 'passed')
+        returning id
+      `;
+      const [link] = await sql.begin(async (tx) => {
+        await tx`select set_config('request.jwt.claim.sub', ${ownerId}, true)`;
+        await tx`select set_config('request.jwt.claims', ${JSON.stringify({ sub: ownerId, role: 'authenticated' })}, true)`;
+        await tx.unsafe('set local role authenticated');
+        return tx<{ id: string; token: string }[]>`select id, token from public.create_preview_link(${version.id}::uuid)`;
+      });
+      for (let n = 0; n < 60; n += 1) {
+        assert.equal((await openPreviewLink({ token: token(), ip, now })).kind, 'miss');
+      }
+      assert.equal((await openPreviewLink({ token: link.token, ip, now })).kind, 'limited');
+      const [row] = await sql<{ view_count: number }[]>`
+        select view_count from public.preview_links where id = ${link.id}::uuid
+      `;
+      assert.equal(row.view_count, 0);
+    } finally {
+      const subject = sessionIpSubject(ip, process.env.MG_IP_HASH_SECRET ?? '', new Date(now));
+      await sql`delete from public.preview_page_hits where subject = ${subject}`.catch(() => {});
+      await sql`delete from public.games where id = ${gameId}`.catch(() => {});
+      await sql`delete from public.profiles where id = ${ownerId}::uuid`.catch(() => {});
+      await sql`delete from auth.users where id = ${ownerId}::uuid`.catch(() => {});
+    }
+  });
+
+  it('admits exactly 60 concurrent preview opens for one address', async (t) => {
+    if (!probeOk || !dbUrl) {
+      t.skip('local supabase is not running');
+      return;
+    }
+    const now = Date.UTC(2027, 4, 2, 3, 4, 5);
+    const ip = `lane-lock-${randomBytes(4).toString('hex')}`;
+    const subject = sessionIpSubject(ip, process.env.MG_IP_HASH_SECRET ?? '', new Date(now));
+    const race = postgres(dbUrl, { max: 10, connect_timeout: 5, onnotice: () => {} });
+    try {
+      await race`delete from public.preview_page_hits where subject = ${subject}`;
+      const results = await Promise.all(Array.from({ length: 120 }, () => race.begin((tx) => admitPreviewPage(tx, ip, now))));
+      assert.equal(results.filter(Boolean).length, 60);
+      const [row] = await race<{ n: number }[]>`
+        select count(*)::int as n from public.preview_page_hits where subject = ${subject}
+      `;
+      assert.equal(row.n, 60);
+    } finally {
+      await race`delete from public.preview_page_hits where subject = ${subject}`.catch(() => {});
+      await race.end({ timeout: 1 }).catch(() => {});
+    }
+  });
+
+  it('refuses a preview admission when the address secret is missing or short', async (t) => {
+    if (!probeOk || !sql) {
+      t.skip('local supabase is not running');
+      return;
+    }
+    const now = Date.UTC(2028, 1, 2, 1, 2, 3);
+    const ip = `lane-weak-${randomBytes(4).toString('hex')}`;
+    const weak = 'x'.repeat(31);
+    const subject = sessionIpSubject(ip, weak, new Date(now));
+    try {
+      await assert.rejects(() => sql.begin((tx) => admitPreviewPage(tx, ip, now, '')), /MG_IP_HASH_SECRET/);
+      await assert.rejects(() => sql.begin((tx) => admitPreviewPage(tx, ip, now, weak)), /MG_IP_HASH_SECRET/);
+      const rows = await sql`select 1 from public.preview_page_hits where subject = ${subject}`;
+      assert.equal(rows.length, 0);
+    } finally {
+      await sql`delete from public.preview_page_hits where subject = ${subject}`.catch(() => {});
+    }
   });
 });

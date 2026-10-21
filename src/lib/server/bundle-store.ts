@@ -2,6 +2,7 @@
 export interface BundleStorage {
   upload(path: string, bytes: Uint8Array, contentType: string): Promise<{ error: { message: string } | null }>;
   remove(paths: string[]): Promise<{ error: { message: string } | null }>;
+  download?(path: string): Promise<{ data: Uint8Array | null; error: { message: string } | null }>;
 }
 
 /** Thrown after a thumbnail put fails and any earlier bundle objects have been deleted. */

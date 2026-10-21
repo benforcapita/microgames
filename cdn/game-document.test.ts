@@ -12,16 +12,22 @@ import { CSP_SOURCES } from './csp.mjs';
 const SECRET = 'test-preview-secret';
 const PORTAL = 'http://127.0.0.1:4321';
 const CDN = 'http://cdn.test';
-const STAGES: Record<string, string> = { live0001: 'live', prov0001: 'proving', pend0001: 'pending' };
+const STAGES: Record<string, string> = {
+  live0001: 'live', prov0001: 'proving', pend0001: 'pending', prev0001: 'pending', cur00001: 'pending',
+};
 // A version other than 1 proves the URL comes from the real version lookup, not a hard-coded "1".
-const VERSIONS: Record<string, number> = { live0001: 3, prov0001: 3, pend0001: 3 };
+const VERSIONS: Record<string, number> = { live0001: 3, prov0001: 3, pend0001: 3, prev0001: 2, cur00001: 1 };
 const FILES: Record<string, string> = {
   'live0001/index.html': '<!doctype html><html><head></head><body><canvas id="c"></canvas></body></html>',
   'live0001/thumb.webp': 'THUMB',
   'live0001/3/sprites/hero.png': 'PNGDATA',
   'live0001/3/audio/jump.wav': 'WAVDATA',
   'provgm01/index.html': '<!doctype html><html><body>p</body></html>',
-  'pend0001/index.html': '<!doctype html><html><body>pend</body></html>',
+  'pend0001/index.html': '<!doctype html><html><body>CURRENT-OBJECT</body></html>',
+  'pend0001/3/index.html': '<!doctype html><html><body>ARCHIVE-V3</body></html>',
+  'prev0001/index.html': '<!doctype html><html><body>BUNDLE-V2-FAILED</body></html>',
+  'prev0001/1/index.html': '<!doctype html><html><body>BUNDLE-V1</body></html>',
+  'cur00001/index.html': '<!doctype html><html><body>BUNDLE-V1</body></html>',
 };
 
 function harness(opts: { cdnOrigin?: string } = {}) {
@@ -162,6 +168,41 @@ describe('UP-1: the game document is served at its versioned URL', () => {
     // Without a token the redirect target (and the redirect itself) stays 404.
     assert.equal((await get('/g/pend0001/index.html')).status, 404);
     assert.equal((await get('/g/pend0001/3/index.html')).status, 404);
+  });
+
+  it('a share token serves the pinned archive, including when that version is still current', async () => {
+    const { get } = harness();
+    const failed = mintPreviewToken(SECRET, 'prev0001', { version: 1 })!;
+    const pinned = await get(`/g/prev0001/1/index.html?pt=${failed}`);
+    assert.equal(pinned.status, 200);
+    assert.match(pinned.body, /BUNDLE-V1/);
+    assert.doesNotMatch(pinned.body, /BUNDLE-V2-FAILED/);
+    assert.equal(pinned.headers['cache-control'], 'private, no-store');
+    const owner = mintPreviewToken(SECRET, 'prev0001')!;
+    const latest = await get(`/g/prev0001/2/index.html?pt=${owner}`);
+    assert.equal(latest.status, 200);
+    assert.match(latest.body, /BUNDLE-V2-FAILED/);
+    assert.doesNotMatch(latest.body, /BUNDLE-V1/);
+    for (const path of [
+      `/g/prev0001/index.html?pt=${failed}`,
+      `/g/prev0001/2/index.html?pt=${failed}`,
+      `/g/prev0001/thumb.webp?pt=${failed}`,
+      '/g/prev0001/1/index.html',
+    ]) {
+      const missed = await get(path);
+      assert.equal(missed.status, 404, path);
+      assert.equal(missed.body.includes('BUNDLE-V1'), false, path);
+      assert.equal(missed.body.includes('BUNDLE-V2-FAILED'), false, path);
+    }
+    const stillCurrent = mintPreviewToken(SECRET, 'pend0001', { version: 3 })!;
+    const archived = await get(`/g/pend0001/3/index.html?pt=${stillCurrent}`);
+    assert.equal(archived.status, 200);
+    assert.match(archived.body, /ARCHIVE-V3/);
+    assert.doesNotMatch(archived.body, /CURRENT-OBJECT/);
+    const first = mintPreviewToken(SECRET, 'cur00001', { version: 1 })!;
+    const only = await get(`/g/cur00001/1/index.html?pt=${first}`);
+    assert.equal(only.status, 200);
+    assert.match(only.body, /BUNDLE-V1/);
   });
 
   it('thumbnails keep their unversioned route — no redirect', async () => {
