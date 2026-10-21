@@ -5,6 +5,10 @@ export const POST: APIRoute = async ({ params, request, locals }) => {
   if (!locals.user) {
     return Response.json({ error: 'Unauthorized' }, { status: 401 });
   }
+  const origin = request.headers.get('origin');
+  if (origin && origin !== new URL(request.url).origin) {
+    return Response.json({ error: 'Forbidden' }, { status: 403 });
+  }
   const gameId = typeof params.id === 'string' ? params.id : '';
   const ownerCheck = await verifyGameOwner({ gameId, userId: locals.user.id });
   if (ownerCheck.kind === 'error') {

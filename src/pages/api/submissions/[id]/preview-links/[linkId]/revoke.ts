@@ -1,9 +1,13 @@
 import type { APIRoute } from 'astro';
 import { revokePreviewLink, verifyGameOwner } from '../../../../../../lib/server/preview-links';
 
-export const POST: APIRoute = async ({ params, locals }) => {
+export const POST: APIRoute = async ({ params, request, locals }) => {
   if (!locals.user) {
     return Response.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+  const origin = request.headers.get('origin');
+  if (origin && origin !== new URL(request.url).origin) {
+    return Response.json({ error: 'Forbidden' }, { status: 403 });
   }
   const gameId = typeof params.id === 'string' ? params.id : '';
   const linkId = typeof params.linkId === 'string' ? params.linkId : '';

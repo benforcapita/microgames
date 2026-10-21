@@ -72,6 +72,13 @@ const { gameId, links } = Astro.props;
             return;
           }
           btn.closest('li')?.remove();
+          if (newLinkPanel && newLinkPanel.dataset.linkId === linkId) {
+            newLinkPanel.hidden = true;
+            delete newLinkPanel.dataset.linkId;
+            if (createdLinkUrl instanceof HTMLInputElement) {
+              createdLinkUrl.value = '';
+            }
+          }
         } catch {
           btn.disabled = false;
           showError('Could not revoke preview link');
@@ -117,6 +124,7 @@ const { gameId, links } = Astro.props;
 
           if (createdLinkUrl instanceof HTMLInputElement && newLinkPanel) {
             createdLinkUrl.value = url;
+            newLinkPanel.dataset.linkId = id;
             newLinkPanel.hidden = false;
           }
 

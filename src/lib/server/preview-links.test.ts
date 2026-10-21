@@ -1,7 +1,20 @@
+import { readFileSync } from 'node:fs';
+
+function getSupabaseDbPort(): number {
+  try {
+    const toml = readFileSync(new URL('../../../supabase/config.toml', import.meta.url), 'utf8');
+    const match = toml.match(/\[db\][^\[]*?\bport\s*=\s*(\d+)/s);
+    if (match?.[1]) {
+      return Number(match[1]);
+    }
+  } catch {}
+  return 54322;
+}
+
 process.env.PUBLIC_SUPABASE_URL ??= 'http://127.0.0.1:54321';
 process.env.PUBLIC_SUPABASE_PUBLISHABLE_KEY ??= 'mock';
 process.env.SUPABASE_SECRET_KEY ??= 'mock';
-process.env.DATABASE_URL ??= 'postgresql://postgres:postgres@127.0.0.1:54322/postgres';
+process.env.DATABASE_URL ??= `postgresql://postgres:postgres@127.0.0.1:${getSupabaseDbPort()}/postgres`;
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -43,23 +56,41 @@ test('buildPreviewLinkUrl handles empty origins', () => {
   );
 });
 
-test('mapPreviewLinkError maps cap error to clear limit message', () => {
-  const capMsg = 'You already have 5 active preview links. Revoke one to create another.';
-  assert.equal(mapPreviewLinkError('preview_link_cap'), capMsg);
-  assert.equal(mapPreviewLinkError('error: preview_link_cap occurred'), capMsg);
-  assert.equal(mapPreviewLinkError({ message: 'preview_link_cap' }), capMsg);
-  assert.equal(mapPreviewLinkError({ details: 'preview_link_cap' }), capMsg);
-  assert.equal(mapPreviewLinkError(new Error('preview_link_cap')), capMsg);
+test('mapPreviewLinkError maps cap error to 409 status and clear limit message', () => {
+  const expected = {
+    status: 409,
+    message: 'You already have 5 active preview links. Revoke one to create another.',
+  };
+  assert.deepEqual(mapPreviewLinkError('preview_link_cap'), expected);
+  assert.deepEqual(mapPreviewLinkError('error: preview_link_cap occurred'), expected);
+  assert.deepEqual(mapPreviewLinkError({ message: 'preview_link_cap' }), expected);
+  assert.deepEqual(mapPreviewLinkError({ details: 'preview_link_cap' }), expected);
+  assert.deepEqual(mapPreviewLinkError(new Error('preview_link_cap')), expected);
 });
 
-test('mapPreviewLinkError maps raw database and unknown errors to generic message', () => {
-  const generic = 'Could not create preview link. Please try again.';
-  assert.equal(mapPreviewLinkError('preview_link_denied'), generic);
-  assert.equal(mapPreviewLinkError({ message: 'new row violates row-level security policy' }), generic);
-  assert.equal(mapPreviewLinkError(new Error('database connection failed')), generic);
-  assert.equal(mapPreviewLinkError(null), generic);
-  assert.equal(mapPreviewLinkError(undefined), generic);
-  assert.equal(mapPreviewLinkError(123), generic);
+test('mapPreviewLinkError maps hour error to 429 status and clear limit message', () => {
+  const expected = {
+    status: 429,
+    message: "You've created 10 preview links in the last hour. Try again later.",
+  };
+  assert.deepEqual(mapPreviewLinkError('preview_link_hour'), expected);
+  assert.deepEqual(mapPreviewLinkError('error: preview_link_hour occurred'), expected);
+  assert.deepEqual(mapPreviewLinkError({ message: 'preview_link_hour' }), expected);
+  assert.deepEqual(mapPreviewLinkError({ details: 'preview_link_hour' }), expected);
+  assert.deepEqual(mapPreviewLinkError(new Error('preview_link_hour')), expected);
+});
+
+test('mapPreviewLinkError maps raw database and unknown errors to generic 500 message', () => {
+  const generic = {
+    status: 500,
+    message: 'Could not create preview link. Please try again.',
+  };
+  assert.deepEqual(mapPreviewLinkError('preview_link_denied'), generic);
+  assert.deepEqual(mapPreviewLinkError({ message: 'new row violates row-level security policy' }), generic);
+  assert.deepEqual(mapPreviewLinkError(new Error('database connection failed')), generic);
+  assert.deepEqual(mapPreviewLinkError(null), generic);
+  assert.deepEqual(mapPreviewLinkError(undefined), generic);
+  assert.deepEqual(mapPreviewLinkError(123), generic);
 });
 
 test('validateRpcCreatedLink extracts valid created link payload', () => {

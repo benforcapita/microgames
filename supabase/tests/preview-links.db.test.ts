@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
 import postgres from 'postgres';
 
@@ -7,8 +8,19 @@ type Sql = postgres.Sql | postgres.TransactionSql;
 type Created = { id: string; token: string; expires_at: Date };
 type Resolved = { version_id: string; html_path: string; title: string };
 
+function getSupabaseDbPort(): number {
+  try {
+    const toml = readFileSync(new URL('../config.toml', import.meta.url), 'utf8');
+    const match = toml.match(/\[db\][^\[]*?\bport\s*=\s*(\d+)/s);
+    if (match?.[1]) {
+      return Number(match[1]);
+    }
+  } catch {}
+  return 54322;
+}
+
 function localDbUrl(): string | undefined {
-  const raw = process.env.DATABASE_URL ?? 'postgresql://postgres:postgres@127.0.0.1:54322/postgres';
+  const raw = process.env.DATABASE_URL ?? `postgresql://postgres:postgres@127.0.0.1:${getSupabaseDbPort()}/postgres`;
   try {
     const host = new URL(raw).hostname;
     if (host !== '127.0.0.1' && host !== 'localhost') return undefined;

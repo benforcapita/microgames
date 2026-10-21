@@ -81,6 +81,8 @@ test('creator share links UI, active list, revoke, cap, and non-owner access con
 
   const revokeBtn = list.getByRole('button', { name: 'Revoke' }).first();
   await revokeBtn.click();
+  await expect(newLinkPanel).toBeHidden();
+  await expect(linkInput).toHaveValue('');
   await expect(list.locator('li')).toHaveCount(0);
 
   const [dbRow] = await sql`
@@ -92,6 +94,34 @@ test('creator share links UI, active list, revoke, cap, and non-owner access con
   expect(dbRow.revoked_at).not.toBeNull();
   await shareSection.screenshot({ path: shotPath('sl-3-after-revoke.png') });
 
+  const siteOrigin = new URL(page.url()).origin;
+
+  const countBeforeEvil = await sql`
+    select count(*)::int as count from public.preview_links
+    where version_id in (select id from public.game_validations where game_id = ${gameId})
+  `;
+  const evilOwnerPost = await page.request.post(`/api/submissions/${gameId}/preview-links`, {
+    headers: { Origin: 'https://evil.example' },
+  });
+  expect(evilOwnerPost.status()).toBe(403);
+  const countAfterEvil = await sql`
+    select count(*)::int as count from public.preview_links
+    where version_id in (select id from public.game_validations where game_id = ${gameId})
+  `;
+  expect(countAfterEvil[0].count).toBe(countBeforeEvil[0].count);
+
+  const validOwnerPost = await page.request.post(`/api/submissions/${gameId}/preview-links`, {
+    headers: { Origin: siteOrigin },
+  });
+  expect(validOwnerPost.status()).toBe(201);
+  const cacheControl = validOwnerPost.headers()['cache-control'] ?? '';
+  expect(cacheControl).toContain('no-store');
+
+  const validOwnerData = await validOwnerPost.json();
+  await page.request.post(`/api/submissions/${gameId}/preview-links/${validOwnerData.id}/revoke`, {
+    headers: { Origin: siteOrigin },
+  });
+
   for (let i = 0; i < 5; i++) {
     await shareBtn.click();
     await expect(list.locator('li')).toHaveCount(i + 1);
@@ -101,6 +131,13 @@ test('creator share links UI, active list, revoke, cap, and non-owner access con
   const capMsg = page.getByText('You already have 5 active preview links. Revoke one to create another.');
   await expect(capMsg).toBeVisible();
   await shareSection.screenshot({ path: shotPath('sl-3-cap-message.png') });
+
+  const ownerPost = await page.request.post(`/api/submissions/${gameId}/preview-links`, {
+    headers: { Origin: siteOrigin },
+  });
+  expect(ownerPost.status()).toBe(409);
+  const ownerPostData = await ownerPost.json();
+  expect(ownerPostData.error).toBe('You already have 5 active preview links. Revoke one to create another.');
 
   const [activeLinkRow] = await sql`
     select id from public.preview_links
@@ -115,14 +152,11 @@ test('creator share links UI, active list, revoke, cap, and non-owner access con
     where version_id in (select id from public.game_validations where game_id = ${gameId})
   `;
 
-  const siteOrigin = new URL(page.url()).origin;
-
-  const ownerPost = await page.request.post(`/api/submissions/${gameId}/preview-links`, {
+  const missingLinkRevoke = await page.request.post(`/api/submissions/${gameId}/preview-links/00000000-0000-0000-0000-000000000000/revoke`, {
     headers: { Origin: siteOrigin },
   });
-  expect(ownerPost.status()).toBe(400);
-  const ownerPostData = await ownerPost.json();
-  expect(ownerPostData.error).toBe('You already have 5 active preview links. Revoke one to create another.');
+  expect(missingLinkRevoke.status()).toBe(404);
+  expect(await missingLinkRevoke.json()).toEqual({ error: 'Not found' });
 
   const otherContext = await browser.newContext();
   const otherPage = await otherContext.newPage();
@@ -137,7 +171,25 @@ test('creator share links UI, active list, revoke, cap, and non-owner access con
   const otherPost = await otherPage.request.post(`/api/submissions/${gameId}/preview-links`, {
     headers: { Origin: siteOrigin },
   });
-  expect(otherPost.status()).toBe(403);
+  expect(otherPost.status()).toBe(404);
+  expect(await otherPost.json()).toEqual({ error: 'Not found' });
+
+  const otherList = await otherPage.request.get(`/api/submissions/${gameId}/preview-links`);
+  expect(otherList.status()).toBe(404);
+  expect(await otherList.json()).toEqual({ error: 'Not found' });
+
+  const nonExistentGameId = 'zzzzzzzz';
+  const otherNonExistentPost = await otherPage.request.post(`/api/submissions/${nonExistentGameId}/preview-links`, {
+    headers: { Origin: siteOrigin },
+  });
+  expect(otherNonExistentPost.status()).toBe(404);
+  expect(await otherNonExistentPost.json()).toEqual(await otherPost.json());
+
+  const otherRevoke = await otherPage.request.post(`/api/submissions/${gameId}/preview-links/${activeLinkId}/revoke`, {
+    headers: { Origin: siteOrigin },
+  });
+  expect(otherRevoke.status()).toBe(404);
+  expect(await otherRevoke.json()).toEqual({ error: 'Not found' });
 
   const countAfterOther = await sql`
     select count(*)::int as count from public.preview_links
@@ -145,10 +197,6 @@ test('creator share links UI, active list, revoke, cap, and non-owner access con
   `;
   expect(countAfterOther[0].count).toBe(countBeforeNonOwner[0].count);
 
-  const otherRevoke = await otherPage.request.post(`/api/submissions/${gameId}/preview-links/${activeLinkId}/revoke`, {
-    headers: { Origin: siteOrigin },
-  });
-  expect(otherRevoke.status()).toBe(403);
   const [activeAfterOther] = await sql`
     select revoked_at from public.preview_links where id = ${activeLinkId}
   `;
@@ -168,7 +216,18 @@ test('creator share links UI, active list, revoke, cap, and non-owner access con
   const adminPost = await adminPage.request.post(`/api/submissions/${gameId}/preview-links`, {
     headers: { Origin: siteOrigin },
   });
-  expect(adminPost.status()).toBe(403);
+  expect(adminPost.status()).toBe(404);
+  expect(await adminPost.json()).toEqual({ error: 'Not found' });
+
+  const adminList = await adminPage.request.get(`/api/submissions/${gameId}/preview-links`);
+  expect(adminList.status()).toBe(404);
+  expect(await adminList.json()).toEqual({ error: 'Not found' });
+
+  const adminRevoke = await adminPage.request.post(`/api/submissions/${gameId}/preview-links/${activeLinkId}/revoke`, {
+    headers: { Origin: siteOrigin },
+  });
+  expect(adminRevoke.status()).toBe(404);
+  expect(await adminRevoke.json()).toEqual({ error: 'Not found' });
 
   const countAfterAdmin = await sql`
     select count(*)::int as count from public.preview_links
@@ -176,10 +235,6 @@ test('creator share links UI, active list, revoke, cap, and non-owner access con
   `;
   expect(countAfterAdmin[0].count).toBe(countBeforeNonOwner[0].count);
 
-  const adminRevoke = await adminPage.request.post(`/api/submissions/${gameId}/preview-links/${activeLinkId}/revoke`, {
-    headers: { Origin: siteOrigin },
-  });
-  expect(adminRevoke.status()).toBe(403);
   const [activeAfterAdmin] = await sql`
     select revoked_at from public.preview_links where id = ${activeLinkId}
   `;
@@ -199,6 +254,14 @@ test('creator share links UI, active list, revoke, cap, and non-owner access con
   });
   expect(anonPost.status()).toBe(401);
 
+  const anonList = await anonPage.request.get(`/api/submissions/${gameId}/preview-links`);
+  expect(anonList.status()).toBe(401);
+
+  const anonRevoke = await anonPage.request.post(`/api/submissions/${gameId}/preview-links/${activeLinkId}/revoke`, {
+    headers: { Origin: siteOrigin },
+  });
+  expect(anonRevoke.status()).toBe(401);
+
   const countAfterAnon = await sql`
     select count(*)::int as count from public.preview_links
     where version_id in (select id from public.game_validations where game_id = ${gameId})
@@ -211,8 +274,55 @@ test('creator share links UI, active list, revoke, cap, and non-owner access con
   await anonContext.close();
 });
 
-test('an unapproved game with an active preview link is absent from public listings', async ({ browser }) => {
+test('hourly preview link creation cap enforcement', async ({ browser }) => {
   test.setTimeout(180_000);
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  const stamp = `sl3h${Date.now().toString(36)}`;
+  const { gameId } = await createValidatedGame(page, stamp);
+
+  const shareSection = page.locator('#share-links');
+  const shareBtn = page.getByRole('button', { name: 'Share preview' });
+  const list = page.getByRole('list', { name: 'Active preview links' });
+
+  for (let i = 0; i < 5; i++) {
+    await shareBtn.click();
+    await expect(list.locator('li')).toHaveCount(i + 1);
+  }
+
+  for (let i = 0; i < 5; i++) {
+    const revokeBtn = list.getByRole('button', { name: 'Revoke' }).first();
+    await revokeBtn.click();
+    await expect(list.locator('li')).toHaveCount(4 - i);
+  }
+
+  for (let i = 0; i < 5; i++) {
+    await shareBtn.click();
+    await expect(list.locator('li')).toHaveCount(i + 1);
+  }
+
+  const revokeOne = list.getByRole('button', { name: 'Revoke' }).first();
+  await revokeOne.click();
+  await expect(list.locator('li')).toHaveCount(4);
+
+  await shareBtn.click();
+  const hourMsg = page.getByText("You've created 10 preview links in the last hour. Try again later.");
+  await expect(hourMsg).toBeVisible();
+  await shareSection.screenshot({ path: shotPath('sl-3-hour-cap.png') });
+
+  const siteOrigin = new URL(page.url()).origin;
+  const apiPost = await page.request.post(`/api/submissions/${gameId}/preview-links`, {
+    headers: { Origin: siteOrigin },
+  });
+  expect(apiPost.status()).toBe(429);
+  const data = await apiPost.json();
+  expect(data.error).toBe("You've created 10 preview links in the last hour. Try again later.");
+
+  await context.close();
+});
+
+test('an unapproved game with an active preview link is absent from public listings', async ({ browser }) => {
+  test.setTimeout(240_000);
   const context = await browser.newContext();
   const page = await context.newPage();
   const stamp = `sl3b${Date.now().toString(36)}`;
@@ -228,37 +338,114 @@ test('an unapproved game with an active preview link is absent from public listi
   `;
   const slug = gameRow.slug;
 
+  const [liveGame] = await sql`
+    select id, title, slug, tags, creator from public.games where stage = 'live' limit 1
+  `;
+  const originalLiveTags = liveGame.tags ?? [];
+
+  const unapprovedTag = `sl3hidden${stamp}`;
+  const liveTag = `sl3live${stamp}`;
+
   const anonContext = await browser.newContext();
   const request = anonContext.request;
 
-  const paths = [
-    '/',
-    '/games',
-    '/proving',
-    '/creators',
-    '/api/games',
-    `/u/${stamp}`,
-    `/games?q=${encodeURIComponent(title)}`,
-    `/api/games?q=${encodeURIComponent(title)}`,
-    '/sitemap.xml',
-    '/rss.xml',
-    '/feed.xml',
-  ];
+  try {
+    await sql`update public.games set tags = array[${unapprovedTag}] where id = ${gameId}`;
+    await sql`insert into public.featured_games (game_id, position, active) values (${gameId}, 0, true)`;
 
-  for (const path of paths) {
-    const res = await request.get(path);
-    const body = await res.text();
-    expect(body).not.toContain(title);
-    expect(body).not.toContain(slug);
+    await sql`update public.games set tags = array[${liveTag}] where id = ${liveGame.id}`;
+    await sql`insert into public.featured_games (game_id, position, active) values (${liveGame.id}, 1, true)`;
+
+    await expect.poll(async () => {
+      const res = await request.get('/');
+      const body = await res.text();
+      const featuredIndex = body.indexOf('id="featured-title"');
+      if (featuredIndex === -1) return false;
+      const featuredSection = body.slice(featuredIndex, body.indexOf('</section>', featuredIndex));
+      return featuredSection.includes(liveGame.title);
+    }, { timeout: 90_000 }).toBe(true);
+
+    await expect.poll(async () => {
+      const res = await request.get('/games');
+      const body = await res.text();
+      return body.includes(liveTag);
+    }, { timeout: 90_000 }).toBe(true);
+
+    const realPages = [
+      '/',
+      '/games',
+      `/games?tag=${encodeURIComponent(unapprovedTag)}`,
+      '/proving',
+      '/creators',
+    ];
+
+    for (const path of realPages) {
+      const res = await request.get(path);
+      expect(res.status()).toBe(200);
+      const body = await res.text();
+      expect(body).not.toContain(title);
+      expect(body).not.toContain(slug);
+      if (path.startsWith('/games?tag=')) {
+        expect(body).not.toContain(`/play/${slug}`);
+        expect(body).toContain(`No graduated games tagged #${unapprovedTag} yet.`);
+        expect(body).not.toContain(`>#${unapprovedTag}</a>`);
+      } else {
+        expect(body).not.toContain(unapprovedTag);
+      }
+      if (path === '/games') {
+        expect(body).toContain(`>#${liveTag}</a>`);
+      }
+    }
+
+    const ownerRes = await request.get(`/u/${stamp}`);
+    expect(ownerRes.status()).toBe(404);
+    const ownerBody = await ownerRes.text();
+    expect(ownerBody).not.toContain(title);
+    expect(ownerBody).not.toContain(slug);
+    expect(ownerBody).not.toContain(unapprovedTag);
+
+    const liveCreatorRes = await request.get(`/u/${liveGame.creator}`);
+    expect(liveCreatorRes.status()).toBe(200);
+    const liveCreatorBody = await liveCreatorRes.text();
+    expect(liveCreatorBody).toContain(liveGame.title);
+
+    const homeRes = await request.get('/');
+    expect(homeRes.status()).toBe(200);
+    const homeBody = await homeRes.text();
+    const featuredIndex = homeBody.indexOf('id="featured-title"');
+    if (featuredIndex !== -1) {
+      const featuredSection = homeBody.slice(featuredIndex, homeBody.indexOf('</section>', featuredIndex));
+      expect(featuredSection).not.toContain(slug);
+    }
+
+    await test.step('non-existent routes (/sitemap.xml, /rss.xml, /feed.xml, /api/games) return 404 without unapproved game', async () => {
+      const nonExistentPaths = ['/sitemap.xml', '/rss.xml', '/feed.xml', '/api/games'];
+      for (const path of nonExistentPaths) {
+        const res = await request.get(path);
+        expect(res.status()).toBe(404);
+        const body = await res.text();
+        expect(body).not.toContain(title);
+        expect(body).not.toContain(slug);
+      }
+    });
+
+    const v1Res = await request.get('/api/v1/games');
+    expect(v1Res.status()).toBe(401);
+
+    const playRes = await request.get(`/play/${slug}`);
+    expect(playRes.status()).toBe(404);
+
+    const subRes = await request.get(`/submissions/${gameId}`, { maxRedirects: 0 });
+    expect(subRes.status()).toBe(302);
+    expect(subRes.headers().location).toContain('/login');
+
+    const anonPage = await anonContext.newPage();
+    await anonPage.goto('/games');
+    await anonPage.screenshot({ path: shotPath('sl-3-public-games.png') });
+  } finally {
+    await sql`delete from public.featured_games where game_id in (${gameId}, ${liveGame.id})`;
+    await sql`update public.games set tags = ${originalLiveTags} where id = ${liveGame.id}`;
+    await context.close();
+    await anonContext.close();
   }
-
-  const playRes = await request.get(`/play/${slug}`);
-  expect(playRes.status()).toBe(404);
-
-  const subRes = await request.get(`/submissions/${gameId}`, { maxRedirects: 0 });
-  expect(subRes.status()).toBe(302);
-  expect(subRes.headers().location).toContain('/login');
-
-  await context.close();
-  await anonContext.close();
 });
