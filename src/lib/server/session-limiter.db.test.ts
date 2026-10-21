@@ -54,11 +54,6 @@ const nextIp = () => {
 const admit = (pool: postgres.Sql, a: { uid: string; ip: string; now?: number; gameId?: string }) =>
   pool.begin((tx) => admitSessionStart(tx, { uid: a.uid, ip: a.ip, gameId: a.gameId ?? GAME, now: a.now }));
 
-const v4MappedHex = (ip: string) => {
-  const [a = 0, b = 0, c = 0, d = 0] = ip.split('.').map(Number);
-  return `::ffff:${((a << 8) | b).toString(16).padStart(4, '0')}:${((c << 8) | d).toString(16).padStart(4, '0')}`;
-};
-
 const ipSubjects = (ips: string[]) =>
   ips.map((ip) => sessionIpSubject(ip, process.env.MG_IP_HASH_SECRET ?? '', new Date()));
 
@@ -231,7 +226,14 @@ describe('shared session-start limiter (db)', () => {
   it('mixed spellings of one v4 address racing across the pools admit exactly the ip cap', async (t) => {
     if (skip(t)) return;
     const ip = nextIp();
-    const spellings = [ip, `::ffff:${ip}`, v4MappedHex(ip)];
+    const [n = 0, m = 0] = ip.split('.').slice(2).map(Number);
+    const spellings = [
+      ip,
+      `::ffff:${ip}`,
+      `::FFFF:${ip}`,
+      `0:0:0:0:0:ffff:${ip}`,
+      `::ffff:cb00:${((n << 8) | m).toString(16)}`,
+    ];
     const results = await Promise.all(
       Array.from({ length: 40 }, (_, i) =>
         admit(pools[i % pools.length], { uid: randomUUID(), ip: spellings[i % spellings.length] ?? ip }),
@@ -242,11 +244,11 @@ describe('shared session-start limiter (db)', () => {
 
   it('40 distinct hosts in one /64 racing across the pools admit exactly the ip cap', async (t) => {
     if (skip(t)) return;
-    const prefix = `2001:db8:${runOctet.toString(16)}:1`;
+    const hosts = Array.from({ length: 40 }, (_, i) => `2001:db8:a:b:${(i + 1).toString(16)}::1`);
+    await sqlA`delete from public.session_admissions
+      where kind = 'ip' and subject in ${sqlA(ipSubjects(hosts))}`;
     const results = await Promise.all(
-      Array.from({ length: 40 }, (_, i) =>
-        admit(pools[i % pools.length], { uid: randomUUID(), ip: `${prefix}::${(i + 1).toString(16)}` }),
-      ),
+      hosts.map((ip, i) => admit(pools[i % pools.length], { uid: randomUUID(), ip })),
     );
     assert.equal(results.filter(Boolean).length, SESSION_START_IP_MAX);
   });
