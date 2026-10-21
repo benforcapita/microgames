@@ -23,6 +23,9 @@ DownloadCode = Literal[
     "bundle_path",
     "bundle_too_large",
     "bundle_file_count",
+    "fetch_4xx",
+    "fetch_5xx",
+    "fetch_unauthorized",
 ]
 
 
@@ -66,9 +69,10 @@ class HttpxTransport:
 
 
 class _HttpxBody:
-    __slots__ = ("_buf", "_chunks", "_response")
+    __slots__ = ("_buf", "_chunks", "_response", "status")
 
     def __init__(self, response: httpx.Response) -> None:
+        self.status = response.status_code
         self._response = response
         self._chunks: Iterator[bytes] = (
             iter((response.content,)) if response.is_stream_consumed else response.iter_raw()
@@ -144,7 +148,13 @@ def download_files(
     total = 0
     for item in snapshot:
         limit = _CAPS.total_bytes - total
-        body = _read_limited(transport.open(item.path), limit)
+        source = transport.open(item.path)
+        code = _status_code(source)
+        if code is not None:
+            if isinstance(source, _Closeable):
+                source.close()
+            return DownloadFailure(code=code)
+        body = _read_limited(source, limit)
         if body is None:
             return DownloadFailure(code="bundle_too_large")
         digest = item.content_sha256
@@ -158,6 +168,19 @@ def download_files(
         total += len(body)
         accepted.append(DownloadedFile(path=item.path, body=body))
     return DownloadOk(files=tuple(accepted))
+
+
+def _status_code(source: ByteSource) -> DownloadCode | None:
+    status: object = getattr(source, "status", 200)
+    if type(status) is not int:
+        return "fetch_5xx"
+    if 200 <= status < 300:
+        return None
+    if status in {401, 403}:
+        return "fetch_unauthorized"
+    if 400 <= status < 500:
+        return "fetch_4xx"
+    return "fetch_5xx"
 
 
 def _same_hash(actual: str, expected: str) -> bool:

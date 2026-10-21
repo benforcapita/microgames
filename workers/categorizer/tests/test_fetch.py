@@ -348,3 +348,56 @@ def test_two_files_that_sum_over_the_total_are_bundle_too_large() -> None:
     assert result.code == "bundle_too_large"
     assert transport.opened == ["a.bin", "b.bin"]
     assert transport.cursors[1].pulled == _TOTAL - len(first) + 1
+
+
+class _StatusCursor(_Cursor):
+    def __init__(self, data: bytes, status: int) -> None:
+        super().__init__(data)
+        self.status = status
+
+
+class _StatusTransport(_MapTransport):
+    def __init__(self, files: dict[str, bytes], status: int) -> None:
+        super().__init__(files)
+        self._status = status
+
+    def open(self, path: str) -> _StatusCursor:
+        self.opened.append(path)
+        cursor = _StatusCursor(self._files[path], self._status)
+        self.cursors.append(cursor)
+        return cursor
+
+
+@pytest.mark.parametrize(
+    ("status", "code"),
+    [
+        (404, "fetch_4xx"),
+        (400, "fetch_4xx"),
+        (500, "fetch_5xx"),
+        (502, "fetch_5xx"),
+        (401, "fetch_unauthorized"),
+        (403, "fetch_unauthorized"),
+    ],
+)
+def test_source_status_maps_before_hashing(status: int, code: str) -> None:
+    body = b"alpha"
+    transport = _StatusTransport({"index.html": body}, status)
+    result = download_files(
+        (FileRequest(path="index.html", content_sha256=_sha(b"other")),),
+        transport,
+    )
+    assert isinstance(result, DownloadFailure)
+    assert result.code == code
+    assert result.code != "bundle_mismatch"
+    assert [cursor.pulled for cursor in transport.cursors] == [0]
+
+
+def test_status_200_on_fake_source_still_downloads() -> None:
+    body = b"alpha"
+    transport = _StatusTransport({"index.html": body}, 200)
+    result = download_files(
+        (FileRequest(path="index.html", content_sha256=_sha(body)),),
+        transport,
+    )
+    assert isinstance(result, DownloadOk)
+    assert result.files[0].body == body
