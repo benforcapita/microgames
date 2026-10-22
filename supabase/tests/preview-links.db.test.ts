@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { describe, it } from 'node:test';
+import { after, describe, it } from 'node:test';
 import postgres from 'postgres';
 
 type Sql = postgres.Sql | postgres.TransactionSql;
@@ -8,7 +8,7 @@ type Created = { id: string; token: string; expires_at: Date };
 type Resolved = { version_id: string; html_path: string; title: string };
 
 function localDbUrl(): string | undefined {
-  const raw = process.env.DATABASE_URL ?? 'postgresql://postgres:postgres@127.0.0.1:54324/postgres';
+  const raw = process.env.DATABASE_URL ?? 'postgresql://postgres:postgres@127.0.0.1:54322/postgres';
   try {
     const host = new URL(raw).hostname;
     if (host !== '127.0.0.1' && host !== 'localhost') return undefined;
@@ -147,6 +147,13 @@ async function waitForLocks(probe: postgres.Sql, pids: number[]): Promise<void> 
 }
 
 describe('preview links', () => {
+  after(async () => {
+    const g = globalThis as typeof globalThis & { __mgSql?: postgres.Sql };
+    if (!g.__mgSql) return;
+    const { sql: appSql } = await import('../../src/lib/server/db.ts');
+    await appSql.end({ timeout: 1 }).catch(() => {});
+  });
+
   db('expires on the timestamp and resolves one microsecond later', async (sql) => {
     await rollback(sql, async (tx) => {
       const { ownerId, versionId, gameId } = await seed(tx);

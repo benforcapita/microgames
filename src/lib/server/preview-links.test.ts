@@ -1,7 +1,7 @@
 process.env.PUBLIC_SUPABASE_URL ??= 'http://127.0.0.1:54321';
 process.env.PUBLIC_SUPABASE_PUBLISHABLE_KEY ??= 'mock';
 process.env.SUPABASE_SECRET_KEY ??= 'mock';
-process.env.DATABASE_URL ??= 'postgresql://postgres:postgres@127.0.0.1:54324/postgres';
+process.env.DATABASE_URL ??= 'postgresql://postgres:postgres@127.0.0.1:54322/postgres';
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
