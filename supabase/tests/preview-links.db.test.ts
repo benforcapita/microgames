@@ -427,6 +427,28 @@ describe('preview links', () => {
     });
   });
 
+  db('sets the lifetime from p_ttl_hours and refuses one outside 1..168 hours', async (sql) => {
+    await rollback(sql, async (tx) => {
+      const { ownerId, versionId } = await seed(tx);
+      await asRole(tx, 'authenticated', ownerId);
+      for (const hours of [1, 24, 72, 168]) {
+        const [link] = await tx<Created[]>`select * from public.create_preview_link(${versionId}::uuid, ${hours}::integer)`;
+        const [row] = await tx<{ exact: boolean }[]>`
+          select expires_at = created_at + make_interval(hours => ${hours}::integer) as exact
+          from public.preview_links where id = ${link.id}::uuid
+        `;
+        assert.equal(row.exact, true, `${hours}h`);
+        await tx`select public.revoke_preview_link(${link.id}::uuid)`;
+      }
+      for (const hours of [0, -1, 169, null]) {
+        assert.equal(await codeOf(tx, (sp) => sp`select * from public.create_preview_link(${versionId}::uuid, ${hours}::integer)`), '22023', String(hours));
+      }
+      await tx.unsafe('reset role');
+      const [count] = await tx<{ n: number }[]>`select count(*)::int as n from public.preview_links where owner_id = ${ownerId}::uuid`;
+      assert.equal(count.n, 4);
+    });
+  });
+
   db('keeps an old link on its version after a new upload', async (sql) => {
     await rollback(sql, async (tx) => {
       const { ownerId, versionId, gameId } = await seed(tx);
@@ -450,9 +472,9 @@ describe('preview links', () => {
       pub_resolve: boolean; anon_resolve: boolean; auth_resolve: boolean;
     }[]>`
       select
-        has_function_privilege('public', 'public.create_preview_link(uuid)', 'execute') as pub_create,
-        has_function_privilege('anon', 'public.create_preview_link(uuid)', 'execute') as anon_create,
-        has_function_privilege('authenticated', 'public.create_preview_link(uuid)', 'execute') as auth_create,
+        has_function_privilege('public', 'public.create_preview_link(uuid, integer)', 'execute') as pub_create,
+        has_function_privilege('anon', 'public.create_preview_link(uuid, integer)', 'execute') as anon_create,
+        has_function_privilege('authenticated', 'public.create_preview_link(uuid, integer)', 'execute') as auth_create,
         has_function_privilege('public', 'public.revoke_preview_link(uuid)', 'execute') as pub_revoke,
         has_function_privilege('authenticated', 'public.revoke_preview_link(uuid)', 'execute') as auth_revoke,
         has_function_privilege('public', 'public.resolve_preview_link(text)', 'execute') as pub_resolve,
@@ -563,7 +585,7 @@ describe('preview links', () => {
       }
       assert.equal(new Set(tokens).size, tokens.length);
       const [body] = await tx<{ src: string }[]>`
-        select pg_get_functiondef('public.create_preview_link(uuid)'::regprocedure) as src
+        select pg_get_functiondef('public.create_preview_link(uuid, integer)'::regprocedure) as src
       `;
       const assignments = body.src.split('\n').filter((line) => /^\s*v_token\s*:=/.test(line));
       assert.deepEqual(assignments.map((line) => /extensions\.gen_random_bytes\(32\)/.test(line) && !/digest\s*\(|gen_random_uuid\s*\(/.test(line)), [true]);
@@ -1048,7 +1070,7 @@ describe('preview links', () => {
           has_table_privilege('service_role', 'public.preview_links', 'insert') as ins,
           has_table_privilege('service_role', 'public.preview_links', 'update') as upd,
           has_table_privilege('service_role', 'public.preview_links', 'delete') as del,
-          has_function_privilege('service_role', 'public.create_preview_link(uuid)', 'execute') as create_fn,
+          has_function_privilege('service_role', 'public.create_preview_link(uuid, integer)', 'execute') as create_fn,
           has_function_privilege('service_role', 'public.revoke_preview_link(uuid)', 'execute') as revoke_fn,
           has_function_privilege('service_role', 'public.admin_revoke_preview_link(uuid)', 'execute') as admin_fn,
           has_function_privilege('service_role', 'public.resolve_preview_link(text)', 'execute') as resolve_fn,
@@ -1204,6 +1226,7 @@ describe('preview links', () => {
         supabase: mockSupabase,
         gameId: unvalidatedGameId,
         userId: ownerId,
+        ttlHours: 24,
       });
       assert.deepEqual(noValidationRes, { kind: 'error', status: 404, message: 'Not found' });
 

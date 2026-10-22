@@ -74,7 +74,7 @@ It exits non-zero while any reported row is `GAP`. `net` must stay out of the AP
 
 ## Preview links
 
-A creator can mint a preview link for one uploaded version. Anyone with the link can open that version without signing in, once its validation has passed. The lifetime is seven days. The creator can revoke it sooner, a second revoke keeps the original time, and an admin revoke records the same fact for the creator. Five links can be active at once, and ten can be created in an hour. Active means not revoked and not past `expires_at`.
+A creator can mint a preview link for one uploaded version of a game that is still `pending`. Anyone with the link can open that version without signing in, once its validation has passed. The portal pins the newest passed version, else the newest queued or running one, and refuses when every version failed or errored, or the game is public or rejected (`shareTarget` in `src/lib/preview-link-rules.ts`). The creator picks the lifetime: 1 hour, 24 hours (default), 3 days, or 7 days. `create_preview_link(p_version_id, p_ttl_hours default 168)` accepts 1 to 168 hours. The creator can revoke it sooner, a second revoke keeps the original time, and an admin revoke records the same fact for the creator. Five links can be active at once, and ten can be created in an hour. Active means not revoked and not past `expires_at`.
 
 The plaintext token is returned once, from `create_preview_link`. The database stores its SHA-256 hash.
 

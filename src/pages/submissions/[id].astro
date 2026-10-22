@@ -5,7 +5,7 @@ import PreviewLinks from '../../components/PreviewLinks.astro';
 import { summarizeAssets, type AssetInputItem } from '../../lib/asset-limits';
 import { isAdmin } from '../../lib/server/profiles';
 import { loadAssetSummaryInput, sqlSubmissionStore } from '../../lib/server/submissions-db';
-import { getGameOwnerId, listActivePreviewLinks } from '../../lib/server/preview-links';
+import { getGameOwnerId, listActivePreviewLinks, loadShareTarget } from '../../lib/server/preview-links';
 import {
   isSubmissionPreview,
   previewSubmissionView,
@@ -44,9 +44,12 @@ const stageLabel = submissionStageLabel(view.game.stage, view.validation?.status
 const awaitingReview = view.game.stage === 'pending' && view.validation?.status === 'passed';
 const ownerId = preview ? null : await getGameOwnerId(id);
 const isOwner = !preview && Boolean(Astro.locals.user && ownerId && ownerId === Astro.locals.user.id);
-const activeLinks = isOwner
-  ? await listActivePreviewLinks({ supabase: Astro.locals.supabase, gameId: id })
-  : [];
+const sharing = isOwner && view.game.stage === 'pending';
+const activeLinks = sharing ? await listActivePreviewLinks({ supabase: Astro.locals.supabase, gameId: id }) : [];
+const shareTarget = sharing ? await loadShareTarget(id) : null;
+const shareBlocked = shareTarget?.kind === 'blocked'
+  ? (shareTarget.status === 404 ? 'Checks have not started yet. This page refreshes when they do.' : shareTarget.message)
+  : null;
 ---
 
 <Layout title={`${view.game.title} · Submission`} description={`Validation status for ${view.game.title}.`}>
@@ -103,7 +106,14 @@ const activeLinks = isOwner
       </p>
     )}
 
-    {isOwner && <PreviewLinks gameId={view.game.id} links={activeLinks} />}
+    {sharing && (
+      <PreviewLinks
+        gameId={view.game.id}
+        links={activeLinks}
+        version={shareTarget?.kind === 'ok' ? shareTarget.version : null}
+        blocked={shareBlocked}
+      />
+    )}
 
     <section class="panel">
       <h2>Static checks</h2>
