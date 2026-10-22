@@ -21,6 +21,7 @@ const isAssetsPage = (pathname: string) => /^\/games\/[^/]+\/assets$/.test(pathn
 const ANONYMOUS = new Set(['/api/telemetry']);
 // MCP-1: the token API authenticates with a Bearer token only, never with the session cookie.
 const isTokenApi = (pathname: string) => pathname.startsWith('/api/v1/');
+const isPreviewPlay = (pathname: string) => pathname.startsWith('/p/');
 // Routes a signed-in user without a handle may still visit.
 const ONBOARDING_OK = /^\/(onboarding|auth\/|api\/auth\/|api\/profile)/;
 
@@ -35,7 +36,7 @@ export const onRequest = defineMiddleware(async (ctx, next) => {
   if (isSubmissionPreviewPath(pathname)) {
     ctx.locals.user = { id: 'preview-owner', email: 'preview@meshground.local' };
     ctx.locals.profile = { id: 'preview-owner', handle: 'preview', role: 'user' };
-  } else if (!ANONYMOUS.has(pathname) && !isTokenApi(pathname)) {
+  } else if (!ANONYMOUS.has(pathname) && !isTokenApi(pathname) && !isPreviewPlay(pathname)) {
     const { data } = await ctx.locals.supabase.auth.getClaims();
     const claims = data?.claims;
     if (claims?.sub) {
@@ -51,7 +52,11 @@ export const onRequest = defineMiddleware(async (ctx, next) => {
   authHeaders.forEach((v, k) => res.headers.set(k, v));
   res.headers.set('Content-Security-Policy', UPLOAD_PAGES.has(pathname) ? UPLOAD_CSP : isAssetsPage(pathname) ? ASSETS_CSP : CSP);
   res.headers.set('X-Content-Type-Options', 'nosniff');
-  res.headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.headers.set('Referrer-Policy', isPreviewPlay(pathname) ? 'no-referrer' : 'strict-origin-when-cross-origin');
   applyDeviceHeaders(res.headers, pathname);
+  if (isPreviewPlay(pathname)) {
+    res.headers.set('X-Robots-Tag', 'noindex, nofollow');
+    res.headers.set('Cache-Control', 'private, no-store');
+  }
   return res;
 });

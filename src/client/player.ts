@@ -5,7 +5,7 @@ import { gameFrameSrc } from './frame-src';
 export interface PlayerGame {
   id: string;
   title: string;
-  stage: 'proving' | 'live';
+  stage: 'pending' | 'rejected' | 'proving' | 'live';
 }
 
 export interface PlayerOptions {
@@ -15,6 +15,8 @@ export interface PlayerOptions {
   onEvent?: (type: string, data: Record<string, unknown>) => void;
   /** SP-6: owner preview token for their own pending/rejected game (the CDN 404s those otherwise). */
   previewToken?: string | null;
+  /** Share-link bundle. Present only for /p/<token>, which must load this version and no other. */
+  bundleVersion?: number;
 }
 
 export interface PlayerHandle {
@@ -110,7 +112,7 @@ export function mountPlayer(host: HTMLElement, game: PlayerGame, opts: PlayerOpt
   takeSave(game.id, saveKey, !!opts.cloudSaves).then((save) => {
     if (!destroyed) {
       srcSet = true;
-      frame.src = gameFrameSrc(opts.cdnOrigin, game.id, location.origin, save, opts.previewToken);
+      frame.src = gameFrameSrc(opts.cdnOrigin, game.id, location.origin, save, opts.previewToken, opts.bundleVersion);
     }
   });
 

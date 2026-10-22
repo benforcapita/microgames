@@ -34,4 +34,11 @@ describe('gameFrameSrc preview token (SP-6)', () => {
     assert.equal(gameFrameSrc('http://c', 'g1', 'http://p', '{}', 'abc.def'), 'http://c/g/g1/index.html?embed=http%3A%2F%2Fp&pt=abc.def#mgs=%7B%7D');
     assert.equal(gameFrameSrc('http://c', 'g1', 'http://p', '{}', null), gameFrameSrc('http://c', 'g1', 'http://p', '{}'));
   });
+
+  it('loads the linked bundle version instead of the unversioned document', () => {
+    assert.equal(
+      gameFrameSrc('http://c', 'g1', 'http://p', '{}', '1700000000.1.sig', 1),
+      'http://c/g/g1/1/index.html?embed=http%3A%2F%2Fp&pt=1700000000.1.sig#mgs=%7B%7D',
+    );
+  });
 });

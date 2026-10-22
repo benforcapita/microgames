@@ -6,22 +6,28 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { createHandler } from './handler.mjs';
-import { mintPreviewToken } from './preview-token.mjs';
+import { mintPreviewToken, readPreviewGrant } from './preview-token.mjs';
 import { CSP_SOURCES } from './csp.mjs';
 
 const SECRET = 'test-preview-secret';
 const PORTAL = 'http://127.0.0.1:4321';
 const CDN = 'http://cdn.test';
-const STAGES: Record<string, string> = { live0001: 'live', prov0001: 'proving', pend0001: 'pending' };
+const STAGES: Record<string, string> = {
+  live0001: 'live', prov0001: 'proving', pend0001: 'pending', prev0001: 'pending', cur00001: 'pending',
+};
 // A version other than 1 proves the URL comes from the real version lookup, not a hard-coded "1".
-const VERSIONS: Record<string, number> = { live0001: 3, prov0001: 3, pend0001: 3 };
+const VERSIONS: Record<string, number> = { live0001: 3, prov0001: 3, pend0001: 3, prev0001: 2, cur00001: 1 };
 const FILES: Record<string, string> = {
   'live0001/index.html': '<!doctype html><html><head></head><body><canvas id="c"></canvas></body></html>',
   'live0001/thumb.webp': 'THUMB',
   'live0001/3/sprites/hero.png': 'PNGDATA',
   'live0001/3/audio/jump.wav': 'WAVDATA',
   'provgm01/index.html': '<!doctype html><html><body>p</body></html>',
-  'pend0001/index.html': '<!doctype html><html><body>pend</body></html>',
+  'pend0001/index.html': '<!doctype html><html><body>CURRENT-OBJECT</body></html>',
+  'pend0001/3/index.html': '<!doctype html><html><body>ARCHIVE-V3</body></html>',
+  'prev0001/index.html': '<!doctype html><html><body>BUNDLE-V2-FAILED</body></html>',
+  'prev0001/1/index.html': '<!doctype html><html><body>BUNDLE-V1</body></html>',
+  'cur00001/index.html': '<!doctype html><html><body>BUNDLE-V1</body></html>',
 };
 
 function harness(opts: { cdnOrigin?: string } = {}) {
@@ -164,6 +170,41 @@ describe('UP-1: the game document is served at its versioned URL', () => {
     assert.equal((await get('/g/pend0001/3/index.html')).status, 404);
   });
 
+  it('a share token serves the pinned archive, including when that version is still current', async () => {
+    const { get } = harness();
+    const failed = mintPreviewToken(SECRET, 'prev0001', { version: 1 })!;
+    const pinned = await get(`/g/prev0001/1/index.html?pt=${failed}`);
+    assert.equal(pinned.status, 200);
+    assert.match(pinned.body, /BUNDLE-V1/);
+    assert.doesNotMatch(pinned.body, /BUNDLE-V2-FAILED/);
+    assert.equal(pinned.headers['cache-control'], 'private, no-store');
+    const owner = mintPreviewToken(SECRET, 'prev0001')!;
+    const latest = await get(`/g/prev0001/2/index.html?pt=${owner}`);
+    assert.equal(latest.status, 200);
+    assert.match(latest.body, /BUNDLE-V2-FAILED/);
+    assert.doesNotMatch(latest.body, /BUNDLE-V1/);
+    for (const path of [
+      `/g/prev0001/index.html?pt=${failed}`,
+      `/g/prev0001/2/index.html?pt=${failed}`,
+      `/g/prev0001/thumb.webp?pt=${failed}`,
+      '/g/prev0001/1/index.html',
+    ]) {
+      const missed = await get(path);
+      assert.equal(missed.status, 404, path);
+      assert.equal(missed.body.includes('BUNDLE-V1'), false, path);
+      assert.equal(missed.body.includes('BUNDLE-V2-FAILED'), false, path);
+    }
+    const stillCurrent = mintPreviewToken(SECRET, 'pend0001', { version: 3 })!;
+    const archived = await get(`/g/pend0001/3/index.html?pt=${stillCurrent}`);
+    assert.equal(archived.status, 200);
+    assert.match(archived.body, /ARCHIVE-V3/);
+    assert.doesNotMatch(archived.body, /CURRENT-OBJECT/);
+    const first = mintPreviewToken(SECRET, 'cur00001', { version: 1 })!;
+    const only = await get(`/g/cur00001/1/index.html?pt=${first}`);
+    assert.equal(only.status, 200);
+    assert.match(only.body, /BUNDLE-V1/);
+  });
+
   it('thumbnails keep their unversioned route — no redirect', async () => {
     const { get } = harness();
     const r = await get('/g/live0001/thumb.webp');
@@ -195,5 +236,114 @@ describe('UP-1: a non-numeric <version> is a 404, not a 502', () => {
     assert.equal((await get('/g/live0001/2/sprites/hero.png')).status, 404);
     assert.ok(calls.some((c) => c.includes('/rest/v1/game_assets') && c.includes('version=eq.9')), 'numeric versions still reach the manifest lookup');
     assert.equal((await get('/g/live0001/3/sprites/hero.png')).status, 200);
+  });
+});
+
+function shareCdn(files: Record<string, string>, version: { current: number }) {
+  const fakeFetch: typeof fetch = async (input) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+    const u = new URL(url);
+    if (u.pathname === '/rest/v1/games') return Response.json([{ stage: 'pending' }]);
+    if (u.pathname === '/rest/v1/game_validations') return Response.json([{ version: version.current }]);
+    const prefix = '/storage/v1/object/authenticated/games/';
+    if (u.pathname.startsWith(prefix)) {
+      const body = files[decodeURIComponent(u.pathname.slice(prefix.length))];
+      if (body !== undefined) return new Response(body);
+    }
+    return new Response('missing', { status: 404 });
+  };
+  let clock = 1_700_000_000_000;
+  const handle = createHandler({
+    supabaseUrl: 'http://sb.local',
+    secret: 'sb_secret_x',
+    webOrigins: PORTAL,
+    previewSecret: SECRET,
+    cdnOrigin: CDN,
+    fetch: fakeFetch,
+    now: () => clock,
+  });
+  const get = async (path: string) => {
+    let status = 0;
+    let body = '';
+    const res = {
+      writeHead(s: number) { status = s; },
+      end(b?: unknown) { body = b === undefined ? '' : String(b); },
+    };
+    await handle({ method: 'GET', url: path, headers: {} } as never, res as never);
+    return { status, body };
+  };
+  return { get, advance(ms: number) { clock += ms; } };
+}
+
+describe('a share link plays the version it names', () => {
+  it('keeps serving v1 after v2 passes, and does not play the cached v1 bytes for the v2 link', async () => {
+    const id = 'cachegm1';
+    const files: Record<string, string> = { [`${id}/index.html`]: '<!doctype html><html><body>BUNDLE-V1</body></html>' };
+    const version = { current: 1 };
+    const { get, advance } = shareCdn(files, version);
+    const v1 = mintPreviewToken(SECRET, id, { version: 1 })!;
+    const opened = await get(`/g/${id}/1/index.html?pt=${v1}`);
+    assert.equal(opened.status, 200);
+    assert.match(opened.body, /BUNDLE-V1/);
+    files[`${id}/1/index.html`] = '<!doctype html><html><body>BUNDLE-V1</body></html>';
+    files[`${id}/index.html`] = '<!doctype html><html><body>BUNDLE-V2</body></html>';
+    version.current = 2;
+    advance(31_000);
+    const v2 = mintPreviewToken(SECRET, id, { version: 2 })!;
+    const passed = await get(`/g/${id}/2/index.html?pt=${v2}`);
+    assert.equal(passed.status, 200);
+    assert.match(passed.body, /BUNDLE-V2/);
+    assert.equal(passed.body.includes('BUNDLE-V1'), false);
+    const again = await get(`/g/${id}/1/index.html?pt=${v1}`);
+    assert.equal(again.status, 200);
+    assert.match(again.body, /BUNDLE-V1/);
+    assert.equal(again.body.includes('BUNDLE-V2'), false);
+  });
+
+  it('does not serve the current bundle when the pinned archive is missing', async () => {
+    const id = 'missgm01';
+    const files: Record<string, string> = { [`${id}/index.html`]: '<!doctype html><html><body>CURRENT-V2</body></html>' };
+    const { get } = shareCdn(files, { current: 2 });
+    const pinned = mintPreviewToken(SECRET, id, { version: 1 })!;
+    const missed = await get(`/g/${id}/1/index.html?pt=${pinned}`);
+    assert.equal(missed.status, 404);
+    assert.equal(missed.body.includes('CURRENT-V2'), false);
+  });
+
+  it('rejects a share token with the version removed or swapped, and an expired share token', async () => {
+    const { get } = harness();
+    const nowS = Math.floor(Date.now() / 1000);
+    const pinned = mintPreviewToken(SECRET, 'pend0001', { version: 3, nowS })!;
+    const [exp, , sig] = pinned.split('.');
+    const stripped = `${exp}.${sig}`;
+    assert.equal(readPreviewGrant(SECRET, 'pend0001', stripped, nowS), null);
+    const owner = mintPreviewToken(SECRET, 'pend0001', { nowS })!;
+    assert.equal(readPreviewGrant(SECRET, 'pend0001', owner, nowS)?.kind, 'current');
+    const asOwner = await get(`/g/pend0001/3/index.html?pt=${stripped}`);
+    assert.equal(asOwner.status, 404);
+    assert.equal(asOwner.body.includes('CURRENT-OBJECT'), false);
+    assert.equal(asOwner.body.includes('ARCHIVE-V3'), false);
+    const realOwner = await get(`/g/pend0001/3/index.html?pt=${owner}`);
+    assert.equal(realOwner.status, 200);
+    assert.match(realOwner.body, /CURRENT-OBJECT/);
+
+    const v1 = mintPreviewToken(SECRET, 'prev0001', { version: 1, nowS })!;
+    const [v1Exp, , v1Sig] = v1.split('.');
+    const swapped = `${v1Exp}.2.${v1Sig}`;
+    assert.equal(readPreviewGrant(SECRET, 'prev0001', swapped, nowS), null);
+    const wrongVersion = await get(`/g/prev0001/2/index.html?pt=${swapped}`);
+    assert.equal(wrongVersion.status, 404);
+    assert.equal(wrongVersion.body.includes('BUNDLE-V2-FAILED'), false);
+    const rightVersion = await get(`/g/prev0001/1/index.html?pt=${v1}`);
+    assert.equal(rightVersion.status, 200);
+    assert.match(rightVersion.body, /BUNDLE-V1/);
+
+    const stale = mintPreviewToken(SECRET, 'cur00001', { version: 1, nowS: nowS - 601 })!;
+    assert.equal(readPreviewGrant(SECRET, 'cur00001', stale, nowS), null);
+    const expired = await get(`/g/cur00001/1/index.html?pt=${stale}`);
+    assert.equal(expired.status, 404);
+    assert.equal(expired.body.includes('BUNDLE-V1'), false);
+    const live = mintPreviewToken(SECRET, 'cur00001', { version: 1, nowS })!;
+    assert.equal((await get(`/g/cur00001/1/index.html?pt=${live}`)).status, 200);
   });
 });
