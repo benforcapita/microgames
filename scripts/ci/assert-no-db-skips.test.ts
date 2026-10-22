@@ -991,15 +991,11 @@ console.log(JSON.stringify({ ok }));`;
       ]);
     }
 
-    it('TODO_ALLOWLIST is the five named share-link tests and their pull requests', () => {
+    it('TODO_ALLOWLIST is the create-cap test and pull request #114', () => {
       assert.deepStrictEqual(
         TODO_ALLOWLIST.map((entry) => [entry.name, entry.prs]),
         [
-          ['/p is noindex and nofollow', ['#115']],
-          ['a bad preview link, an expired preview link, and a revoked preview link return the same 404', ['#115']],
-          ['the share-link caps return 429 for an eleventh create in an hour and a sixty-first open in a minute', ['#114', '#115']],
-          ['a preview response sends noindex, no-referrer, nosniff, and does not allow a shared cache', ['#115']],
-          ['a preview token is redacted in /P/, %2f, and a JSON \\/p\\/ escape', ['#115']],
+          ['the share-link caps return 429 for an eleventh create in an hour and a sixty-first open in a minute', ['#114']],
         ],
       );
     });
@@ -1034,17 +1030,17 @@ console.log(JSON.stringify({ ok }));`;
       assert.match(res.stderr, /todo is not bound to its pull request/);
     });
 
-    it('the cap todo exits 1 until both #114 and #115 are named', () => {
-      const entry = TODO_ALLOWLIST.find((item) => item.prs.length === 2);
-      if (!entry) throw new Error('no todo requires two pull requests');
-      const one = runJsonFixture(skippedWith(entry.name, [
+    it('the cap todo exits 1 until #114 is named', () => {
+      const entry = TODO_ALLOWLIST.find((item) => item.prs.includes('#114'));
+      if (!entry) throw new Error('cap todo is missing');
+      const other = runJsonFixture(skippedWith(entry.name, [
+        { type: 'todo', description: 'waiting on #115' },
+      ]));
+      assert.equal(other.status, 1);
+      const named = runJsonFixture(skippedWith(entry.name, [
         { type: 'todo', description: 'waiting on #114' },
       ]));
-      assert.equal(one.status, 1);
-      const both = runJsonFixture(skippedWith(entry.name, [
-        { type: 'todo', description: 'waiting on #114 and #115' },
-      ]));
-      assert.equal(both.status, 0);
+      assert.equal(named.status, 0);
     });
 
     it('a skipped test with an empty todo description exits 1', () => {

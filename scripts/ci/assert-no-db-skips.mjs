@@ -23,22 +23,9 @@ export const ALLOWLIST = [
 ];
 
 export const TODO_ALLOWLIST = [
-  { name: '/p is noindex and nofollow', prs: ['#115'] },
-  {
-    name: 'a bad preview link, an expired preview link, and a revoked preview link return the same 404',
-    prs: ['#115'],
-  },
   {
     name: 'the share-link caps return 429 for an eleventh create in an hour and a sixty-first open in a minute',
-    prs: ['#114', '#115'],
-  },
-  {
-    name: 'a preview response sends noindex, no-referrer, nosniff, and does not allow a shared cache',
-    prs: ['#115'],
-  },
-  {
-    name: 'a preview token is redacted in /P/, %2f, and a JSON \\/p\\/ escape',
-    prs: ['#115'],
+    prs: ['#114'],
   },
 ];
 

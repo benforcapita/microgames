@@ -33,6 +33,50 @@ async function mint(link: { ownerId: string; versionId: string }): Promise<{ id:
   return created;
 }
 
+interface PreviewFixture {
+  ownerId: string;
+  title: string;
+  token: string;
+  versionId: string;
+}
+
+async function withPreview(run: (fx: PreviewFixture) => Promise<void>): Promise<void> {
+  const ownerId = randomUUID();
+  const stamp = randomBytes(4).toString('hex');
+  const gameId = `p${stamp}`;
+  const title = `Hidden ${stamp}`;
+  const handle = `o${gameId}`;
+  const sha = 'ab'.repeat(32);
+  try {
+    await sql`
+      insert into auth.users (instance_id, id, aud, role, email, encrypted_password, created_at, updated_at)
+      values ('00000000-0000-0000-0000-000000000000', ${ownerId}::uuid, 'authenticated', 'authenticated', ${ownerId}, '', now(), now())
+    `;
+    await sql`insert into public.profiles (id, handle) values (${ownerId}::uuid, ${handle})`;
+    await sql`
+      insert into public.games (id, slug, owner_id, creator, title, stage)
+      values (${gameId}, ${gameId}, ${ownerId}::uuid, ${handle}, ${title}, 'pending')
+    `;
+    const [version] = await sql<{ id: string }[]>`
+      insert into public.game_validations (game_id, version, bundle_sha256, status)
+      values (${gameId}, 1, ${sha}, 'passed')
+      returning id
+    `;
+    if (!version) throw new Error('validation row was not created');
+    const link = await mint({ ownerId, versionId: version.id });
+    await run({ ownerId, title, token: link.token, versionId: version.id });
+  } finally {
+    await sql`delete from auth.users where id = ${ownerId}::uuid`;
+    await sql`delete from public.preview_page_hits`;
+  }
+}
+
+function withoutDate(headers: Record<string, string>): Record<string, string> {
+  const copy = { ...headers };
+  delete copy.date;
+  return copy;
+}
+
 function apiToken(): { token: string; hash: string; prefix: string } {
   const token = `mgp_${randomBytes(32).toString('base64url')}`;
   return { token, hash: createHash('sha256').update(token).digest('hex'), prefix: token.slice(0, 10) };
@@ -154,28 +198,112 @@ test('an unapproved game with an active preview link is absent from browse, sear
   }
 });
 
-test.fixme(
-  '/p is noindex and nofollow',
-  pending('SL-2 (#115): /p noindex is not on main yet'),
-  async () => {},
-);
-test.fixme(
-  'a bad preview link, an expired preview link, and a revoked preview link return the same 404',
-  pending('SL-2 (#115): identical preview 404s are not on main yet'),
-  async () => {},
-);
+test('/p is noindex and nofollow', async ({ request }) => {
+  const listed = await request.get('/games');
+  expect(listed.status()).toBe(200);
+  expect(listed.headers()['x-robots-tag'] ?? '').not.toContain('noindex');
+  expect(await listed.text()).not.toContain('name="robots" content="noindex, nofollow"');
+
+  const missing = await request.get(`/p/${randomBytes(32).toString('base64url')}`);
+  expect(missing.status()).toBe(404);
+  expect(missing.headers()['x-robots-tag']).toBe('noindex, nofollow');
+  expect(await missing.text()).toContain('name="robots" content="noindex, nofollow"');
+
+  await withPreview(async (fx) => {
+    const play = await request.get(`/p/${fx.token}`);
+    expect(play.status()).toBe(200);
+    expect(play.headers()['x-robots-tag']).toBe('noindex, nofollow');
+    const body = await play.text();
+    expect(body).toContain('name="robots" content="noindex, nofollow"');
+    expect(body).toContain('Unreviewed, not yet approved');
+    expect(body).not.toContain(fx.token);
+  });
+});
+
+test('a bad preview link, an expired preview link, and a revoked preview link return the same 404', async ({ request }) => {
+  await withPreview(async (fx) => {
+    const expired = await mint({ ownerId: fx.ownerId, versionId: fx.versionId });
+    await sql`update public.preview_links set expires_at = now() where id = ${expired.id}::uuid`;
+    const revoked = await mint({ ownerId: fx.ownerId, versionId: fx.versionId });
+    await sql.begin(async (tx) => {
+      await asOwner(tx, fx.ownerId);
+      await tx`select public.revoke_preview_link(${revoked.id}::uuid)`;
+    });
+    const bad = randomBytes(32).toString('base64url');
+    const seen: { status: number; body: string; headers: Record<string, string> }[] = [];
+    for (const path of [`/p/${bad}`, `/p/${expired.token}`, `/p/${revoked.token}`]) {
+      const res = await request.get(path);
+      seen.push({ status: res.status(), body: await res.text(), headers: withoutDate(res.headers()) });
+    }
+    const first = seen[0];
+    if (!first) throw new Error('no preview responses');
+    for (const item of seen) {
+      expect(item.status).toBe(404);
+      expect(item.body).toBe(first.body);
+      expect(item.headers).toEqual(first.headers);
+    }
+    expect(first.body).toContain('This cartridge is missing.');
+    expect(first.body).not.toContain(fx.title);
+    for (const secret of [fx.token, expired.token, revoked.token, bad]) {
+      expect(first.body).not.toContain(secret);
+    }
+  });
+});
+
 test.fixme(
   'the share-link caps return 429 for an eleventh create in an hour and a sixty-first open in a minute',
-  pending('SL-3 (#114) and SL-2 (#115): share-link HTTP 429 is not on main yet'),
+  pending('SL-3 (#114): the create-cap HTTP 429 is not on main yet'),
   async () => {},
 );
-test.fixme(
-  'a preview response sends noindex, no-referrer, nosniff, and does not allow a shared cache',
-  pending('SL-2 (#115): preview security headers are not on main yet'),
-  async () => {},
-);
-test.fixme(
-  'a preview token is redacted in /P/, %2f, and a JSON \\/p\\/ escape',
-  pending('SL-2 (#115): preview token redaction is not on main yet'),
-  async () => {},
-);
+
+test('a preview response sends noindex, no-referrer, nosniff, and does not allow a shared cache', async ({ request }) => {
+  const listed = await request.get('/games');
+  expect(listed.headers()['referrer-policy']).toBe('strict-origin-when-cross-origin');
+  await withPreview(async (fx) => {
+    const res = await request.get(`/p/${fx.token}`);
+    expect(res.status()).toBe(200);
+    const headers = res.headers();
+    expect(headers['x-robots-tag']).toBe('noindex, nofollow');
+    expect(headers['referrer-policy']).toBe('no-referrer');
+    expect(headers['x-content-type-options']).toBe('nosniff');
+    const cache = headers['cache-control'] ?? '';
+    expect(cache).toContain('private');
+    expect(cache).toContain('no-store');
+    expect(cache).not.toContain('public');
+    const body = await res.text();
+    expect(body).toContain('name="robots" content="noindex, nofollow"');
+    expect(body).not.toContain(fx.token);
+  });
+});
+
+test('a preview token is redacted in /P/, %2f, and a JSON \\/p\\/ escape', async ({ request }) => {
+  await withPreview(async (fx) => {
+    const stamp = randomBytes(4).toString('hex');
+    try {
+      const posted = await request.post('/api/events', {
+        data: {
+          type: 'error',
+          path: `/P/${fx.token}`,
+          details: {
+            probe: stamp,
+            encoded: `%2fp%2f${fx.token}`,
+            escaped: `\\/p\\/${fx.token}`,
+          },
+        },
+      });
+      expect(posted.status()).toBe(204);
+      expect(await posted.text()).not.toContain(fx.token);
+      const [row] = await sql<{ path: string | null; details: { encoded?: string; escaped?: string } }[]>`
+        select path, details from public.site_events where details->>'probe' = ${stamp}
+      `;
+      if (!row) throw new Error('stored event was not written');
+      const stored = JSON.stringify(row);
+      expect(stored).not.toContain(fx.token);
+      expect(row.path).toBe(`/p/[redacted]`);
+      expect(row.details.encoded).toBe(`%2fp%2f[redacted]`);
+      expect(row.details.escaped).toBe(String.raw`\/p\/[redacted]`);
+    } finally {
+      await sql`delete from public.site_events where details->>'probe' = ${stamp}`;
+    }
+  });
+});
