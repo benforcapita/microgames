@@ -76,6 +76,10 @@ test('mapPreviewLinkError maps hour error to 400 status and clear limit message'
   });
 });
 
+test('mapPreviewLinkError maps a refused lifetime to 400', () => {
+  assert.deepEqual(mapPreviewLinkError({ message: 'preview_link_ttl' }), { status: 400, message: 'Choose how long the link lasts.' });
+});
+
 test('mapPreviewLinkError maps raw database and unknown errors to generic 500 message', () => {
   const generic = {
     status: 500,

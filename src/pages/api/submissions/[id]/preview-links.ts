@@ -1,4 +1,5 @@
 import type { APIRoute } from 'astro';
+import { parsePreviewLinkTtl } from '../../../../lib/preview-link-rules';
 import { createPreviewLink, listActivePreviewLinks, verifyGameOwner } from '../../../../lib/server/preview-links';
 
 export const POST: APIRoute = async ({ params, request, locals }) => {
@@ -15,10 +16,17 @@ export const POST: APIRoute = async ({ params, request, locals }) => {
     return Response.json({ error: ownerCheck.message }, { status: ownerCheck.status });
   }
 
+  const body: unknown = await request.json().catch(() => null);
+  const ttlHours = parsePreviewLinkTtl(typeof body === 'object' && body !== null && 'ttlHours' in body ? body.ttlHours : undefined);
+  if (ttlHours === null) {
+    return Response.json({ error: 'Choose how long the link lasts.' }, { status: 400 });
+  }
+
   const result = await createPreviewLink({
     supabase: locals.supabase,
     gameId,
     userId: locals.user.id,
+    ttlHours,
     requestOrigin: new URL(request.url).origin,
   });
 
@@ -31,6 +39,7 @@ export const POST: APIRoute = async ({ params, request, locals }) => {
       id: result.link.id,
       token: result.link.token,
       url: result.link.url,
+      version: result.link.version,
       expiresAt: result.link.expiresAt,
       viewCount: result.link.viewCount,
       link: result.link,

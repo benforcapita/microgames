@@ -1,19 +1,35 @@
 ---
+import { DEFAULT_PREVIEW_LINK_TTL_HOURS, PREVIEW_LINK_TTLS, expiresIn } from '../lib/preview-link-rules';
 import type { ActivePreviewLink } from '../lib/server/preview-links';
 
 interface Props {
   gameId: string;
   links: ActivePreviewLink[];
+  version: number | null;
+  blocked: string | null;
 }
 
-const { gameId, links } = Astro.props;
+const { gameId, links, version, blocked } = Astro.props;
+const linkText = (link: ActivePreviewLink) =>
+  `${link.version ? `Version ${link.version} · ` : ''}${expiresIn(link.expiresAt)} · ${link.viewCount} ${link.viewCount === 1 ? 'view' : 'views'}`;
 ---
 
 <section class="panel share-links" id="share-links" data-game-id={gameId}>
   <div class="spread head">
     <h2>Share preview</h2>
-    <button type="button" class="btn" id="share-preview-btn">Share preview</button>
+    <div class="row controls">
+      <label class="ttl">
+        <span class="muted">Link lasts</span>
+        <select id="preview-ttl" name="ttl" disabled={blocked !== null}>
+          {PREVIEW_LINK_TTLS.map((t) => <option value={t.hours} selected={t.hours === DEFAULT_PREVIEW_LINK_TTL_HOURS}>{t.label}</option>)}
+        </select>
+      </label>
+      <button type="button" class="btn" id="share-preview-btn" disabled={blocked !== null}>Share preview</button>
+    </div>
   </div>
+  {blocked !== null
+    ? <p class="muted note" id="share-blocked">{blocked}</p>
+    : <p class="muted note" id="share-version">Anyone with the link can play version {version} without an account until the link expires.</p>}
   <div id="new-link-panel" class="panel new-link" hidden>
     <div class="row">
       <input type="text" id="created-link-url" readonly />
@@ -25,7 +41,7 @@ const { gameId, links } = Astro.props;
   <ul id="active-links-list" class="active-links" aria-label="Active preview links">
     {links.map((link) => (
       <li class="spread link-row" data-link-id={link.id}>
-        <span>Expires {new Date(link.expiresAt).toLocaleDateString()} · {link.viewCount} {link.viewCount === 1 ? 'view' : 'views'}</span>
+        <span title={new Date(link.expiresAt).toUTCString()}>{linkText(link)}</span>
         <button type="button" class="btn sm ghost revoke-btn" data-link-id={link.id}>Revoke</button>
       </li>
     ))}
@@ -33,9 +49,12 @@ const { gameId, links } = Astro.props;
 </section>
 
 <script>
+  import { expiresIn } from '../lib/preview-link-rules';
+
   const shareSection = document.getElementById('share-links');
   if (shareSection) {
     const gameId = shareSection.dataset.gameId ?? '';
+    const ttlSelect = document.getElementById('preview-ttl');
     const shareBtn = document.getElementById('share-preview-btn');
     const newLinkPanel = document.getElementById('new-link-panel');
     const createdLinkUrl = document.getElementById('created-link-url');
@@ -105,9 +124,11 @@ const { gameId, links } = Astro.props;
         clearError();
         shareBtn.disabled = true;
         try {
+          const ttlHours = ttlSelect instanceof HTMLSelectElement ? Number(ttlSelect.value) : undefined;
           const res = await fetch(`/api/submissions/${encodeURIComponent(gameId)}/preview-links`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ttlHours }),
           });
           const raw = await res.json().catch(() => null);
           const isObj = typeof raw === 'object' && raw !== null;
@@ -116,6 +137,7 @@ const { gameId, links } = Astro.props;
           const id = isObj && 'id' in raw && typeof raw.id === 'string' ? raw.id : '';
           const expiresAt = isObj && 'expiresAt' in raw && typeof raw.expiresAt === 'string' ? raw.expiresAt : '';
           const viewCount = isObj && 'viewCount' in raw && typeof raw.viewCount === 'number' ? raw.viewCount : 0;
+          const version = isObj && 'version' in raw && typeof raw.version === 'number' ? raw.version : null;
 
           if (!res.ok) {
             showError(errorMsg || 'Could not create preview link. Please try again.');
@@ -134,8 +156,8 @@ const { gameId, links } = Astro.props;
             li.dataset.linkId = id;
 
             const infoSpan = document.createElement('span');
-            const expStr = expiresAt ? new Date(expiresAt).toLocaleDateString() : '';
-            infoSpan.textContent = `Expires ${expStr} · ${viewCount} ${viewCount === 1 ? 'view' : 'views'}`;
+            if (expiresAt) infoSpan.title = new Date(expiresAt).toUTCString();
+            infoSpan.textContent = `${version ? `Version ${version} · ` : ''}${expiresAt ? expiresIn(expiresAt) : 'Expires soon'} · ${viewCount} ${viewCount === 1 ? 'view' : 'views'}`;
 
             const revokeBtn = document.createElement('button');
             revokeBtn.type = 'button';
@@ -159,7 +181,11 @@ const { gameId, links } = Astro.props;
 </script>
 
 <style>
-  .head { align-items: flex-end; }
+  .head { align-items: flex-end; flex-wrap: wrap; gap: 0.75rem; }
+  .controls { align-items: center; gap: 0.75rem; flex-wrap: wrap; }
+  .ttl { display: inline-flex; align-items: center; gap: 0.5rem; font-size: 0.9rem; white-space: nowrap; }
+  .ttl select { font: inherit; padding: 0.35rem 0.5rem; }
+  .note { margin: 0; font-size: 0.9rem; }
   h2 { font-size: 1rem; margin: 0; }
   .share-links { display: grid; gap: 0.75rem; }
   .share-links [hidden] { display: none; }

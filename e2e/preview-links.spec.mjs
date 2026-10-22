@@ -509,3 +509,75 @@ test('an unapproved game with an active preview link is absent from public listi
     await anonContext.close();
   }
 });
+
+test('creator picks a link lifetime, and share is refused once no version can open', async ({ browser }) => {
+  test.setTimeout(180_000);
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  const stamp = `sl5${Date.now().toString(36)}`;
+  const { gameId } = await createValidatedGame(page, stamp);
+  const siteOrigin = new URL(page.url()).origin;
+  const lifetime = (id) => sql`
+    select extract(epoch from expires_at - created_at)::int as seconds from public.preview_links where id = ${id}::uuid`;
+
+  const shareSection = page.locator('#share-links');
+  const ttl = page.getByLabel('Link lasts');
+  await expect(ttl).toHaveValue('24');
+  await expect(page.locator('#share-version')).toHaveText('Anyone with the link can play version 1 without an account until the link expires.');
+
+  await ttl.selectOption({ label: '1 hour' });
+  await page.getByRole('button', { name: 'Share preview' }).click();
+  const list = page.getByRole('list', { name: 'Active preview links' });
+  await expect(list.locator('li')).toHaveCount(1);
+  await expect(list.locator('li').first()).toContainText('Version 1 · Expires in 1 hour · 0 views');
+  const [created] = await sql`
+    select id from public.preview_links
+    where version_id in (select id from public.game_validations where game_id = ${gameId})`;
+  expect((await lifetime(created.id))[0].seconds).toBe(3600);
+  await shareSection.screenshot({ path: shotPath('sl-5-one-hour.png') });
+
+  await page.reload();
+  await expect(list.locator('li').first()).toContainText(/Version 1 · Expires in (60 min|1 hour) · 0 views/);
+
+  const week = await page.request.post(`/api/submissions/${gameId}/preview-links`, { headers: { Origin: siteOrigin }, data: { ttlHours: 168 } });
+  expect(week.status()).toBe(201);
+  const weekBody = await week.json();
+  expect(weekBody.version).toBe(1);
+  expect((await lifetime(weekBody.id))[0].seconds).toBe(7 * 24 * 3600);
+
+  const countBefore = await sql`select count(*)::int as n from public.preview_links where owner_id = (select owner_id from public.games where id = ${gameId})`;
+  for (const ttlHours of [12, 0, 720, 'forever']) {
+    const bad = await page.request.post(`/api/submissions/${gameId}/preview-links`, { headers: { Origin: siteOrigin }, data: { ttlHours } });
+    expect(bad.status()).toBe(400);
+    expect(await bad.json()).toEqual({ error: 'Choose how long the link lasts.' });
+  }
+
+  await sql`update public.game_validations set status = 'failed' where game_id = ${gameId}`;
+  await page.reload();
+  await expect(page.locator('#share-blocked')).toHaveText('This version failed its checks. Upload a fixed version to share it.');
+  await expect(page.getByRole('button', { name: 'Share preview' })).toBeDisabled();
+  await expect(ttl).toBeDisabled();
+  await shareSection.screenshot({ path: shotPath('sl-5-failed.png') });
+  const failed = await page.request.post(`/api/submissions/${gameId}/preview-links`, { headers: { Origin: siteOrigin } });
+  expect(failed.status()).toBe(409);
+  expect(await failed.json()).toEqual({ error: 'This version failed its checks. Upload a fixed version to share it.' });
+
+  await sql`update public.game_validations set status = 'passed' where game_id = ${gameId}`;
+  await sql`update public.games set stage = 'proving' where id = ${gameId}`;
+  await page.reload();
+  await expect(page.locator('#share-links')).toHaveCount(0);
+  const live = await page.request.post(`/api/submissions/${gameId}/preview-links`, { headers: { Origin: siteOrigin } });
+  expect(live.status()).toBe(409);
+  expect(await live.json()).toEqual({ error: 'This game is already public. Share its page instead.' });
+
+  await sql`update public.games set stage = 'rejected' where id = ${gameId}`;
+  await page.reload();
+  await expect(page.locator('#share-links')).toHaveCount(0);
+  const rejected = await page.request.post(`/api/submissions/${gameId}/preview-links`, { headers: { Origin: siteOrigin } });
+  expect(rejected.status()).toBe(409);
+  expect(await rejected.json()).toEqual({ error: 'This game was rejected. Upload a fixed version to share it.' });
+
+  const countAfter = await sql`select count(*)::int as n from public.preview_links where owner_id = (select owner_id from public.games where id = ${gameId})`;
+  expect(countAfter[0].n).toBe(countBefore[0].n);
+  await context.close();
+});

@@ -1,10 +1,12 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { shareTarget, type ShareableValidation, type ShareTarget } from '../preview-link-rules';
 import { SITE_URL } from './config';
 import { sql } from './db';
 
 export interface ActivePreviewLink {
   id: string;
   versionId: string;
+  version?: number;
   expiresAt: string;
   viewCount: number;
   createdAt: string;
@@ -17,6 +19,7 @@ export type CreatePreviewLinkResult =
         id: string;
         token: string;
         url: string;
+        version: number;
         expiresAt: string;
         viewCount: number;
       };
@@ -34,10 +37,6 @@ export type RevokePreviewLinkResult =
 export type ListPreviewLinksResult =
   | { kind: 'success'; links: ActivePreviewLink[] }
   | { kind: 'error'; status: number; message: string };
-
-interface ValidationIdRow {
-  id: string;
-}
 
 export interface MappedPreviewLinkError {
   status: number;
@@ -90,6 +89,9 @@ export function mapPreviewLinkError(error: unknown): MappedPreviewLinkError {
   }
   if (str.includes('preview_link_hour')) {
     return { status: 400, message: hourMessage };
+  }
+  if (str.includes('preview_link_ttl')) {
+    return { status: 400, message: 'Choose how long the link lasts.' };
   }
   return { status: 500, message: genericMessage };
 }
@@ -150,10 +152,23 @@ export async function verifyGameOwner(opts: {
   return { kind: 'ok', ownerId };
 }
 
+export async function loadShareTarget(gameId: string): Promise<ShareTarget> {
+  const [games, validations] = await Promise.all([
+    sql<{ stage: string }[]>`select stage from public.games where id = ${gameId}`,
+    sql<ShareableValidation[]>`
+      select id, version, status from public.game_validations
+      where game_id = ${gameId}
+      order by version desc, created_at desc
+    `,
+  ]);
+  return shareTarget(games[0]?.stage ?? '', validations);
+}
+
 export async function createPreviewLink(opts: {
   supabase: SupabaseClient;
   gameId: string;
   userId: string;
+  ttlHours: number;
   requestOrigin?: string;
 }): Promise<CreatePreviewLinkResult> {
   const ownerCheck = await verifyGameOwner({ gameId: opts.gameId, userId: opts.userId });
@@ -165,23 +180,14 @@ export async function createPreviewLink(opts: {
     };
   }
 
-  const validations = await sql<ValidationIdRow[]>`
-    select id from public.game_validations
-    where game_id = ${opts.gameId}
-    order by created_at desc
-    limit 1
-  `;
-  const validation = validations[0];
-  if (!validation) {
-    return {
-      kind: 'error',
-      status: 404,
-      message: 'Not found',
-    };
+  const target = await loadShareTarget(opts.gameId);
+  if (target.kind === 'blocked') {
+    return { kind: 'error', status: target.status, message: target.message };
   }
 
   const { data, error } = await opts.supabase.rpc('create_preview_link', {
-    p_version_id: validation.id,
+    p_version_id: target.versionId,
+    p_ttl_hours: opts.ttlHours,
   });
 
   if (error) {
@@ -210,6 +216,7 @@ export async function createPreviewLink(opts: {
       id: parsed.id,
       token: parsed.token,
       url,
+      version: target.version,
       expiresAt: parsed.expiresAt,
       viewCount: 0,
     },
@@ -258,18 +265,18 @@ export async function listActivePreviewLinks(opts: {
   supabase: SupabaseClient;
   gameId: string;
 }): Promise<ActivePreviewLink[]> {
-  const validations = await sql<ValidationIdRow[]>`
-    select id from public.game_validations where game_id = ${opts.gameId}
+  const validations = await sql<{ id: string; version: number }[]>`
+    select id, version from public.game_validations where game_id = ${opts.gameId}
   `;
-  const versionIds = validations.map((v) => v.id);
-  if (versionIds.length === 0) {
+  const versionById = new Map(validations.map((v) => [v.id, v.version]));
+  if (versionById.size === 0) {
     return [];
   }
 
   const { data, error } = await opts.supabase
     .from('preview_links')
     .select('id, version_id, expires_at, view_count, created_at')
-    .in('version_id', versionIds)
+    .in('version_id', [...versionById.keys()])
     .is('revoked_at', null)
     .gt('expires_at', new Date().toISOString())
     .order('created_at', { ascending: false });
@@ -278,5 +285,5 @@ export async function listActivePreviewLinks(opts: {
     return [];
   }
 
-  return validateActiveLinks(data);
+  return validateActiveLinks(data).map((link) => ({ ...link, version: versionById.get(link.versionId) }));
 }
