@@ -303,7 +303,7 @@ export function buildSubmissionView(
     detail = `Validation is running. ${publishLine}`;
   } else if (phase === 'passed' && !published) {
     headline = 'Awaiting review';
-    detail = 'Validation passed. A reviewer will publish this game. Only you can preview it until then.';
+    detail = 'Validation passed. A reviewer will publish this game. Anyone with a share link can play it until then.';
   } else if (phase === 'passed' && published) {
     headline = 'Published';
     detail = game.stage === 'live'

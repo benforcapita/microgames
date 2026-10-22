@@ -89,7 +89,7 @@ export function mapPreviewLinkError(error: unknown): MappedPreviewLinkError {
     return { status: 409, message: capMessage };
   }
   if (str.includes('preview_link_hour')) {
-    return { status: 429, message: hourMessage };
+    return { status: 400, message: hourMessage };
   }
   return { status: 500, message: genericMessage };
 }

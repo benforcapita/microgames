@@ -72,6 +72,20 @@ It exits non-zero while any reported row is `GAP`. `net` must stay out of the AP
 
 ---
 
+## Preview links
+
+A creator can mint a preview link for one uploaded version. Anyone with the link can open that version without signing in, once its validation has passed. The lifetime is seven days. The creator can revoke it sooner, a second revoke keeps the original time, and an admin revoke records the same fact for the creator. Five links can be active at once, and ten can be created in an hour. Active means not revoked and not past `expires_at`.
+
+The plaintext token is returned once, from `create_preview_link`. The database stores its SHA-256 hash.
+
+`preview_links.view_count` increases only when `resolve_preview_link` returns the game. An unknown token, a revoked link, an expired link, a validation that has not passed, a rejected game, or a confirmed NSFW bundle returns no row and leaves the count unchanged. Those misses look the same to the caller.
+
+`preview_link_audit` records `created`, `revoked`, and `expired_hit` (the token was presented after `expires_at`, including when the link was already revoked or the version's check has not passed). Each event is stored once per link, and a second request leaves the original time in place. The columns are `event`, `link_id`, `actor`, and `at`. `actor` is the creator's profile id, including an anonymous expired hit and an admin revoke. The table has no IP address, email, or token. Row security returns a signed-in creator's own rows. A trigger on the link writes created and revoked. `resolve_preview_link` writes an expired hit. Both writers are security-definer functions with an empty search path.
+
+Creator page: `/preview-links`.
+
+---
+
 ## Development
 
 Start both the web portal and the game CDN simultaneously:

@@ -468,13 +468,15 @@ describe('preview links', () => {
       select proname, proconfig
       from pg_proc p
       join pg_namespace n on n.oid = p.pronamespace
-      where n.nspname = 'public'
-        and proname in ('create_preview_link', 'revoke_preview_link', 'admin_revoke_preview_link', 'resolve_preview_link')
+      where (n.nspname = 'public' and proname in ('create_preview_link', 'revoke_preview_link', 'admin_revoke_preview_link', 'resolve_preview_link'))
+        or (n.nspname = 'private' and proname in ('preview_link_audit', 'preview_link_audit_from_link'))
       order by proname
     `;
     assert.deepEqual(fns.map((fn) => fn.proname), [
       'admin_revoke_preview_link',
       'create_preview_link',
+      'preview_link_audit',
+      'preview_link_audit_from_link',
       'resolve_preview_link',
       'revoke_preview_link',
     ]);
@@ -1032,10 +1034,14 @@ describe('preview links', () => {
       `), '42501');
       assert.equal(await codeOf(tx, (sp) => sp`update public.preview_links set view_count = 0`), '42501');
       assert.equal(await codeOf(tx, (sp) => sp`delete from public.preview_links`), '42501');
+      assert.equal(await codeOf(tx, (sp) => sp`select event from public.preview_link_audit`), '42501');
+      assert.equal(await codeOf(tx, (sp) => sp`select private.preview_link_audit('created', ${link.id}::uuid)`), '42501');
       await tx.unsafe('reset role');
       const [priv] = await tx<{
         sel: boolean; ins: boolean; upd: boolean; del: boolean;
         create_fn: boolean; revoke_fn: boolean; admin_fn: boolean; resolve_fn: boolean; hash_col: boolean;
+        audit_sel: boolean; audit_ins: boolean; audit_upd: boolean; audit_del: boolean;
+        audit_fn: boolean; audit_trg: boolean;
       }[]>`
         select
           has_table_privilege('service_role', 'public.preview_links', 'select') as sel,
@@ -1046,11 +1052,19 @@ describe('preview links', () => {
           has_function_privilege('service_role', 'public.revoke_preview_link(uuid)', 'execute') as revoke_fn,
           has_function_privilege('service_role', 'public.admin_revoke_preview_link(uuid)', 'execute') as admin_fn,
           has_function_privilege('service_role', 'public.resolve_preview_link(text)', 'execute') as resolve_fn,
-          has_column_privilege('service_role', 'public.preview_links', 'token_hash', 'select') as hash_col
+          has_column_privilege('service_role', 'public.preview_links', 'token_hash', 'select') as hash_col,
+          has_table_privilege('service_role', 'public.preview_link_audit', 'select') as audit_sel,
+          has_table_privilege('service_role', 'public.preview_link_audit', 'insert') as audit_ins,
+          has_table_privilege('service_role', 'public.preview_link_audit', 'update') as audit_upd,
+          has_table_privilege('service_role', 'public.preview_link_audit', 'delete') as audit_del,
+          has_function_privilege('service_role', 'private.preview_link_audit(text, uuid)', 'execute') as audit_fn,
+          has_function_privilege('service_role', 'private.preview_link_audit_from_link()', 'execute') as audit_trg
       `;
       assert.deepEqual(priv, {
         sel: false, ins: false, upd: false, del: false,
         create_fn: false, revoke_fn: false, admin_fn: false, resolve_fn: false, hash_col: false,
+        audit_sel: false, audit_ins: false, audit_upd: false, audit_del: false,
+        audit_fn: false, audit_trg: false,
       });
       const [kept] = await tx<{ n: number; revoked_at: Date | null }[]>`
         select count(*)::int as n, max(revoked_at) as revoked_at
@@ -1203,5 +1217,139 @@ describe('preview links', () => {
     } finally {
       await sql`delete from auth.users where id = ${ownerId}::uuid`;
     }
+  });
+});
+
+type AuditFact = { event: string; actor: string };
+
+async function auditFacts(tx: Sql, uid: string, linkId: string): Promise<AuditFact[]> {
+  await asRole(tx, 'authenticated', uid);
+  const rows = await tx<{ event: string; link_id: string; actor: string }[]>`
+    select event, link_id, actor from public.preview_link_audit order by event
+  `;
+  await tx.unsafe('reset role');
+  return rows.filter((row) => row.link_id === linkId).map((row) => ({ event: row.event, actor: row.actor }));
+}
+
+describe('preview link audit', () => {
+  db('logs each event once for the creator and leaves misses uncounted', async (sql) => {
+    await rollback(sql, async (tx) => {
+      const { ownerId, otherId, gameId, versionId } = await seed(tx);
+      const link = await mint(tx, ownerId, versionId);
+      const creator = { event: 'created', actor: ownerId };
+      assert.deepEqual(await auditFacts(tx, ownerId, link.id), [creator]);
+
+      assert.deepEqual(await play(tx, 'not-a-real-preview-token'), []);
+      assert.equal(await views(tx, link.id), 0);
+      assert.deepEqual(await auditFacts(tx, ownerId, link.id), [creator]);
+
+      assert.equal((await play(tx, link.token)).length, 1);
+      assert.equal(await views(tx, link.id), 1);
+      assert.deepEqual(await auditFacts(tx, ownerId, link.id), [creator]);
+
+      await tx`update public.game_validations set status = 'failed' where id = ${versionId}::uuid`;
+      assert.deepEqual(await play(tx, link.token), []);
+      assert.equal(await views(tx, link.id), 1);
+      assert.deepEqual(await auditFacts(tx, ownerId, link.id), [creator]);
+      await tx`update public.game_validations set status = 'passed' where id = ${versionId}::uuid`;
+
+      await asRole(tx, 'authenticated', ownerId);
+      await tx`select public.revoke_preview_link(${link.id}::uuid)`;
+      const [first] = await tx<{ revoked_at: Date }[]>`select revoked_at from public.preview_links where id = ${link.id}::uuid`;
+      await tx`select public.revoke_preview_link(${link.id}::uuid)`;
+      const [second] = await tx<{ revoked_at: Date }[]>`select revoked_at from public.preview_links where id = ${link.id}::uuid`;
+      await tx.unsafe('reset role');
+      assert.equal(second.revoked_at.toISOString(), first.revoked_at.toISOString());
+      assert.deepEqual(await play(tx, link.token), []);
+      assert.equal(await views(tx, link.id), 1);
+      assert.deepEqual(await auditFacts(tx, ownerId, link.id), [creator, { event: 'revoked', actor: ownerId }]);
+
+      await tx`update public.preview_links set expires_at = now() where id = ${link.id}::uuid`;
+      const unknown = await play(tx, 'not-a-real-preview-token');
+      const expired = await play(tx, link.token);
+      assert.deepEqual(unknown, expired);
+      assert.deepEqual(expired, []);
+      assert.equal(await views(tx, link.id), 1);
+      assert.deepEqual(await play(tx, link.token), []);
+      assert.equal(await views(tx, link.id), 1);
+      assert.deepEqual(await auditFacts(tx, ownerId, link.id), [
+        creator,
+        { event: 'expired_hit', actor: ownerId },
+        { event: 'revoked', actor: ownerId },
+      ]);
+
+      const probed = await mint(tx, ownerId, versionId);
+      await tx`update public.preview_links set expires_at = now() where id = ${probed.id}::uuid`;
+      await asRole(tx, 'authenticated', otherId);
+      assert.deepEqual([...(await tx<{ version_id: string }[]>`select * from public.resolve_preview_link(${probed.token})`)], []);
+      await tx.unsafe('reset role');
+      assert.equal(await views(tx, probed.id), 0);
+      assert.deepEqual(await auditFacts(tx, ownerId, probed.id), [
+        { event: 'created', actor: ownerId },
+        { event: 'expired_hit', actor: ownerId },
+      ]);
+      await tx`update public.preview_link_audit set at = timestamptz '2000-01-01+00' where link_id = ${probed.id}::uuid and event = 'expired_hit'`;
+      assert.deepEqual(await play(tx, probed.token), []);
+      assert.equal(await views(tx, probed.id), 0);
+      const [keptHit] = await tx<{ at: Date }[]>`
+        select at from public.preview_link_audit where link_id = ${probed.id}::uuid and event = 'expired_hit'
+      `;
+      assert.equal(keptHit.at.toISOString(), '2000-01-01T00:00:00.000Z');
+
+      await tx`update public.game_validations set status = 'failed' where id = ${versionId}::uuid`;
+      const aged = await mint(tx, ownerId, versionId);
+      await tx`update public.preview_links set expires_at = now() where id = ${aged.id}::uuid`;
+      assert.deepEqual(await play(tx, aged.token), await play(tx, 'not-a-real-preview-token'));
+      assert.equal(await views(tx, aged.id), 0);
+      assert.deepEqual(await auditFacts(tx, ownerId, aged.id), [
+        { event: 'created', actor: ownerId },
+        { event: 'expired_hit', actor: ownerId },
+      ]);
+      await tx`update public.game_validations set status = 'passed' where id = ${versionId}::uuid`;
+
+      const adminId = randomUUID();
+      await tx`
+        insert into auth.users (instance_id, id, aud, role, email, encrypted_password, created_at, updated_at)
+        values ('00000000-0000-0000-0000-000000000000', ${adminId}::uuid, 'authenticated', 'authenticated', ${`${adminId}@example.test`}, '', now(), now())
+      `;
+      await tx`insert into public.profiles (id, handle, role) values (${adminId}::uuid, ${`a${gameId.slice(2)}`}, 'admin')`;
+      const byAdmin = await mint(tx, ownerId, versionId);
+      await asRole(tx, 'authenticated', adminId);
+      await tx`select public.admin_revoke_preview_link(${byAdmin.id}::uuid)`;
+      await tx`select public.admin_revoke_preview_link(${byAdmin.id}::uuid)`;
+      await tx.unsafe('reset role');
+      assert.equal(await views(tx, byAdmin.id), 0);
+      assert.deepEqual(await play(tx, byAdmin.token), []);
+      assert.deepEqual(await auditFacts(tx, ownerId, byAdmin.id), [
+        { event: 'created', actor: ownerId },
+        { event: 'revoked', actor: ownerId },
+      ]);
+
+      const columns = (await tx<{ column_name: string }[]>`
+        select column_name from information_schema.columns
+        where table_schema = 'public' and table_name = 'preview_link_audit'
+        order by column_name
+      `).map((column) => column.column_name);
+      assert.deepEqual(columns, ['actor', 'at', 'event', 'link_id']);
+
+      for (const uid of [otherId, adminId]) {
+        await asRole(tx, 'authenticated', uid);
+        assert.deepEqual([...(await tx<{ event: string }[]>`select event from public.preview_link_audit`)], []);
+      }
+      await asRole(tx, 'anon');
+      assert.equal(await codeOf(tx, (sp) => sp`select event from public.preview_link_audit`), '42501');
+      assert.equal(await codeOf(tx, (sp) => sp`select private.preview_link_audit('created', ${link.id}::uuid)`), '42501');
+      await asRole(tx, 'authenticated', ownerId);
+      assert.equal(await codeOf(tx, (sp) => sp`select private.preview_link_audit('created', ${link.id}::uuid)`), '42501');
+      assert.equal(await codeOf(tx, (sp) => sp`
+        insert into public.preview_link_audit (event, link_id, actor)
+        values ('created', ${link.id}::uuid, ${ownerId}::uuid)
+      `), '42501');
+      assert.equal(await codeOf(tx, (sp) => sp`update public.preview_link_audit set event = 'created'`), '42501');
+      assert.equal(await codeOf(tx, (sp) => sp`delete from public.preview_link_audit`), '42501');
+      const seen = await auditFacts(tx, ownerId, link.id);
+      assert.equal(seen.filter((row) => row.event === 'expired_hit').length, 1);
+      assert.equal(seen.every((row) => row.actor === ownerId), true);
+    });
   });
 });

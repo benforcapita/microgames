@@ -348,7 +348,7 @@ test('hourly preview link creation cap enforcement', async ({ browser }) => {
   const apiPost = await page.request.post(`/api/submissions/${gameId}/preview-links`, {
     headers: { Origin: siteOrigin },
   });
-  expect(apiPost.status()).toBe(429);
+  expect(apiPost.status()).toBe(400);
   const data = await apiPost.json();
   expect(data.error).toBe("You've created 10 preview links in the last hour. Try again later.");
 

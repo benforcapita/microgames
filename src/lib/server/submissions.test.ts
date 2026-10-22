@@ -373,7 +373,11 @@ describe('submission status endpoint', () => {
     assert.equal(pending.terminal, false);
     assert.equal(pending.published, false);
     assert.equal(pending.headline, 'Awaiting review');
-    assert.match(pending.detail, /reviewer/);
+    assert.equal(
+      pending.detail,
+      'Validation passed. A reviewer will publish this game. Anyone with a share link can play it until then.',
+    );
+    assert.doesNotMatch(pending.detail, /only you can preview/i);
     assert.equal(pending.game.reviewNote, null);
     assert.equal('publish' in pending, false);
 
@@ -427,5 +431,12 @@ describe('submission page', () => {
       ...[...previewLinks.matchAll(/\b\w*(?:btn|button)\w*\.textContent\s*=\s*['"]([^'"]+)['"]/gi)].map((m) => m[1].trim()),
     ]);
     assert.deepEqual(buttonLabels, new Set(['Share preview', 'Copy', 'Revoke']));
+    assert.match(page, /Only you can see this page/);
+  });
+
+  it('tells the owner a share link is how someone else plays', () => {
+    const play = readFileSync(new URL('../../pages/play/[slug].astro', import.meta.url), 'utf8');
+    assert.match(play, /Anyone with a share link can play this until it is published\./);
+    assert.doesNotMatch(play, /Only you can preview/);
   });
 });

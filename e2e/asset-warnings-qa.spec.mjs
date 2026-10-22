@@ -69,8 +69,8 @@ test('file names render as literal text, never as markup, on both pages', async 
 
 test('if the scanner chunk fails to load, a visible notice replaces the warning and submit still works', async ({ page }) => {
   test.setTimeout(120_000);
+  await page.context().route('**/asset-scan.*.js', (route) => route.abort());
   const stamp = await signUp(page, 'qac');
-  await page.route('**/asset-scan.*.js', (route) => route.abort());
   await pick(page, ['sprites/hero.png']);
   const warn = page.locator('#asset-warnings');
   await expect(warn).toBeVisible();
