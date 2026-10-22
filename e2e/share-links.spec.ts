@@ -260,7 +260,7 @@ test('a bad preview link, an expired preview link, and a revoked preview link re
   });
 });
 
-test('the share-link caps return 400 for an eleventh create in an hour and 429 for a sixty-first open in a minute', async ({ page }) => {
+test('the share-link caps return 429 for an eleventh create in an hour and a sixty-first open in a minute', async ({ page }) => {
   test.setTimeout(180_000);
   const stamp = randomBytes(4).toString('hex');
   const handle = `c${stamp}`;
@@ -308,7 +308,7 @@ test('the share-link caps return 400 for an eleventh create in an hour and 429 f
     const blocked = await page.request.post(`/api/submissions/${gameId}/preview-links`, {
       headers: { Origin: origin },
     });
-    expect(blocked.status()).toBe(400);
+    expect(blocked.status()).toBe(429);
     expect(jsonError(await blocked.json())).toBe(hourMessage);
     const [row] = await sql<{ n: number }[]>`
       select count(*)::int as n from public.preview_links where owner_id = ${ownerId}::uuid
