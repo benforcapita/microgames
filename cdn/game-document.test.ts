@@ -6,8 +6,9 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { createHandler } from './handler.mjs';
+import { rewriteGameUrl } from './api/g.mjs';
 import { mintPreviewToken, readPreviewGrant } from './preview-token.mjs';
-import { CSP_SOURCES } from './csp.mjs';
+import { CSP_SOURCES, previewDocumentPath } from './csp.mjs';
 
 const SECRET = 'test-preview-secret';
 const PORTAL = 'http://127.0.0.1:4321';
@@ -25,8 +26,10 @@ const FILES: Record<string, string> = {
   'provgm01/index.html': '<!doctype html><html><body>p</body></html>',
   'pend0001/index.html': '<!doctype html><html><body>CURRENT-OBJECT</body></html>',
   'pend0001/3/index.html': '<!doctype html><html><body>ARCHIVE-V3</body></html>',
+  'pend0001/3/game.js': 'owner-script',
   'prev0001/index.html': '<!doctype html><html><body>BUNDLE-V2-FAILED</body></html>',
   'prev0001/1/index.html': '<!doctype html><html><body>BUNDLE-V1</body></html>',
+  'prev0001/1/game.js': 'paint();',
   'cur00001/index.html': '<!doctype html><html><body>BUNDLE-V1</body></html>',
 };
 
@@ -160,11 +163,22 @@ describe('UP-1: the game document is served at its versioned URL', () => {
     const embed = encodeURIComponent(PORTAL);
     const r = await get(`/g/pend0001/index.html?embed=${embed}&pt=${pt}`);
     assert.equal(r.status, 302);
-    assert.equal(r.headers.location, `/g/pend0001/3/index.html?embed=${embed}&pt=${pt}`);
+    assert.equal(r.headers.location, `${previewDocumentPath('pend0001', 3, pt)}?embed=${embed}`);
     const doc = await get(r.headers.location);
     assert.equal(doc.status, 200);
     assert.equal(doc.headers['cache-control'], 'private, no-store');
     assert.match(doc.headers['content-security-policy'], new RegExp(`${CDN.replace(/\./g, '\\.')}/g/pend0001/3/`));
+    const script = new URL('game.js', `${CDN}${r.headers.location}`);
+    assert.equal(script.search, '');
+    assert.equal(script.pathname, `/g/pend0001/3/~pt/${encodeURIComponent(pt)}/game.js`);
+    const sibling = await get(script.pathname);
+    assert.equal(sibling.status, 200);
+    assert.equal(sibling.body, 'owner-script');
+    assert.equal(sibling.headers['content-type'], 'text/javascript; charset=utf-8');
+    assert.equal(sibling.headers['cache-control'], 'private, no-store');
+    const dropped = new URL('game.js', `${CDN}/g/pend0001/3/index.html?embed=${embed}&pt=${pt}`);
+    assert.equal(dropped.pathname, '/g/pend0001/3/game.js');
+    assert.equal((await get(dropped.pathname)).status, 404);
     // Without a token the redirect target (and the redirect itself) stays 404.
     assert.equal((await get('/g/pend0001/index.html')).status, 404);
     assert.equal((await get('/g/pend0001/3/index.html')).status, 404);
@@ -203,6 +217,43 @@ describe('UP-1: the game document is served at its versioned URL', () => {
     const only = await get(`/g/cur00001/1/index.html?pt=${first}`);
     assert.equal(only.status, 200);
     assert.match(only.body, /BUNDLE-V1/);
+  });
+
+  it('a pinned path token serves sibling files of that version and nothing else', async () => {
+    const { get } = harness();
+    const token = mintPreviewToken(SECRET, 'prev0001', { version: 1 })!;
+    const docPath = previewDocumentPath('prev0001', 1, token);
+    const doc = await get(`${docPath}?embed=${encodeURIComponent(PORTAL)}`);
+    assert.equal(doc.status, 200);
+    assert.match(doc.body, /BUNDLE-V1/);
+    assert.equal(doc.headers['cache-control'], 'private, no-store');
+    assert.match(doc.headers['content-security-policy'], /\/g\/prev0001\/1\//);
+    const script = new URL('game.js', `${CDN}${docPath}`);
+    assert.equal(script.pathname, `/g/prev0001/1/~pt/${encodeURIComponent(token)}/game.js`);
+    const painted = await get(script.pathname);
+    assert.equal(painted.status, 200);
+    assert.equal(painted.body, 'paint();');
+    assert.equal(painted.headers['x-content-type-options'], 'nosniff');
+    assert.equal((await get(`/g/prev0001/1/index.html?pt=${token}`)).status, 200);
+    assert.equal((await get(`/g/prev0001/1/game.js?pt=${token}`)).status, 200);
+    assert.equal((await get('/g/prev0001/1/game.js')).status, 404);
+    for (const path of [
+      `/g/prev0001/2/~pt/${encodeURIComponent(token)}/index.html`,
+      `/g/prev0001/2/~pt/${encodeURIComponent(token)}/game.js`,
+      `/g/prev0001/~pt/${encodeURIComponent(token)}/thumb.webp`,
+      `/g/prev0001/1/~pt/${encodeURIComponent(token)}`,
+      '/g/prev0001/1/~pt/%/index.html',
+    ]) {
+      const missed = await get(path);
+      assert.equal(missed.status, 404, path);
+      assert.equal(missed.body.includes('BUNDLE-V1'), false, path);
+      assert.equal(missed.body.includes('BUNDLE-V2-FAILED'), false, path);
+    }
+    const rewritten = rewriteGameUrl(`/?__p=${encodeURIComponent(`prev0001/1/~pt/${token}/index.html`)}&embed=${encodeURIComponent(PORTAL)}`);
+    assert.equal(rewritten, `${docPath}?embed=${encodeURIComponent(PORTAL)}`);
+    assert.equal((await get(rewritten)).status, 200);
+    assert.equal((await get('/g/live0001/3/~pt/not-a-token/sprites/hero.png')).status, 404);
+    assert.equal((await get('/g/live0001/3/sprites/hero.png')).status, 200);
   });
 
   it('thumbnails keep their unversioned route — no redirect', async () => {

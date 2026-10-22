@@ -1,10 +1,12 @@
 import { execFileSync } from 'node:child_process';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { mkdirSync } from 'node:fs';
 import http from 'node:http';
 import { test, expect } from '@playwright/test';
 import postgres from 'postgres';
 import { createClient } from '@supabase/supabase-js';
 import { localSupabaseEnv } from '../scripts/lib/local-supabase.mjs';
+import { shotPath, SHOT_DIR } from './shots.mjs';
 
 const env = localSupabaseEnv();
 if (!['127.0.0.1', 'localhost'].includes(new URL(env.DATABASE_URL).hostname)) throw new Error('local Supabase only');
@@ -208,11 +210,11 @@ test('a logged-out visitor can play a valid preview and cannot find the game any
     await page.getByRole('button', { name: 'Play' }).click();
     const frame = page.locator('iframe.mg-frame');
     await expect(frame).toHaveAttribute('sandbox', 'allow-scripts allow-pointer-lock');
-    await expect(frame).toHaveAttribute('src', new RegExp(`/g/${gameId}/1/index.html`));
+    await expect(frame).toHaveAttribute('src', new RegExp(`/g/${gameId}/1/~pt/[^/]+/index\\.html`));
     const src = await frame.getAttribute('src');
     if (!src) throw new Error('preview frame has no source');
     const frameUrl = new URL(src);
-    expect(frameUrl.pathname).toBe(`/g/${gameId}/1/index.html`);
+    expect(frameUrl.pathname).toMatch(new RegExp(`^/g/${gameId}/1/~pt/[^/]+/index\\.html$`));
     const playedDoc = await page.request.get(src.split('#')[0]);
     expect(playedDoc.status()).toBe(200);
     const playedHtml = await playedDoc.text();
@@ -221,7 +223,7 @@ test('a logged-out visitor can play a valid preview and cannot find the game any
     expect(await (await page.request.get(`${CDN}/g/${gameId}/2/index.html${frameUrl.search}`)).text()).not.toContain('BUNDLE-V2-FAILED');
     expect(await (await page.request.get(`${CDN}/g/${gameId}/index.html${frameUrl.search}`)).text()).not.toContain('BUNDLE-V2-FAILED');
     await expect(page.frameLocator('iframe.mg-frame').locator('canvas').first()).toBeVisible();
-    const gameFrame = page.frames().find((f) => f.url().includes(`/g/${gameId}/1/index.html`));
+    const gameFrame = page.frames().find((f) => f.url().includes(`/g/${gameId}/1/`) && f.url().includes('/index.html'));
     if (!gameFrame) throw new Error('preview frame did not load');
     await page.evaluate(() => {
       window.__mgOverlay = false;
@@ -253,10 +255,7 @@ test('a logged-out visitor can play a valid preview and cannot find the game any
     expect(adOutcome).toContain('AD_BREAK_DONE');
     expect(adOutcome).toContain('REWARD_GRANTED');
     expect(sawOverlay).toBe(false);
-    const bare = new URL(src);
-    bare.search = '';
-    bare.hash = '';
-    expect((await page.request.get(bare.toString())).status()).toBe(404);
+    expect((await page.request.get(`${CDN}/g/${gameId}/1/index.html`)).status()).toBe(404);
 
     const unknown = `/p/${freshToken()}`;
     const paths = [unknown, `/p/${expired.token}`, `/p/${revoked.token}`, '/p/x', `/p/${'z'.repeat(80)}`];
@@ -327,6 +326,88 @@ test('a second loopback address keeps its own preview budget', async () => {
   for (let n = 0; n < 60; n += 1) expect(await statusFrom(`/p/${freshToken()}`, '127.0.0.1')).toBe(404);
   expect(await statusFrom(`/p/${freshToken()}`, '127.0.0.2')).toBe(404);
   expect(await statusFrom(`/p/${freshToken()}`, '127.0.0.1')).toBe(429);
+});
+
+test.describe('logged-out preview on a phone', () => {
+  test.use({
+    browserName: 'webkit',
+    viewport: { width: 390, height: 844 },
+    launchOptions: { args: [] },
+  });
+
+  test('a logged-out visitor gets a frame that paints', async ({ page }) => {
+    test.setTimeout(120_000);
+    const ownerId = randomUUID();
+    const gameId = `w${randomBytes(4).toString('hex')}`.slice(0, 12);
+    const handle = `wk${gameId}`.slice(0, 32);
+    const indexHtml = '<!doctype html><html><head><meta charset="utf-8"></head><body style="margin:0;background:#000"><canvas id="c" width="64" height="64" style="width:100%;height:100%;display:block"></canvas><script src="game.js"></script></body></html>';
+    const gameJs = '(()=>{const c=document.getElementById("c");const g=c.getContext("2d");g.fillStyle="#c4ff3d";g.fillRect(0,0,c.width,c.height);if(window.Meshground)window.Meshground.ready();})();';
+    const storage = createClient(env.PUBLIC_SUPABASE_URL, env.SUPABASE_SECRET_KEY, { auth: { persistSession: false } }).storage.from('games');
+    const scriptHits = [];
+    page.on('response', (res) => {
+      if (new URL(res.url()).pathname.endsWith('/game.js')) scriptHits.push(res.status());
+    });
+    try {
+      await sql`
+        insert into auth.users (instance_id, id, aud, role, email, encrypted_password, created_at, updated_at)
+        values ('00000000-0000-0000-0000-000000000000', ${ownerId}::uuid, 'authenticated', 'authenticated', ${`${ownerId}@example.test`}, '', now(), now())
+      `;
+      await sql`insert into public.profiles (id, handle) values (${ownerId}::uuid, ${handle})`;
+      await sql`
+        insert into public.games (id, slug, owner_id, creator, title, tags, stage)
+        values (${gameId}, ${gameId}, ${ownerId}::uuid, ${handle}, ${`Phone ${gameId}`}, '{}', 'pending')
+      `;
+      const [version] = await sql`
+        insert into public.game_validations (game_id, version, bundle_sha256, status)
+        values (${gameId}, 1, ${sha}, 'passed')
+        returning id
+      `;
+      for (const [path, body, type] of [
+        [`${gameId}/1/index.html`, indexHtml, 'text/html; charset=utf-8'],
+        [`${gameId}/1/game.js`, gameJs, 'text/javascript; charset=utf-8'],
+      ]) {
+        const uploaded = await storage.upload(path, Buffer.from(body), { contentType: type, upsert: true });
+        if (uploaded.error) throw uploaded.error;
+      }
+      await sql`
+        insert into public.game_assets (game_id, version, path, expected_type, status, size_bytes, content_at)
+        values (${gameId}, 1, 'game.js', 'text', 'uploaded', ${Buffer.byteLength(gameJs)}, now())
+      `;
+      const link = await mint(ownerId, version.id);
+      const opened = await page.goto(`/p/${link.token}`);
+      expect(opened?.status()).toBe(200);
+      await page.evaluate(() => {
+        window.__mgReady = new Promise((resolve) => {
+          const timer = setTimeout(() => resolve('timeout'), 8000);
+          window.addEventListener('message', (event) => {
+            if (event.data && event.data.type === '__MG_READY') {
+              clearTimeout(timer);
+              resolve('ready');
+            }
+          });
+        });
+      });
+      await page.getByRole('button', { name: 'Play' }).click();
+      await expect(page.locator('iframe.mg-frame')).toBeVisible();
+      expect(await page.evaluate(() => window.__mgReady)).toBe('ready');
+      expect(scriptHits).toContain(200);
+      const pixel = await page.frameLocator('iframe.mg-frame').locator('canvas').evaluate((canvas) => {
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return null;
+        const data = ctx.getImageData(2, 2, 1, 1).data;
+        return [data[0], data[1], data[2], data[3]];
+      });
+      expect(pixel).toEqual([196, 255, 61, 255]);
+      mkdirSync(SHOT_DIR, { recursive: true });
+      await page.screenshot({ path: shotPath('sl-6-webkit-390.png') });
+      await page.locator('iframe.mg-frame').screenshot({ path: shotPath('sl-6-webkit-390-frame.png') });
+    } finally {
+      await sql`delete from public.games where id = ${gameId}`.catch(() => {});
+      await sql`delete from public.profiles where id = ${ownerId}::uuid`.catch(() => {});
+      await sql`delete from auth.users where id = ${ownerId}::uuid`.catch(() => {});
+      await storage.remove([`${gameId}/1/index.html`, `${gameId}/1/game.js`]).catch(() => {});
+    }
+  });
 });
 
 test('a signed-in visitor without a handle still gets a preview miss', async ({ page }) => {

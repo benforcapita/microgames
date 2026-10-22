@@ -3,14 +3,18 @@
 // cookieless origin, never the portal's.
 //
 // SP-6 stage gate: /g/<id>/* is served only while the game is 'proving' or 'live' (server-side lookup,
-// cached ~30s). 'pending'/'rejected' (and unknown ids) are 404 unless the request carries `pt=<token>`
-// minted by the portal for the owner (cdn/preview-token.mjs, secret CDN_PREVIEW_SECRET). The CDN stays
-// cookieless: it never reads or sets cookies; the token travels in the query string.
+// cached ~30s). 'pending'/'rejected' (and unknown ids) are 404 unless the request carries a preview
+// token minted by the portal (cdn/preview-token.mjs, secret CDN_PREVIEW_SECRET). The CDN stays
+// cookieless: it never reads or sets cookies. Query `pt` authorizes that single URL. The player puts
+// the same token in `/~pt/<token>/` so a sandboxed document's relative URLs keep it: those requests
+// have no query and no referrer. A pinned token covers that version's uploaded files. A current
+// token covers the owner's bundle.
 // The document URL version is the latest validation version (default 1). reviewed_at is not a
 // version selector, and a review must not 404 an existing /1/ link.
 // A non-document asset does not trust the stage cache. Each request re-reads the asset row
 // joined to games.stage and games.reviewed_at, and serves it only when that stage is public
-// and content_at <= reviewed_at. content_at is set after the Storage copy, so an approval
+// and content_at <= reviewed_at, or the request's preview grant covers that version.
+// content_at is set after the Storage copy, so an approval
 // that lands during the copy does not cover the new bytes. A valid owner token (pt) is
 // never publicly cached.
 import crypto from 'node:crypto';
@@ -19,7 +23,7 @@ import { promisify } from 'node:util';
 import zlib from 'node:zlib';
 import { frameAncestors, matchEmbedder, parseOriginList } from './frame-ancestors.mjs';
 import { readPreviewGrant } from './preview-token.mjs';
-import { gameCsp, ownAssetSource } from './csp.mjs';
+import { gameCsp, ownAssetSource, PREVIEW_PATH_MARK, previewDocumentPath } from './csp.mjs';
 import { injectHead } from './inject.mjs';
 
 const BOOT = fs.readFileSync(new URL('./boot.js', import.meta.url), 'utf8');
@@ -64,6 +68,15 @@ const MAX_ASSET_DEPTH = 8;
 export function isTraversal(rawPath) {
   const p = String(rawPath ?? '');
   return /\\|\0|%(2e|2f|5c|25|00)/i.test(p) || p.split('/').some((seg) => seg === '..' || seg === '.');
+}
+
+function liftPreviewCredential(file, rest) {
+  if (rest[0] !== PREVIEW_PATH_MARK) return { file, rest, token: null, carried: false };
+  if (rest.length < 3) return null;
+  let token = rest[1];
+  try { token = decodeURIComponent(token); } catch { return null; }
+  if (!token || token.length > 200) return null;
+  return { file, rest: rest.slice(2), token, carried: true };
 }
 
 /** Parse `/g/<id>/<version>/<path...>`; null unless every part matches the allowlist. */
@@ -329,14 +342,18 @@ export function createHandler(cfg) {
       const url = new URL(req.url ?? '/', 'http://cdn');
       const [, scope, id, file, ...rest] = url.pathname.split('/');
       if (scope !== 'g' || !ID_RE.test(id ?? '')) return send(res, 404, 'Not found');
-      const asset = rest.length ? parseAssetPath([file, ...rest]) : null;
-      if (!asset && (!FILE_RE.test(file ?? '') || rest.length)) return send(res, 404, 'Not found');
+      const route = liftPreviewCredential(file, rest);
+      if (!route) return send(res, 404, 'Not found');
+      const asset = route.rest.length ? parseAssetPath([route.file, ...route.rest]) : null;
+      if (!asset && (!FILE_RE.test(route.file ?? '') || route.rest.length)) return send(res, 404, 'Not found');
 
       const stage = await gameStage(id);
-      const grant = stage !== null ? readPreviewGrant(PREVIEW_SECRET, id, url.searchParams.get('pt')) : null;
+      const token = route.carried ? route.token : url.searchParams.get('pt');
+      const grant = stage !== null ? readPreviewGrant(PREVIEW_SECRET, id, token) : null;
+      if (route.carried && !grant) return send(res, 404, 'Not found');
       const ownerPreview = grant?.kind === 'current';
-      const shareThisDoc = grant?.kind === 'pinned' && asset?.path === 'index.html' && asset.version === grant.version;
-      const preview = !PUBLIC_STAGES.has(stage ?? '') && (ownerPreview || shareThisDoc);
+      const pinnedHere = grant?.kind === 'pinned' && asset != null && asset.version === grant.version;
+      const preview = !PUBLIC_STAGES.has(stage ?? '') && (ownerPreview || pinnedHere);
       if (!stage || (!PUBLIC_STAGES.has(stage) && !preview)) return send(res, 404, 'Not found');
       const privateCache = grant ? { 'Cache-Control': 'private, no-store' } : null;
 
@@ -348,6 +365,16 @@ export function createHandler(cfg) {
         if (file === 'index.html') {
           if (grant?.kind === 'pinned') return send(res, 404, 'Not found');
           const version = await gameVersion(id);
+          if (grant?.kind === 'current') {
+            const params = new URLSearchParams(url.searchParams);
+            params.delete('pt');
+            const qs = params.toString();
+            return send(res, 302, undefined, {
+              Location: `${previewDocumentPath(id, version, url.searchParams.get('pt') ?? '')}${qs ? `?${qs}` : ''}`,
+              'Cache-Control': 'no-cache',
+              ...privateCache,
+            });
+          }
           return send(res, 302, undefined, {
             Location: `/g/${id}/${version}/index.html${url.search}`,
             'Cache-Control': 'no-cache',
@@ -371,7 +398,7 @@ export function createHandler(cfg) {
         const row = await assetRow(id, asset.version, asset.path);
         if (!row || row.status !== 'uploaded') return send(res, 404, 'Not found');
         if (!assetIsPublic(row)) {
-          if (!ownerPreview) return send(res, 404, 'Not found');
+          if (!ownerPreview && !pinnedHere) return send(res, 404, 'Not found');
           ownerOnly = { 'Cache-Control': 'private, no-store' };
         }
         contentAt = row.content_at == null ? '' : String(row.content_at);

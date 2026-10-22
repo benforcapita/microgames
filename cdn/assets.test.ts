@@ -121,6 +121,14 @@ describe('AS-3 versioned asset serving', () => {
     assert.equal(r.status, 200);
     assert.equal(r.headers['cache-control'], 'private, no-store');
     assert.equal(r.headers['x-content-type-options'], 'nosniff');
+    const pinned = mintPreviewToken(SECRET, 'pend0001', { version: 1 })!;
+    const same = await get(`/g/pend0001/1/~pt/${encodeURIComponent(pinned)}/sprites/hero.png`);
+    assert.equal(same.status, 200);
+    assert.equal(same.body, 'PNGDATA');
+    assert.equal(same.headers['cache-control'], 'private, no-store');
+    const other = mintPreviewToken(SECRET, 'pend0001', { version: 2 })!;
+    assert.equal((await get(`/g/pend0001/1/sprites/hero.png?pt=${other}`)).status, 404);
+    assert.equal((await get(`/g/pend0001/1/~pt/${encodeURIComponent(other)}/sprites/hero.png`)).status, 404);
   });
   it('a valid owner token is private no-store even when the game is already public', async () => {
     const { get } = harness();

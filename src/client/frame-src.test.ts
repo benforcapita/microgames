@@ -38,7 +38,14 @@ describe('gameFrameSrc preview token (SP-6)', () => {
   it('loads the linked bundle version instead of the unversioned document', () => {
     assert.equal(
       gameFrameSrc('http://c', 'g1', 'http://p', '{}', '1700000000.1.sig', 1),
-      'http://c/g/g1/1/index.html?embed=http%3A%2F%2Fp&pt=1700000000.1.sig#mgs=%7B%7D',
+      'http://c/g/g1/1/~pt/1700000000.1.sig/index.html?embed=http%3A%2F%2Fp#mgs=%7B%7D',
+    );
+  });
+
+  it('leaves a versioned document on the public path when there is no preview token', () => {
+    assert.equal(
+      gameFrameSrc('http://c', 'g1', 'http://p', '{}', null, 2),
+      'http://c/g/g1/2/index.html?embed=http%3A%2F%2Fp#mgs=%7B%7D',
     );
   });
 });

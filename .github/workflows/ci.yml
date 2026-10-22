@@ -83,8 +83,8 @@ jobs:
         run: node --input-type=module -e "import fs from 'node:fs'; import { localSupabaseEnv } from './scripts/lib/local-supabase.mjs'; const env = localSupabaseEnv(); for (const k of ['PUBLIC_SUPABASE_URL', 'PUBLIC_SUPABASE_PUBLISHABLE_KEY', 'SUPABASE_SECRET_KEY', 'DATABASE_URL', 'MAILPIT_URL']) { const v = env[k]; if (!v) { if (k === 'MAILPIT_URL') continue; console.error('missing ' + k + ' from supabase status'); process.exit(1); } if (['PUBLIC_SUPABASE_PUBLISHABLE_KEY', 'SUPABASE_SECRET_KEY', 'DATABASE_URL'].includes(k)) console.log('::add-mask::' + v); fs.appendFileSync(process.env.GITHUB_ENV, k + '=' + v + '\n'); }"
       - name: Smoke
         run: npm run smoke
-      - name: Install Playwright Chromium
-        run: npx playwright install --with-deps chromium
+      - name: Install Playwright Chromium and WebKit
+        run: npx playwright install --with-deps chromium webkit
       - name: DB tests
         shell: bash
         run: npm test 2>&1 | tee "$RUNNER_TEMP/db-tests.tap"
@@ -102,6 +102,12 @@ jobs:
         with:
           name: sl3-screenshots-${{ matrix.run }}
           path: test-results/screenshots/sl-3-*.png
+      - name: Upload SL-6 screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sl6-screenshots-${{ matrix.run }}
+          path: test-results/screenshots/sl-6-*.png
       - name: Stop local Supabase
         if: always()
         run: supabase stop
