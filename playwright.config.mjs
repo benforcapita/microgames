@@ -29,6 +29,18 @@ export default defineConfig({
   timeout: 60_000,
   workers: 1,
   reporter: 'list',
+  projects: [
+    { name: 'chromium', testIgnore: /preview-play-phone\.spec\.mjs/ },
+    {
+      name: 'webkit-phone',
+      testMatch: /preview-play-phone\.spec\.mjs/,
+      use: {
+        browserName: 'webkit',
+        viewport: { width: 390, height: 844 },
+        launchOptions: { args: [] },
+      },
+    },
+  ],
   use: {
     baseURL: WEB,
     browserName: 'chromium',
