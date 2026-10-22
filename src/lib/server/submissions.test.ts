@@ -416,9 +416,16 @@ describe('submission page', () => {
   it('has no publish control', () => {
     const page = readFileSync(new URL('../../pages/submissions/[id].astro', import.meta.url), 'utf8');
     const route = readFileSync(new URL('../../pages/api/submissions/[id].ts', import.meta.url), 'utf8');
+    const previewLinks = readFileSync(new URL('../../components/PreviewLinks.astro', import.meta.url), 'utf8');
     assert.doesNotMatch(page, /<button|\/publish|Publish to/);
     assert.match(page, /\/api\/submissions\//);
     assert.match(route, /handleSubmissionStatus/);
     assert.doesNotMatch(route, /publish/i);
+    assert.doesNotMatch(previewLinks, /\/publish|Publish to/i);
+    const buttonLabels = new Set([
+      ...[...previewLinks.matchAll(/<button[^>]*>([^<]+)<\/button>/g)].map((m) => m[1].trim()),
+      ...[...previewLinks.matchAll(/\b\w*(?:btn|button)\w*\.textContent\s*=\s*['"]([^'"]+)['"]/gi)].map((m) => m[1].trim()),
+    ]);
+    assert.deepEqual(buttonLabels, new Set(['Share preview', 'Copy', 'Revoke']));
   });
 });

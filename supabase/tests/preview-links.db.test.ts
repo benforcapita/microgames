@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { describe, it } from 'node:test';
+import { after, describe, it } from 'node:test';
 import postgres from 'postgres';
 
 type Sql = postgres.Sql | postgres.TransactionSql;
@@ -147,6 +147,13 @@ async function waitForLocks(probe: postgres.Sql, pids: number[]): Promise<void> 
 }
 
 describe('preview links', () => {
+  after(async () => {
+    const g = globalThis as typeof globalThis & { __mgSql?: postgres.Sql };
+    if (!g.__mgSql) return;
+    const { sql: appSql } = await import('../../src/lib/server/db.ts');
+    await appSql.end({ timeout: 1 }).catch(() => {});
+  });
+
   db('expires on the timestamp and resolves one microsecond later', async (sql) => {
     await rollback(sql, async (tx) => {
       const { ownerId, versionId, gameId } = await seed(tx);
@@ -1062,7 +1069,6 @@ describe('preview links', () => {
     process.env.PUBLIC_SUPABASE_PUBLISHABLE_KEY ??= 'test';
     process.env.SUPABASE_SECRET_KEY ??= 'test';
     const { listGames, listGamesByIds, listTags, getGame, platformStats } = await import('../../src/lib/server/games.ts');
-    const { sql: appSql } = await import('../../src/lib/server/db.ts');
     const ownerId = randomUUID();
     const gameId = `pl${randomUUID().replaceAll('-', '').slice(0, 10)}`;
     const liveId = `lv${randomUUID().replaceAll('-', '').slice(0, 10)}`;
@@ -1135,7 +1141,67 @@ describe('preview links', () => {
       });
     } finally {
       await sql`delete from auth.users where id = ${ownerId}::uuid`;
-      await appSql.end({ timeout: 1 }).catch(() => {});
+    }
+  });
+
+  db('pins 404 for malformed link id, unvalidated game, and revoke RPC errors', async (sql) => {
+    const dbUrl = localDbUrl();
+    if (!dbUrl) return;
+    process.env.DATABASE_URL ??= dbUrl;
+    process.env.PUBLIC_SUPABASE_URL ??= 'http://127.0.0.1:54321';
+    process.env.PUBLIC_SUPABASE_PUBLISHABLE_KEY ??= 'test';
+    process.env.SUPABASE_SECRET_KEY ??= 'test';
+    const { createPreviewLink, revokePreviewLink } = await import('../../src/lib/server/preview-links.ts');
+    const ownerId = randomUUID();
+    const gameId = `pl${randomUUID().replaceAll('-', '').slice(0, 10)}`;
+    const unvalidatedGameId = `nv${randomUUID().replaceAll('-', '').slice(0, 10)}`;
+    try {
+      await sql`
+        insert into auth.users (instance_id, id, aud, role, email, encrypted_password, created_at, updated_at)
+        values ('00000000-0000-0000-0000-000000000000', ${ownerId}::uuid, 'authenticated', 'authenticated', ${`${ownerId}@example.test`}, '', now(), now())
+      `;
+      await sql`insert into public.profiles (id, handle) values (${ownerId}::uuid, ${`h${gameId.slice(2)}`})`;
+      await sql`
+        insert into public.games (id, slug, owner_id, creator, title, stage)
+        values
+          (${gameId}, ${gameId}, ${ownerId}::uuid, 'creator', 'Preview Game', 'pending'),
+          (${unvalidatedGameId}, ${unvalidatedGameId}, ${ownerId}::uuid, 'creator', 'Unvalidated Game', 'pending')
+      `;
+      const [version] = await sql<{ id: string }[]>`
+        insert into public.game_validations (game_id, version, bundle_sha256, status)
+        values (${gameId}, 1, ${bundle('56')}, 'passed')
+        returning id
+      `;
+      const link = await sql.begin((tx) => mint(tx, ownerId, version.id));
+
+      const mockSupabase = {
+        rpc: async () => ({ data: null, error: new Error('rpc failure') }),
+      } as unknown as Parameters<typeof revokePreviewLink>[0]['supabase'];
+
+      const malformedRes = await revokePreviewLink({
+        supabase: mockSupabase,
+        gameId,
+        linkId: 'not-a-uuid',
+        userId: ownerId,
+      });
+      assert.deepEqual(malformedRes, { kind: 'error', status: 404, message: 'Not found' });
+
+      const noValidationRes = await createPreviewLink({
+        supabase: mockSupabase,
+        gameId: unvalidatedGameId,
+        userId: ownerId,
+      });
+      assert.deepEqual(noValidationRes, { kind: 'error', status: 404, message: 'Not found' });
+
+      const rpcErrorRes = await revokePreviewLink({
+        supabase: mockSupabase,
+        gameId,
+        linkId: link.id,
+        userId: ownerId,
+      });
+      assert.deepEqual(rpcErrorRes, { kind: 'error', status: 404, message: 'Not found' });
+    } finally {
+      await sql`delete from auth.users where id = ${ownerId}::uuid`;
     }
   });
 });
