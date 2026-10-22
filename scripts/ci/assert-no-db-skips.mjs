@@ -22,12 +22,8 @@ export const ALLOWLIST = [
   },
 ];
 
-export const TODO_ALLOWLIST = [
-  {
-    name: 'the share-link caps return 429 for an eleventh create in an hour and a sixty-first open in a minute',
-    prs: ['#114'],
-  },
-];
+/** @type {{ name: string, prs: string[] }[]} */
+export const TODO_ALLOWLIST = [];
 
 function todoBound(name, description, todos) {
   const entry = todos.find((item) => item.name === name);

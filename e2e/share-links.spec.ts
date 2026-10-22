@@ -14,8 +14,18 @@ function databaseUrl(value: unknown): string {
 
 const sql = postgres(databaseUrl(localSupabaseEnv()), { max: 1, onnotice: () => {} });
 
-function pending(description: string): { annotation: { type: string; description: string } } {
-  return { annotation: { type: 'todo', description } };
+function jsonError(value: unknown): string {
+  if (typeof value !== 'object' || value === null || !('error' in value) || typeof value.error !== 'string') {
+    throw new Error('response has no error');
+  }
+  return value.error;
+}
+
+function jsonId(value: unknown): string {
+  if (typeof value !== 'object' || value === null || !('id' in value) || typeof value.id !== 'string' || value.id.length === 0) {
+    throw new Error('response has no id');
+  }
+  return value.id;
 }
 
 async function asOwner(tx: postgres.TransactionSql, ownerId: string): Promise<void> {
@@ -250,11 +260,77 @@ test('a bad preview link, an expired preview link, and a revoked preview link re
   });
 });
 
-test.fixme(
-  'the share-link caps return 429 for an eleventh create in an hour and a sixty-first open in a minute',
-  pending('SL-3 (#114): the create-cap HTTP 429 is not on main yet'),
-  async () => {},
-);
+test('the share-link caps return 429 for an eleventh create in an hour and a sixty-first open in a minute', async ({ page }) => {
+  test.setTimeout(180_000);
+  const stamp = randomBytes(4).toString('hex');
+  const handle = `c${stamp}`;
+  const email = `${handle}@example.test`;
+  const gameId = `g${stamp}`;
+  const hourMessage = "You've created 10 preview links in the last hour. Try again later.";
+  let ownerId = '';
+  try {
+    await page.goto('/login?mode=signup&next=/me');
+    await page.locator('input[name="email"]').fill(email);
+    await page.locator('input[name="password"]').fill('testpass1');
+    await page.getByRole('button', { name: 'Sign up' }).click();
+    await page.waitForURL(/\/onboarding/);
+    await page.locator('input[name="handle"]').fill(handle);
+    await page.getByRole('button', { name: 'Claim handle' }).click();
+    await page.waitForURL(/\/me$/);
+    const [profile] = await sql<{ id: string }[]>`select id from public.profiles where handle = ${handle}`;
+    if (!profile) throw new Error('signed-up profile was not created');
+    ownerId = profile.id;
+    await sql`
+      insert into public.games (id, slug, owner_id, creator, title, stage)
+      values (${gameId}, ${gameId}, ${ownerId}::uuid, ${handle}, ${`Cap ${stamp}`}, 'pending')
+    `;
+    await sql`
+      insert into public.game_validations (game_id, version, bundle_sha256, status)
+      values (${gameId}, 1, ${'cd'.repeat(32)}, 'passed')
+    `;
+    const origin = new URL(page.url()).origin;
+    const active: string[] = [];
+    for (let n = 0; n < 10; n += 1) {
+      if (active.length === 4) {
+        const id = active.shift();
+        if (!id) throw new Error('active preview link is missing');
+        const revoked = await page.request.post(`/api/submissions/${gameId}/preview-links/${id}/revoke`, {
+          headers: { Origin: origin },
+        });
+        expect(revoked.status(), `revoke before create ${n + 1}`).toBe(200);
+      }
+      const created = await page.request.post(`/api/submissions/${gameId}/preview-links`, {
+        headers: { Origin: origin },
+      });
+      expect(created.status(), `create ${n + 1}`).toBe(201);
+      active.push(jsonId(await created.json()));
+    }
+    const blocked = await page.request.post(`/api/submissions/${gameId}/preview-links`, {
+      headers: { Origin: origin },
+    });
+    expect(blocked.status()).toBe(429);
+    expect(jsonError(await blocked.json())).toBe(hourMessage);
+    const [row] = await sql<{ n: number }[]>`
+      select count(*)::int as n from public.preview_links where owner_id = ${ownerId}::uuid
+    `;
+    if (!row) throw new Error('preview link count is missing');
+    expect(row.n).toBe(10);
+
+    await sql`delete from public.preview_page_hits`;
+    for (let n = 0; n < 60; n += 1) {
+      const opened = await page.request.get(`/p/${randomBytes(32).toString('base64url')}`);
+      expect(opened.status(), `open ${n + 1}`).toBe(404);
+    }
+    const limited = await page.request.get(`/p/${randomBytes(32).toString('base64url')}`);
+    expect(limited.status()).toBe(429);
+    expect(await limited.text()).toBe('Too many requests');
+    expect(limited.headers()['x-robots-tag']).toBe('noindex, nofollow');
+  } finally {
+    if (ownerId) await sql`delete from auth.users where id = ${ownerId}::uuid`;
+    else await sql`delete from auth.users where email = ${email}`;
+    await sql`delete from public.preview_page_hits`;
+  }
+});
 
 test('a preview response sends noindex, no-referrer, nosniff, and does not allow a shared cache', async ({ request }) => {
   const listed = await request.get('/games');

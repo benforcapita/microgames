@@ -991,24 +991,18 @@ console.log(JSON.stringify({ ok }));`;
       ]);
     }
 
-    it('TODO_ALLOWLIST is the create-cap test and pull request #114', () => {
-      assert.deepStrictEqual(
-        TODO_ALLOWLIST.map((entry) => [entry.name, entry.prs]),
-        [
-          ['the share-link caps return 429 for an eleventh create in an hour and a sixty-first open in a minute', ['#114']],
-        ],
-      );
+    const capTodo = 'the share-link caps return 429 for an eleventh create in an hour and a sixty-first open in a minute';
+
+    it('TODO_ALLOWLIST is empty', () => {
+      assert.deepStrictEqual(TODO_ALLOWLIST, []);
     });
 
-    it('a skipped test named in TODO_ALLOWLIST exits 0 when its note names the pull request', () => {
-      const entry = TODO_ALLOWLIST[0];
-      if (!entry) throw new Error('TODO_ALLOWLIST is empty');
-      const res = runJsonFixture(skippedWith(entry.name, [
-        { type: 'todo', description: `waiting on ${entry.prs[0]}` },
+    it('a skipped create-cap todo exits 1', () => {
+      const res = runJsonFixture(skippedWith(capTodo, [
+        { type: 'todo', description: 'waiting on #114' },
       ]));
-      assert.equal(res.status, 0);
-      assert.match(res.stdout, /^OK: 1 tests; allowed skips: /);
-      assert.equal(res.stderr, '');
+      assert.equal(res.status, 1);
+      assert.match(res.stderr, /todo is not bound to its pull request/);
     });
 
     it('a skipped todo whose name is not in TODO_ALLOWLIST exits 1', () => {
@@ -1020,27 +1014,20 @@ console.log(JSON.stringify({ ok }));`;
       assert.match(res.stderr, new RegExp(title));
     });
 
-    it('a skipped todo named in TODO_ALLOWLIST exits 1 when the pull request is missing', () => {
-      const entry = TODO_ALLOWLIST[0];
-      if (!entry) throw new Error('TODO_ALLOWLIST is empty');
-      const res = runJsonFixture(skippedWith(entry.name, [
-        { type: 'todo', description: 'the preview page is not on main yet' },
-      ]));
-      assert.equal(res.status, 1);
-      assert.match(res.stderr, /todo is not bound to its pull request/);
+    it('a todo skip exits 0 when the passed list names the test and the note names the pull request', () => {
+      const bound = checkPlaywrightJson(skippedWith(capTodo, [
+        { type: 'todo', description: 'waiting on #114' },
+      ]), ALLOWLIST, [{ name: capTodo, prs: ['#114'] }]);
+      assert.equal(bound.ok, true);
+      assert.deepStrictEqual(bound.errors, []);
     });
 
-    it('the cap todo exits 1 until #114 is named', () => {
-      const entry = TODO_ALLOWLIST.find((item) => item.prs.includes('#114'));
-      if (!entry) throw new Error('cap todo is missing');
-      const other = runJsonFixture(skippedWith(entry.name, [
-        { type: 'todo', description: 'waiting on #115' },
-      ]));
-      assert.equal(other.status, 1);
-      const named = runJsonFixture(skippedWith(entry.name, [
-        { type: 'todo', description: 'waiting on #114' },
-      ]));
-      assert.equal(named.status, 0);
+    it('a todo skip stays failed when the note omits the pull request', () => {
+      const unbound = checkPlaywrightJson(skippedWith(capTodo, [
+        { type: 'todo', description: 'the preview page is not on main yet' },
+      ]), ALLOWLIST, [{ name: capTodo, prs: ['#114'] }]);
+      assert.equal(unbound.ok, false);
+      assert.ok(unbound.errors.some((error) => String(error).includes('todo is not bound to its pull request')));
     });
 
     it('a skipped test with an empty todo description exits 1', () => {
