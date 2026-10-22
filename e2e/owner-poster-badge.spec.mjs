@@ -51,7 +51,7 @@ test('owner sees the pending poster (200), anon gets 404, and "Awaiting review" 
   // Submission page: the badge appears exactly once.
   await page.reload();
   await expect(page.locator('#submission .head').getByText('Awaiting review', { exact: true })).toHaveCount(1);
-  await page.locator('#submission .head').screenshot({ path: shotPath('mr-2-submission-badge.png') });
+  await page.locator('#submission .head').filter({ hasText: 'Awaiting review' }).screenshot({ path: shotPath('mr-2-submission-badge.png') });
 
   // Owner play page: the poster URL carries the preview token and the CDN serves it.
   await page.goto(`/play/${row.slug}`);
