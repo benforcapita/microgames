@@ -99,7 +99,7 @@ describe('allowlist comes from the CDN CSP (cdn/csp.mjs)', () => {
   });
   it('keeps the production CSP header byte-identical to before the refactor', () => {
     const LIB = 'https://cdn.jsdelivr.net https://unpkg.com https://esm.sh https://cdnjs.cloudflare.com https://ga.jspm.io';
-    const before = ['sandbox allow-scripts allow-pointer-lock', "default-src 'none'", `script-src 'unsafe-inline' 'unsafe-eval' blob: ${LIB}`,
+    const before = ['sandbox allow-scripts allow-pointer-lock', "default-src 'none'", `script-src 'unsafe-inline' 'unsafe-eval' data: blob: ${LIB}`,
       `style-src 'unsafe-inline' ${LIB} https://fonts.googleapis.com`, `font-src data: ${LIB} https://fonts.gstatic.com`, `img-src data: blob: ${LIB}`,
       'media-src data: blob:', `connect-src data: blob: ${LIB}`, 'worker-src blob:', "form-action 'none'", "base-uri 'none'", 'frame-ancestors X'].join('; ');
     assert.equal(gameCsp('X'), before);

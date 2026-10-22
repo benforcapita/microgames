@@ -35,7 +35,7 @@ export const gameCsp = (ancestors, own = '') => {
   return [
     'sandbox allow-scripts allow-pointer-lock',
     "default-src 'none'",
-    `script-src 'unsafe-inline' 'unsafe-eval' blob: ${CSP_SOURCES.script.join(' ')}${o}`,
+    `script-src 'unsafe-inline' 'unsafe-eval' data: blob: ${CSP_SOURCES.script.join(' ')}${o}`,
     `style-src 'unsafe-inline' ${CSP_SOURCES.style.join(' ')}${o}`,
     `font-src data: ${CSP_SOURCES.font.join(' ')}${o}`,
     `img-src data: blob: ${CSP_SOURCES.img.join(' ')}${o}`,
