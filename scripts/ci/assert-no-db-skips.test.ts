@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { ALLOWLIST, TODO_ALLOWLIST, checkPlaywrightJson } from './assert-no-db-skips.mjs';
+import { ALLOWLIST, checkPlaywrightJson } from './assert-no-db-skips.mjs';
 
 const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url));
 const GUARD_URL = pathToFileURL(path.join(REPO_ROOT, 'scripts/ci/assert-no-db-skips.mjs')).href;
@@ -991,43 +991,13 @@ console.log(JSON.stringify({ ok }));`;
       ]);
     }
 
-    const capTodo = 'the share-link caps return 429 for an eleventh create in an hour and a sixty-first open in a minute';
-
-    it('TODO_ALLOWLIST is empty', () => {
-      assert.deepStrictEqual(TODO_ALLOWLIST, []);
-    });
-
-    it('a skipped create-cap todo exits 1', () => {
-      const res = runJsonFixture(skippedWith(capTodo, [
-        { type: 'todo', description: 'waiting on #114' },
-      ]));
-      assert.equal(res.status, 1);
-      assert.match(res.stderr, /todo is not bound to its pull request/);
-    });
-
-    it('a skipped todo whose name is not in TODO_ALLOWLIST exits 1', () => {
+    it('a skipped todo annotation exits 1', () => {
       const title = 'a preview page is noindex';
       const res = runJsonFixture(skippedWith(title, [
         { type: 'todo', description: 'waiting on #115' },
       ]));
       assert.equal(res.status, 1);
       assert.match(res.stderr, new RegExp(title));
-    });
-
-    it('a todo skip exits 0 when the passed list names the test and the note names the pull request', () => {
-      const bound = checkPlaywrightJson(skippedWith(capTodo, [
-        { type: 'todo', description: 'waiting on #114' },
-      ]), ALLOWLIST, [{ name: capTodo, prs: ['#114'] }]);
-      assert.equal(bound.ok, true);
-      assert.deepStrictEqual(bound.errors, []);
-    });
-
-    it('a todo skip stays failed when the note omits the pull request', () => {
-      const unbound = checkPlaywrightJson(skippedWith(capTodo, [
-        { type: 'todo', description: 'the preview page is not on main yet' },
-      ]), ALLOWLIST, [{ name: capTodo, prs: ['#114'] }]);
-      assert.equal(unbound.ok, false);
-      assert.ok(unbound.errors.some((error) => String(error).includes('todo is not bound to its pull request')));
     });
 
     it('a skipped test with an empty todo description exits 1', () => {

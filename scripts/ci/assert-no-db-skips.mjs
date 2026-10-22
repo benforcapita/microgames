@@ -22,14 +22,6 @@ export const ALLOWLIST = [
   },
 ];
 
-/** @type {{ name: string, prs: string[] }[]} */
-export const TODO_ALLOWLIST = [];
-
-function todoBound(name, description, todos) {
-  const entry = todos.find((item) => item.name === name);
-  return !!entry && entry.prs.every((pr) => description.includes(pr));
-}
-
 function applySkip(name, reason, allowlist, allowed, errors) {
   const entry = allowlist.find((e) => e.name === name);
   if (entry && (allowed.get(entry.name) ?? 0) < entry.max) {
@@ -88,9 +80,8 @@ export function checkTap(content, allowlist = ALLOWLIST) {
  * Parses Playwright JSON test report and asserts that no disallowed skips or unexpected failures occurred and tests ran.
  * @param {string | object} content
  * @param {typeof ALLOWLIST} [allowlist]
- * @param {typeof TODO_ALLOWLIST} [todos]
  */
-export function checkPlaywrightJson(content, allowlist = ALLOWLIST, todos = TODO_ALLOWLIST) {
+export function checkPlaywrightJson(content, allowlist = ALLOWLIST) {
   const allowed = new Map(allowlist.map((e) => [e.name, 0]));
   const errors = [];
 
@@ -165,16 +156,9 @@ export function checkPlaywrightJson(content, allowlist = ALLOWLIST, todos = TODO
             }
             if (isSkipped) {
               const annotations = Array.isArray(test.annotations) ? test.annotations : [];
-              const todo = annotations.find((a) => a?.type === 'todo' && typeof a.description === 'string' && a.description.trim().length > 0);
-              if (todo) {
-                if (!todoBound(name, todo.description, todos)) {
-                  errors.push(`${name}: todo is not bound to its pull request`);
-                }
-              } else {
-                const skipAnnotation = annotations.find((a) => a?.type === 'skip' || a?.type === 'fixme');
-                const reason = skipAnnotation?.description?.trim() || 'skipped';
-                applySkip(name, reason, allowlist, allowed, errors);
-              }
+              const skipAnnotation = annotations.find((a) => a?.type === 'skip' || a?.type === 'fixme');
+              const reason = skipAnnotation?.description?.trim() || 'skipped';
+              applySkip(name, reason, allowlist, allowed, errors);
             }
           }
         }
