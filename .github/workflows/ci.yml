@@ -42,15 +42,37 @@ jobs:
   db-e2e:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        run: [1, 2, 3]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-      - uses: supabase/setup-cli@v1
+      - name: Cache Supabase CLI
+        id: supabase-cli
+        uses: actions/cache@v4
+        with:
+          path: ~/supabase-cli
+          key: supabase-cli-${{ runner.os }}-2.120.0
+      - name: Install Supabase CLI
+        if: steps.supabase-cli.outputs.cache-hit != 'true'
+        uses: supabase/setup-cli@v1
         with:
           version: 2.120.0
+      - name: Place Supabase CLI on PATH
+        run: |
+          dir="$HOME/supabase-cli"
+          if [ ! -x "$dir/supabase" ]; then
+            mkdir -p "$dir"
+            install -m 755 "$(command -v supabase)" "$dir/supabase"
+          fi
+          echo "$dir" >> "$GITHUB_PATH"
+      - name: Assert Supabase CLI version
+        run: test "$(supabase --version)" = "2.120.0"
       - run: npm ci
       # Discard stdout: supabase start prints local anon/service keys and JWTs; errors on stderr still show.
       # Mail (mailpit) is required for smoke and must not be excluded.
@@ -78,7 +100,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: sl3-screenshots
+          name: sl3-screenshots-${{ matrix.run }}
           path: test-results/screenshots/sl-3-*.png
       - name: Stop local Supabase
         if: always()

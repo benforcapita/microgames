@@ -3,8 +3,10 @@ from __future__ import annotations
 import hashlib
 import re
 import secrets
-from collections.abc import Sequence
-from typing import Literal, NamedTuple, Protocol
+from collections.abc import Iterator, Sequence
+from typing import Literal, NamedTuple, Protocol, runtime_checkable
+
+import httpx
 
 
 class _Caps(NamedTuple):
@@ -39,8 +41,53 @@ class ByteSource(Protocol):
     def read(self, n: int) -> bytes: ...
 
 
+@runtime_checkable
+class _Closeable(Protocol):
+    def close(self) -> None: ...
+
+
 class Transport(Protocol):
     def open(self, path: str) -> ByteSource: ...
+
+
+class HttpxTransport:
+    __slots__ = ("_base", "_client")
+
+    def __init__(self, *, client: httpx.Client, base_url: str) -> None:
+        object.__setattr__(self, "_client", client)
+        object.__setattr__(self, "_base", base_url.rstrip("/") + "/")
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise AttributeError(name)
+
+    def open(self, path: str) -> _HttpxBody:
+        request = self._client.build_request("GET", self._base + path)
+        return _HttpxBody(self._client.send(request, stream=True))
+
+
+class _HttpxBody:
+    __slots__ = ("_buf", "_chunks", "_response", "status")
+
+    def __init__(self, response: httpx.Response) -> None:
+        self._response = response
+        self.status = response.status_code
+        self._chunks: Iterator[bytes] = (
+            iter((response.content,)) if response.is_stream_consumed else response.iter_raw()
+        )
+        self._buf = bytearray()
+
+    def read(self, n: int) -> bytes:
+        while len(self._buf) < n:
+            chunk = next(self._chunks, None)
+            if chunk is None:
+                break
+            self._buf += chunk
+        out = bytes(self._buf[:n])
+        del self._buf[:n]
+        return out
+
+    def close(self) -> None:
+        self._response.close()
 
 
 class DownloadedFile:
@@ -119,20 +166,24 @@ def _same_hash(actual: str, expected: str) -> bool:
 
 
 def _path_ok(path: str) -> bool:
-    return 1 <= len(path) <= 512 and _PATH.search(path) is None
+    return 1 <= len(path) <= 512 and "\x00" not in path and _PATH.search(path) is None
 
 
 def _read_limited(source: ByteSource, limit: int) -> bytes | None:
-    buf = bytearray()
-    while len(buf) <= limit:
-        need = limit + 1 - len(buf)
-        chunk = source.read(need)
-        if len(chunk) > need:
-            chunk = chunk[:need]
-        if chunk == b"":
-            return bytes(buf)
-        buf += chunk
-    return None
+    try:
+        buf = bytearray()
+        while len(buf) <= limit:
+            need = limit + 1 - len(buf)
+            chunk = source.read(need)
+            if len(chunk) > need:
+                chunk = chunk[:need]
+            if chunk == b"":
+                return bytes(buf)
+            buf += chunk
+        return None
+    finally:
+        if isinstance(source, _Closeable):
+            source.close()
 
 
 __all__ = (
@@ -142,6 +193,7 @@ __all__ = (
     "DownloadOk",
     "DownloadedFile",
     "FileRequest",
+    "HttpxTransport",
     "Transport",
     "download_files",
 )

@@ -49,6 +49,7 @@ Astro.response.headers.set('Cache-Control', 'private, no-store');
       data-game-id={play.gameId}
       data-game-title={play.title}
       data-game-stage="pending"
+      data-game-version={play.version}
       data-cdn={CDN_ORIGIN}
       data-preview={play.previewToken}
     >
@@ -90,11 +91,13 @@ Astro.response.headers.set('Cache-Control', 'private, no-store');
   const stage = document.getElementById('stage');
   const button = stage?.querySelector('button');
   if (stage && button) {
-    const { gameId, gameTitle, cdn, preview } = stage.dataset;
+    const { gameId, gameTitle, cdn, preview, gameVersion } = stage.dataset;
+    const bundleVersion = Number(gameVersion);
     button.addEventListener('click', () => {
       const player = mountPlayer(stage, { id: gameId ?? '', title: gameTitle ?? '', stage: 'pending' }, {
         cdnOrigin: cdn ?? '',
         previewToken: preview || null,
+        bundleVersion: Number.isSafeInteger(bundleVersion) ? bundleVersion : undefined,
       });
       player.frame.focus();
     });

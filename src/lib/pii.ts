@@ -116,10 +116,15 @@ export function containsPii(s: string): boolean {
 
 export const REDACTED = '[redacted]';
 
-const PREVIEW_LINK = /\/p\/(?![^/?#\s"'<>]*[.\[][^/?#\s"'<>]*)[^/?#\s"'<>]+/g;
+const PREVIEW_SLASH = String.raw`(?:\\?/|%(?:25)*2[Ff])`;
 
 export function redactPreviewLink(s: string): string {
-  return s.replace(PREVIEW_LINK, `/p/${REDACTED}`);
+  const link = new RegExp(String.raw`(${PREVIEW_SLASH})[pP]${PREVIEW_SLASH}[A-Za-z0-9_-]+`, 'g');
+  return s.replace(link, (match) => {
+    const cut = match.search(/[pP]/);
+    const slash = match.slice(0, cut);
+    return `${slash}p${slash}${REDACTED}`;
+  });
 }
 
 /**

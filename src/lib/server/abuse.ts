@@ -314,8 +314,9 @@ export async function admitPreviewPage(
   tx: postgres.TransactionSql,
   ip: string,
   now = Date.now(),
+  secretOverride?: string,
 ): Promise<boolean> {
-  const secret = process.env.MG_IP_HASH_SECRET?.trim();
+  const secret = (secretOverride ?? process.env.MG_IP_HASH_SECRET)?.trim();
   if (!secret || secret.length < 32) throw new Error('Missing required env var MG_IP_HASH_SECRET (see .env.example)');
   const at = new Date(now);
   const subject = sessionIpSubject(ip, secret, at);

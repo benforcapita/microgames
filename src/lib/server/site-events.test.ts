@@ -162,6 +162,60 @@ describe('POST /api/events: preview links', () => {
     assert.match(stored, /\/p\/\[redacted\]/);
     assert.match(stored, /src\/pages\/p\/\[token\]\.astro/);
   });
+
+  it('redacts every preview-token form in strings, keys and arrays, and a second event', async () => {
+    const h = harness();
+    const token = 'k7Qw_previewTok';
+    const again = 'm8Er_previewTok';
+    const forms = [
+      `/p/${token}.`,
+      `see /p/${token}[0]`,
+      `%2Fp%2F${token}`,
+      `%252Fp%252F${token}`,
+      `%25252Fp%25252F${token}`,
+      `%2fp%2f${token}`,
+      `/P/${token}`,
+      `%2FP%2F${token}`,
+      `\\/p\\/${token}`,
+      `/p/${token} /p/${again}`,
+    ];
+    const first = await h.send({
+      type: 'error',
+      path: `%2Fp%2F${token}`,
+      details: {
+        [`see /p/${token}`]: 'label',
+        links: forms,
+        note: `bad link /p/${token}. see /p/${token}[0] and /p/${again}`,
+        file: 'src/pages/p/[token].astro',
+        play: '/play/stk7wr01',
+        proving: '/proving',
+      },
+    });
+    assert.equal(first.status, 204);
+    const later = 'z9Ty_previewTok';
+    const second = await h.send({
+      type: 'error',
+      path: `/p/${later}`,
+      details: { note: `/p/${later}. /p/${later}[0] %2Fp%2F${later}` },
+    });
+    assert.equal(second.status, 204);
+    const stored = JSON.stringify(h.rows);
+    for (const secret of [token, again, later]) assert.equal(stored.includes(secret), false, stored);
+    assert.match(stored, /\/p\/\[redacted\]\./);
+    assert.match(stored, /\/p\/\[redacted\]\[0\]/);
+    assert.match(stored, /%2Fp%2F\[redacted\]/);
+    assert.match(stored, /%252Fp%252F\[redacted\]/);
+    assert.match(stored, /%25252Fp%25252F\[redacted\]/);
+    assert.match(stored, /%2fp%2f\[redacted\]/);
+    assert.match(stored, /\/p\/\[redacted\]/);
+    assert.match(stored, /%2Fp%2F\[redacted\]/);
+    const links = h.rows[0]?.event.details.links;
+    assert.ok(Array.isArray(links));
+    assert.ok(links.includes(String.raw`\/p\/[redacted]`));
+    assert.match(stored, /src\/pages\/p\/\[token\]\.astro/);
+    assert.match(stored, /\/play\/stk7wr01/);
+    assert.match(stored, /\/proving/);
+  });
 });
 
 describe('POST /api/events: awaited, bounded write', () => {

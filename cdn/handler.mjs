@@ -6,8 +6,8 @@
 // cached ~30s). 'pending'/'rejected' (and unknown ids) are 404 unless the request carries `pt=<token>`
 // minted by the portal for the owner (cdn/preview-token.mjs, secret CDN_PREVIEW_SECRET). The CDN stays
 // cookieless: it never reads or sets cookies; the token travels in the query string.
-// The document URL version is the latest validation version (default 1). There is one stored
-// bundle; reviewed_at is not a version selector, and a review must not 404 an existing /1/ link.
+// The document URL version is the latest validation version (default 1). reviewed_at is not a
+// version selector, and a review must not 404 an existing /1/ link.
 // A non-document asset does not trust the stage cache. Each request re-reads the asset row
 // joined to games.stage and games.reviewed_at, and serves it only when that stage is public
 // and content_at <= reviewed_at. content_at is set after the Storage copy, so an approval
@@ -18,7 +18,7 @@ import fs from 'node:fs';
 import { promisify } from 'node:util';
 import zlib from 'node:zlib';
 import { frameAncestors, matchEmbedder, parseOriginList } from './frame-ancestors.mjs';
-import { verifyPreviewToken } from './preview-token.mjs';
+import { readPreviewGrant } from './preview-token.mjs';
 import { gameCsp, ownAssetSource } from './csp.mjs';
 import { injectHead } from './inject.mjs';
 
@@ -197,10 +197,10 @@ function lruCache({ now, ttlMs, maxBytes }) {
 /** Runs `fn` once per key at a time; concurrent callers share the in-flight promise. */
 function coalesce(fn) {
   const inflight = new Map();
-  return (key) => {
+  return (key, ...rest) => {
     let p = inflight.get(key);
     if (!p) {
-      p = fn(key).finally(() => inflight.delete(key));
+      p = fn(key, ...rest).finally(() => inflight.delete(key));
       inflight.set(key, p);
     }
     return p;
@@ -237,22 +237,16 @@ export function createHandler(cfg) {
   const headers = { apikey: SECRET };
   if (SECRET.startsWith('eyJ')) headers.Authorization = `Bearer ${SECRET}`;
 
-  const loadObject = coalesce(async (key) => {
-    const storageKey = key.includes('\n') ? key.slice(0, key.indexOf('\n')) : key;
+  const loadObject = coalesce(async (cacheKey, storageKey) => {
     const res = await doFetch(`${SUPABASE_URL}/storage/v1/object/authenticated/games/${storageKey}`, { headers });
-    if (!res.ok) return objects.set(key, null);
+    if (!res.ok) return { value: null };
     const body = Buffer.from(await res.arrayBuffer());
     const etag = `"${crypto.createHash('sha1').update(body).digest('base64url').slice(0, 16)}"`;
-    return objects.set(key, { body, etag, variants: new Map() }, body.length);
+    return objects.set(cacheKey, { body, etag, variants: new Map() }, body.length);
   });
-  /**
-   * Cache entry for a bundle object; `entry.value` is null when Storage has no such object.
-   * Asset entries are keyed by content_at so a later copy cannot be served from an entry
-   * that was approved for the previous bytes. The Storage URL stays the object path.
-   */
-  const fetchObject = async (storageKey, contentAt) => {
-    const key = contentAt == null ? storageKey : `${storageKey}\n${contentAt}`;
-    return objects.get(key) ?? loadObject(key);
+  const fetchObject = async (storageKey, generation) => {
+    const cacheKey = generation == null ? storageKey : `${storageKey}\n${generation}`;
+    return objects.get(cacheKey) ?? loadObject(cacheKey, storageKey);
   };
 
   /** A derived body (injected HTML, compressed bytes) memoized on the object's cache entry. */
@@ -289,9 +283,12 @@ export function createHandler(cfg) {
     return versions.set(id, Number.isSafeInteger(version) && version >= 1 ? version : 1).value;
   });
   /** The game's current bundle version. Throws on lookup errors (not cached, fail closed). */
-  async function gameVersion(id) {
-    const hit = versions.get(id);
-    return hit ? hit.value : loadVersion(id);
+  async function gameVersion(id, fresh = false) {
+    if (!fresh) {
+      const hit = versions.get(id);
+      if (hit) return hit.value;
+    }
+    return loadVersion(id);
   }
 
   /**
@@ -336,20 +333,20 @@ export function createHandler(cfg) {
       if (!asset && (!FILE_RE.test(file ?? '') || rest.length)) return send(res, 404, 'Not found');
 
       const stage = await gameStage(id);
-      const tokenOk = stage !== null && verifyPreviewToken(PREVIEW_SECRET, id, url.searchParams.get('pt'));
-      const preview = !PUBLIC_STAGES.has(stage ?? '') && tokenOk;
+      const grant = stage !== null ? readPreviewGrant(PREVIEW_SECRET, id, url.searchParams.get('pt')) : null;
+      const ownerPreview = grant?.kind === 'current';
+      const shareThisDoc = grant?.kind === 'pinned' && asset?.path === 'index.html' && asset.version === grant.version;
+      const preview = !PUBLIC_STAGES.has(stage ?? '') && (ownerPreview || shareThisDoc);
       if (!stage || (!PUBLIC_STAGES.has(stage) && !preview)) return send(res, 404, 'Not found');
-      // A valid owner token must not be stored by a shared cache, including when the
-      // cached stage is already public. An invalid token leaves the public cache alone.
-      const privateCache = tokenOk ? { 'Cache-Control': 'private, no-store' } : null;
+      const privateCache = grant ? { 'Cache-Control': 'private, no-store' } : null;
 
       // The game document lives at its versioned URL so relative paths resolve inside
       // /g/<id>/<version>/ — where the asset files actually are — and so the CSP can name exactly
       // that folder as the game's own asset origin. The unversioned URL redirects there (the
-      // browser keeps the #mgs fragment); a versioned document URL for a version that is not the
-      // game's current one does not exist, so it is a 404.
+      // browser keeps the #mgs fragment).
       if (!asset) {
         if (file === 'index.html') {
+          if (grant?.kind === 'pinned') return send(res, 404, 'Not found');
           const version = await gameVersion(id);
           return send(res, 302, undefined, {
             Location: `/g/${id}/${version}/index.html${url.search}`,
@@ -358,7 +355,7 @@ export function createHandler(cfg) {
           });
         }
       } else if (asset.path === 'index.html' && asset.version !== (await gameVersion(id))) {
-        return send(res, 404, 'Not found');
+        if (!(grant?.kind === 'pinned' && grant.version === asset.version)) return send(res, 404, 'Not found');
       }
 
       const isDoc = asset?.path === 'index.html';
@@ -374,13 +371,23 @@ export function createHandler(cfg) {
         const row = await assetRow(id, asset.version, asset.path);
         if (!row || row.status !== 'uploaded') return send(res, 404, 'Not found');
         if (!assetIsPublic(row)) {
-          if (!tokenOk) return send(res, 404, 'Not found');
+          if (!ownerPreview) return send(res, 404, 'Not found');
           ownerOnly = { 'Cache-Control': 'private, no-store' };
         }
         contentAt = row.content_at == null ? '' : String(row.content_at);
       }
 
-      const entry = await fetchObject(`${id}/${asset ? (isDoc ? 'index.html' : asset.key) : file}`, contentAt);
+      const pinnedDoc = grant?.kind === 'pinned' && isDoc && asset?.version === grant.version;
+      let entry;
+      if (pinnedDoc && asset) {
+        const versionKey = String(asset.version);
+        const archived = await fetchObject(`${id}/${asset.version}/index.html`, versionKey);
+        if (archived.value) entry = archived;
+        else if (asset.version === (await gameVersion(id, true))) entry = await fetchObject(`${id}/index.html`, versionKey);
+        else return send(res, 404, 'Not found');
+      } else {
+        entry = await fetchObject(`${id}/${asset ? (isDoc ? 'index.html' : asset.key) : file}`, contentAt);
+      }
       if (!entry.value) return send(res, 404, 'Not found');
       const { body, etag } = entry.value;
 
