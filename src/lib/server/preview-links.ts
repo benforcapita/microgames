@@ -39,6 +39,11 @@ interface ValidationIdRow {
   id: string;
 }
 
+export interface MappedPreviewLinkError {
+  status: number;
+  message: string;
+}
+
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export function isUuid(value: unknown): value is string {
@@ -47,6 +52,20 @@ export function isUuid(value: unknown): value is string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function extractErrorText(error: unknown): string {
+  if (typeof error === 'string') {
+    return error;
+  }
+  if (isRecord(error)) {
+    const parts: string[] = [];
+    if (typeof error.message === 'string') parts.push(error.message);
+    if (typeof error.details === 'string') parts.push(error.details);
+    if (typeof error.hint === 'string') parts.push(error.hint);
+    return parts.join(' ');
+  }
+  return '';
 }
 
 export function buildPreviewLinkUrl(opts: {
@@ -60,23 +79,19 @@ export function buildPreviewLinkUrl(opts: {
   return trimmed ? `${trimmed}/p/${encodedToken}` : `/p/${encodedToken}`;
 }
 
-const PREVIEW_LINK_CAP_MESSAGE = 'You already have 5 active preview links. Revoke one to create another.';
-const PREVIEW_LINK_HOUR_MESSAGE = 'You already created 10 preview links in the last hour. Try again later.';
-const PREVIEW_LINK_GENERIC_MESSAGE = 'Could not create preview link. Please try again.';
+export function mapPreviewLinkError(error: unknown): MappedPreviewLinkError {
+  const capMessage = 'You already have 5 active preview links. Revoke one to create another.';
+  const hourMessage = "You've created 10 preview links in the last hour. Try again later.";
+  const genericMessage = 'Could not create preview link. Please try again.';
 
-function previewLinkExceptionText(error: unknown): string {
-  if (typeof error === 'string') return error;
-  if (!isRecord(error)) return '';
-  const message = typeof error.message === 'string' ? error.message : '';
-  const details = typeof error.details === 'string' ? error.details : '';
-  return `${message}\n${details}`;
-}
-
-export function mapPreviewLinkError(error: unknown): { status: number; message: string } {
-  const text = previewLinkExceptionText(error);
-  if (text.includes('preview_link_hour')) return { status: 400, message: PREVIEW_LINK_HOUR_MESSAGE };
-  if (text.includes('preview_link_cap')) return { status: 400, message: PREVIEW_LINK_CAP_MESSAGE };
-  return { status: 500, message: PREVIEW_LINK_GENERIC_MESSAGE };
+  const str = extractErrorText(error);
+  if (str.includes('preview_link_cap')) {
+    return { status: 409, message: capMessage };
+  }
+  if (str.includes('preview_link_hour')) {
+    return { status: 400, message: hourMessage };
+  }
+  return { status: 500, message: genericMessage };
 }
 
 export function validateRpcCreatedLink(data: unknown): { id: string; token: string; expiresAt: string } | null {
@@ -129,11 +144,8 @@ export async function verifyGameOwner(opts: {
     return { kind: 'error', status: 401, message: 'Unauthorized' };
   }
   const ownerId = await getGameOwnerId(opts.gameId);
-  if (!ownerId) {
+  if (!ownerId || ownerId !== opts.userId) {
     return { kind: 'error', status: 404, message: 'Not found' };
-  }
-  if (ownerId !== opts.userId) {
-    return { kind: 'error', status: 403, message: 'Forbidden' };
   }
   return { kind: 'ok', ownerId };
 }
@@ -164,7 +176,7 @@ export async function createPreviewLink(opts: {
     return {
       kind: 'error',
       status: 404,
-      message: 'Could not create preview link. Please try again.',
+      message: 'Not found',
     };
   }
 
@@ -220,7 +232,7 @@ export async function revokePreviewLink(opts: {
   }
 
   if (!isUuid(opts.linkId)) {
-    return { kind: 'error', status: 404, message: 'Could not revoke preview link' };
+    return { kind: 'error', status: 404, message: 'Not found' };
   }
 
   const links = await sql<{ id: string }[]>`
@@ -230,14 +242,14 @@ export async function revokePreviewLink(opts: {
     where l.id = ${opts.linkId} and gv.game_id = ${opts.gameId} and l.owner_id = ${opts.userId}
   `;
   if (!links || links.length === 0) {
-    return { kind: 'error', status: 404, message: 'Could not revoke preview link' };
+    return { kind: 'error', status: 404, message: 'Not found' };
   }
 
   const { error } = await opts.supabase.rpc('revoke_preview_link', {
     p_id: opts.linkId,
   });
   if (error) {
-    return { kind: 'error', status: 400, message: 'Could not revoke preview link' };
+    return { kind: 'error', status: 404, message: 'Not found' };
   }
   return { kind: 'success' };
 }

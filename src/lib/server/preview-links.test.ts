@@ -43,29 +43,44 @@ test('buildPreviewLinkUrl handles empty origins', () => {
   );
 });
 
-test('mapPreviewLinkError maps cap error to a 400 from the exception name', () => {
-  const cap = { status: 400, message: 'You already have 5 active preview links. Revoke one to create another.' };
-  assert.deepEqual(mapPreviewLinkError('preview_link_cap'), cap);
-  assert.deepEqual(mapPreviewLinkError('error: preview_link_cap occurred'), cap);
-  assert.deepEqual(mapPreviewLinkError({ message: 'preview_link_cap' }), cap);
-  assert.deepEqual(mapPreviewLinkError({ details: 'preview_link_cap' }), cap);
-  assert.deepEqual(mapPreviewLinkError(new Error('preview_link_cap')), cap);
-  assert.deepEqual(mapPreviewLinkError(cap.message), {
+test('mapPreviewLinkError maps cap error to 409 status and clear limit message', () => {
+  const expected = {
+    status: 409,
+    message: 'You already have 5 active preview links. Revoke one to create another.',
+  };
+  assert.deepEqual(mapPreviewLinkError('preview_link_cap'), expected);
+  assert.deepEqual(mapPreviewLinkError('error: preview_link_cap occurred'), expected);
+  assert.deepEqual(mapPreviewLinkError({ message: 'preview_link_cap' }), expected);
+  assert.deepEqual(mapPreviewLinkError({ details: 'preview_link_cap' }), expected);
+  assert.deepEqual(mapPreviewLinkError(new Error('preview_link_cap')), expected);
+  assert.deepEqual(mapPreviewLinkError(expected.message), {
     status: 500,
     message: 'Could not create preview link. Please try again.',
   });
 });
 
-test('mapPreviewLinkError maps the hourly limit to its own 400', () => {
-  const hour = { status: 400, message: 'You already created 10 preview links in the last hour. Try again later.' };
-  assert.deepEqual(mapPreviewLinkError('preview_link_hour'), hour);
-  assert.deepEqual(mapPreviewLinkError({ message: 'preview_link_hour' }), hour);
-  assert.deepEqual(mapPreviewLinkError({ details: 'preview_link_hour' }), hour);
-  assert.deepEqual(mapPreviewLinkError(new Error('preview_link_hour')), hour);
+test('mapPreviewLinkError maps hour error to 400 status and clear limit message', () => {
+  const expected = {
+    status: 400,
+    message: "You've created 10 preview links in the last hour. Try again later.",
+  };
+  assert.deepEqual(mapPreviewLinkError('preview_link_hour'), expected);
+  assert.deepEqual(mapPreviewLinkError('error: preview_link_hour occurred'), expected);
+  assert.deepEqual(mapPreviewLinkError({ message: 'preview_link_hour' }), expected);
+  assert.deepEqual(mapPreviewLinkError({ details: 'preview_link_hour' }), expected);
+  assert.deepEqual(mapPreviewLinkError({ hint: 'preview_link_hour' }), expected);
+  assert.deepEqual(mapPreviewLinkError(new Error('preview_link_hour')), expected);
+  assert.deepEqual(mapPreviewLinkError(expected.message), {
+    status: 500,
+    message: 'Could not create preview link. Please try again.',
+  });
 });
 
-test('mapPreviewLinkError maps raw database and unknown errors to a generic 500', () => {
-  const generic = { status: 500, message: 'Could not create preview link. Please try again.' };
+test('mapPreviewLinkError maps raw database and unknown errors to generic 500 message', () => {
+  const generic = {
+    status: 500,
+    message: 'Could not create preview link. Please try again.',
+  };
   assert.deepEqual(mapPreviewLinkError('preview_link_denied'), generic);
   assert.deepEqual(mapPreviewLinkError({ message: 'new row violates row-level security policy' }), generic);
   assert.deepEqual(mapPreviewLinkError(new Error('database connection failed')), generic);
