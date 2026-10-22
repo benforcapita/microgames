@@ -5,7 +5,7 @@
 // non-numeric eq. used to bubble up as a 502).
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { createHandler } from './handler.mjs';
+import { createHandler, SHORT_CACHE } from './handler.mjs';
 import { rewriteGameUrl } from './api/g.mjs';
 import { mintPreviewToken, readPreviewGrant } from './preview-token.mjs';
 import { CSP_SOURCES, previewDocumentPath } from './csp.mjs';
@@ -74,14 +74,14 @@ function harness(opts: { cdnOrigin?: string } = {}) {
     cdnOrigin: opts.cdnOrigin ?? CDN,
     fetch: fakeFetch as typeof fetch,
   });
-  const get = async (path: string, headers: Record<string, string> = {}) => {
+  const get = async (path: string, headers: Record<string, string> = {}, method = 'GET') => {
     let status = 0, body = '';
     const out: Record<string, string> = {};
     const res = {
       writeHead(s: number, h: Record<string, string>) { status = s; for (const [k, v] of Object.entries(h)) out[k.toLowerCase()] = String(v); },
       end(b?: unknown) { body = b === undefined ? '' : String(b); },
     };
-    await handle({ method: 'GET', url: path, headers } as never, res as never);
+    await handle({ method, url: path, headers } as never, res as never);
     return { status, body, headers: out };
   };
   return { get, calls };
@@ -254,6 +254,40 @@ describe('UP-1: the game document is served at its versioned URL', () => {
     assert.equal((await get(rewritten)).status, 200);
     assert.equal((await get('/g/live0001/3/~pt/not-a-token/sprites/hero.png')).status, 404);
     assert.equal((await get('/g/live0001/3/sprites/hero.png')).status, 200);
+  });
+
+  it('a ~pt path and the owner redirect are private no-store, including when the answer is 404', async () => {
+    const { get } = harness();
+    const owner = mintPreviewToken(SECRET, 'pend0001')!;
+    const redirect = await get(`/g/pend0001/index.html?embed=${encodeURIComponent(PORTAL)}&pt=${owner}`);
+    assert.equal(redirect.status, 302);
+    assert.equal(redirect.headers['cache-control'], 'private, no-store');
+    const location = redirect.headers.location ?? '';
+    assert.equal(location.includes('/~pt/'), true);
+    assert.equal(new URL(location, CDN).searchParams.has('pt'), false);
+    const pinned = mintPreviewToken(SECRET, 'prev0001', { version: 1 })!;
+    for (const path of [
+      `/g/prev0001/1/~pt/${encodeURIComponent(pinned)}/sprites/missing.png`,
+      `/g/prev0001/2/~pt/${encodeURIComponent(pinned)}/index.html`,
+      `/g/prev0001/1/~pt/${encodeURIComponent(pinned)}`,
+      `/g/prev0001/1/~pt/${encodeURIComponent(pinned)}/../game.js`,
+      '/g/live0001/3/~pt/not-a-token/sprites/hero.png',
+      '/g/prev0001/1/~pt/%/game.js',
+    ]) {
+      const missed = await get(path);
+      assert.equal(missed.status, 404);
+      assert.equal(missed.headers['cache-control'], 'private, no-store');
+      assert.equal(missed.headers['x-content-type-options'], 'nosniff');
+    }
+    const denied = await get('/g/live0001/3/~pt/not-a-token/sprites/hero.png', {}, 'POST');
+    assert.equal(denied.status, 405);
+    assert.equal(denied.headers['cache-control'], 'private, no-store');
+    const publicAsset = await get('/g/live0001/3/sprites/hero.png');
+    assert.equal(publicAsset.status, 200);
+    assert.equal(publicAsset.headers['cache-control'], SHORT_CACHE);
+    const publicRedirect = await get('/g/live0001/index.html');
+    assert.equal(publicRedirect.status, 302);
+    assert.equal(publicRedirect.headers['cache-control'], 'no-cache');
   });
 
   it('thumbnails keep their unversioned route — no redirect', async () => {

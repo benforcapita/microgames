@@ -171,6 +171,12 @@ function send(res, status, body, headers = {}) {
   res.end(body);
 }
 
+function lockPreviewPath(res, rawPath) {
+  if (!String(rawPath).split('/').includes(PREVIEW_PATH_MARK)) return;
+  const writeHead = res.writeHead.bind(res);
+  res.writeHead = (statusCode, headers) => writeHead(statusCode, { ...headers, 'Cache-Control': 'private, no-store' });
+}
+
 /** Byte-bounded LRU with per-entry TTL. Entries refresh recency on hit; the oldest go first when over budget. */
 function lruCache({ now, ttlMs, maxBytes }) {
   const map = new Map();
@@ -336,8 +342,9 @@ export function createHandler(cfg) {
 
   return async function handle(req, res) {
     try {
-      if (req.method !== 'GET' && req.method !== 'HEAD') return send(res, 405, 'Method not allowed');
       const rawPath = String(req.url ?? '/').split(/[?#]/)[0];
+      lockPreviewPath(res, rawPath);
+      if (req.method !== 'GET' && req.method !== 'HEAD') return send(res, 405, 'Method not allowed');
       if (isTraversal(rawPath)) return send(res, 404, 'Not found');
       const url = new URL(req.url ?? '/', 'http://cdn');
       const [, scope, id, file, ...rest] = url.pathname.split('/');
@@ -371,8 +378,7 @@ export function createHandler(cfg) {
             const qs = params.toString();
             return send(res, 302, undefined, {
               Location: `${previewDocumentPath(id, version, url.searchParams.get('pt') ?? '')}${qs ? `?${qs}` : ''}`,
-              'Cache-Control': 'no-cache',
-              ...privateCache,
+              'Cache-Control': 'private, no-store',
             });
           }
           return send(res, 302, undefined, {
