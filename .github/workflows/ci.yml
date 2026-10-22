@@ -104,6 +104,12 @@ jobs:
         run: npx playwright test --config=playwright.fullscreen.config.mjs --reporter=list,json
       - name: Assert no fullscreen e2e tests skipped
         run: node scripts/ci/assert-no-db-skips.mjs "$RUNNER_TEMP/fullscreen-e2e.json"
+      - name: Upload SL-3 screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sl3-screenshots-${{ matrix.run }}
+          path: test-results/screenshots/sl-3-*.png
       - name: Stop local Supabase
         if: always()
         run: supabase stop
