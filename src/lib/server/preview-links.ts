@@ -60,20 +60,23 @@ export function buildPreviewLinkUrl(opts: {
   return trimmed ? `${trimmed}/p/${encodedToken}` : `/p/${encodedToken}`;
 }
 
-export function mapPreviewLinkError(error: unknown): string {
-  const capMessage = 'You already have 5 active preview links. Revoke one to create another.';
-  if (typeof error === 'string') {
-    return error.includes('preview_link_cap') ? capMessage : 'Could not create preview link. Please try again.';
-  }
-  if (isRecord(error)) {
-    if (typeof error.message === 'string' && error.message.includes('preview_link_cap')) {
-      return capMessage;
-    }
-    if (typeof error.details === 'string' && error.details.includes('preview_link_cap')) {
-      return capMessage;
-    }
-  }
-  return 'Could not create preview link. Please try again.';
+const PREVIEW_LINK_CAP_MESSAGE = 'You already have 5 active preview links. Revoke one to create another.';
+const PREVIEW_LINK_HOUR_MESSAGE = 'You already created 10 preview links in the last hour. Try again later.';
+const PREVIEW_LINK_GENERIC_MESSAGE = 'Could not create preview link. Please try again.';
+
+function previewLinkExceptionText(error: unknown): string {
+  if (typeof error === 'string') return error;
+  if (!isRecord(error)) return '';
+  const message = typeof error.message === 'string' ? error.message : '';
+  const details = typeof error.details === 'string' ? error.details : '';
+  return `${message}\n${details}`;
+}
+
+export function mapPreviewLinkError(error: unknown): { status: number; message: string } {
+  const text = previewLinkExceptionText(error);
+  if (text.includes('preview_link_hour')) return { status: 400, message: PREVIEW_LINK_HOUR_MESSAGE };
+  if (text.includes('preview_link_cap')) return { status: 400, message: PREVIEW_LINK_CAP_MESSAGE };
+  return { status: 500, message: PREVIEW_LINK_GENERIC_MESSAGE };
 }
 
 export function validateRpcCreatedLink(data: unknown): { id: string; token: string; expiresAt: string } | null {
@@ -170,9 +173,8 @@ export async function createPreviewLink(opts: {
   });
 
   if (error) {
-    const message = mapPreviewLinkError(error);
-    const status = message.includes('5 active preview links') ? 400 : 500;
-    return { kind: 'error', status, message };
+    const mapped = mapPreviewLinkError(error);
+    return { kind: 'error', status: mapped.status, message: mapped.message };
   }
 
   const parsed = validateRpcCreatedLink(data);
