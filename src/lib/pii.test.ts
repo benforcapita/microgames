@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { isIP } from 'node:net';
 import { describe, it } from 'node:test';
-import { containsPii, hasUrlIntIpv4, isIPv6, redactPii, redactUrlIntIpv4, REDACTED, truncateText, utf8Bytes, wellFormed } from './pii.ts';
+import { containsPii, hasUrlIntIpv4, isIPv6, redactPii, redactPreviewLink, redactUrlIntIpv4, REDACTED, truncateText, utf8Bytes, wellFormed } from './pii.ts';
 
 describe('isIPv6 (parse-based) agrees with node:net', () => {
   const cases = ['::', '::1', 'fe80::1', '2001:db8::1', '2001:db8:0:0:0:0:0:1', '::ffff:203.0.113.9', '::ffff:cb00:7109', '1:2:3:4:5:6:7:8',
@@ -35,6 +35,29 @@ describe('containsPii / redactPii', () => {
     assert.equal(redactPii(prefix + 'ben@example.com'), prefix + REDACTED);
     assert.equal(redactPii(prefix + 'ben[at]example.com'), prefix + REDACTED);
     assert.equal(redactPii(prefix + 'ben at example dot com'), REDACTED);
+  });
+});
+
+describe('preview link redaction', () => {
+  const token = 'k7Qw_previewTok';
+  const cases: [string, string][] = [
+    [`/P/${token}`, `/p/${REDACTED}`],
+    [`%2FP%2F${token}`, `%2Fp%2F${REDACTED}`],
+    [`%2fp%2f${token}`, `%2fp%2f${REDACTED}`],
+    [`%2Fp%2f${token}.`, `%2Fp%2F${REDACTED}.`],
+    [`/p%2f${token}[0]`, `/p/${REDACTED}[0]`],
+    [`\\/p\\/${token}`, `\\/p\\/${REDACTED}`],
+    [`/p/${token} /P/${token}`, `/p/${REDACTED} /p/${REDACTED}`],
+  ];
+  for (const [raw, want] of cases) it(raw, () => {
+    const cleaned = redactPreviewLink(raw);
+    assert.equal(cleaned.includes(token), false, cleaned);
+    assert.equal(cleaned, want);
+  });
+  it('leaves the page filename and other routes alone', () => {
+    assert.equal(redactPreviewLink('src/pages/p/[token].astro'), 'src/pages/p/[token].astro');
+    assert.equal(redactPreviewLink('/play/stk7wr01'), '/play/stk7wr01');
+    assert.equal(redactPreviewLink('/proving'), '/proving');
   });
 });
 

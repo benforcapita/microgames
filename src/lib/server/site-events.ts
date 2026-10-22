@@ -1,4 +1,4 @@
-import { containsPii, hasUrlIntIpv4, truncateText, utf8Bytes, wellFormed } from '../pii';
+import { containsPii, hasUrlIntIpv4, redactPreviewLink, truncateText, utf8Bytes, wellFormed } from '../pii';
 import { createLimiter } from './abuse';
 
 /** Errors only: we log what could break the site and never track users (no page views, launches or user ids). */
@@ -31,6 +31,13 @@ function wellFormedDeep(v: unknown): unknown {
   return v;
 }
 
+function redactStored(v: unknown): unknown {
+  if (typeof v === 'string') return redactPreviewLink(v);
+  if (Array.isArray(v)) return v.map(redactStored);
+  if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [redactPreviewLink(k), redactStored(x)]));
+  return v;
+}
+
 function strings(v: unknown, out: string[] = []): string[] {
   if (typeof v === 'string') out.push(v);
   else if (typeof v === 'number') out.push(String(v));
@@ -47,7 +54,7 @@ export function parseSiteEvent(body: unknown): { ok: true; event: SiteEventInput
   let path: string | null = null;
   if (b.path !== undefined && b.path !== null) {
     if (typeof b.path !== 'string' || b.path.length > SITE_EVENT_MAX_PATH) return { ok: false, reason: 'path' };
-    path = wellFormed(b.path);
+    path = redactPreviewLink(wellFormed(b.path));
   }
   let gameId: string | null = null;
   if (b.gameId !== undefined && b.gameId !== null) {
@@ -57,7 +64,7 @@ export function parseSiteEvent(body: unknown): { ok: true; event: SiteEventInput
   let details: Record<string, unknown> = {};
   if (b.details !== undefined && b.details !== null) {
     if (typeof b.details !== 'object' || Array.isArray(b.details)) return { ok: false, reason: 'details' };
-    details = wellFormedDeep(b.details) as Record<string, unknown>;
+    details = redactStored(wellFormedDeep(b.details)) as Record<string, unknown>;
   }
   if (utf8Bytes(JSON.stringify(details)) > SITE_EVENT_MAX_DETAILS_BYTES) return { ok: false, reason: 'details-size' };
   // No emails or IPs at rest, in any stored field.

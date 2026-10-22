@@ -44,6 +44,45 @@ describe('client path: never the query string or hash', () => {
   it('query strings inside error text are stripped too', () => {
     assert.equal(scrub('at https://x.test/cb?token=abc#frag', 500), 'at https://x.test/cb');
   });
+  it('an error on a preview link drops the token before it is sent or stored', async () => {
+    const token = 'abcDEF789_-'.repeat(4);
+    const sent = await capture(() => sendErrorEvent({ details: { m: 'x' } }), { loc: { pathname: `/p/${token}` } });
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].body.includes(token), false);
+    assert.equal(JSON.parse(sent[0].body).path, '/p/[redacted]');
+    const stored = await serverStores(sent[0].body);
+    assert.equal(stored.status, 204);
+    assert.equal(JSON.stringify(stored.row).includes(token), false);
+  });
+
+  it('scrubs a token before a period or bracket, encoded slashes, and a second link', () => {
+    const token = 'k7Qw_previewTok';
+    const again = 'm8Er_previewTok';
+    const cases: [string, RegExp][] = [
+      [`bad link /p/${token}.`, /\/p\/\[redacted\]\./],
+      [`see /p/${token}[0]`, /\/p\/\[redacted\]\[0\]/],
+      [`%2Fp%2F${token}`, /%2Fp%2F\[redacted\]/],
+      [`%252Fp%252F${token}`, /%252Fp%252F\[redacted\]/],
+      [`%25252Fp%25252F${token}`, /%25252Fp%25252F\[redacted\]/],
+      [`%2fp%2f${token}`, /%2fp%2f\[redacted\]/],
+      [`/P/${token}`, /\/p\/\[redacted\]/],
+      [`%2FP%2F${token}`, /%2Fp%2F\[redacted\]/],
+      [`\\/p\\/${token}`, /\\\/p\\\/\[redacted\]/],
+      [`/p/${token} /p/${again}`, /\/p\/\[redacted\] \/p\/\[redacted\]/],
+    ];
+    for (const [raw, want] of cases) {
+      const cleaned = scrub(raw, 500);
+      assert.equal(cleaned.includes(token), false, cleaned);
+      assert.equal(cleaned.includes(again), false, cleaned);
+      assert.match(cleaned, want);
+    }
+    assert.equal(scrub('src/pages/p/[token].astro', 500), 'src/pages/p/[token].astro');
+    assert.equal(scrub('/play/stk7wr01', 500), '/play/stk7wr01');
+    assert.equal(scrub('/proving', 500), '/proving');
+    const follow = scrub(`/p/${token}[1] /p/${again}.`, 500);
+    assert.equal(follow.includes(token), false);
+    assert.equal(follow.includes(again), false);
+  });
 });
 
 describe('client scrub uses the server PII detector', () => {

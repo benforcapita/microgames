@@ -135,7 +135,7 @@ describe('device variance headers', () => {
   });
 
   it('does not vary unrelated pages', () => {
-    for (const path of ['/login', '/upload', '/me', '/api/telemetry', '/api/games']) {
+    for (const path of ['/login', '/upload', '/me', '/api/telemetry', '/api/games', '/p/preview']) {
       assert.equal(variesByDevice(path), false, path);
       const headers = new Headers();
       applyDeviceHeaders(headers, path);
