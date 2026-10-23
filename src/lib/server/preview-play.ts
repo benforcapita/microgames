@@ -16,6 +16,42 @@ interface ResolvedRow {
   title: string;
 }
 
+type PreviewFailureStage = 'connect' | 'admit' | 'resolve';
+
+const CONNECT_CODES = new Set([
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'ETIMEDOUT',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'EPIPE',
+  'CONNECT_TIMEOUT',
+  'CONNECTION_CLOSED',
+  'CONNECTION_ENDED',
+  'CONNECTION_DESTROYED',
+  '57P01',
+  '57P02',
+  '57P03',
+  '53300',
+]);
+
+function errorCode(err: unknown): string {
+  if (typeof err !== 'object' || err === null || !('code' in err)) return '';
+  const code = err.code;
+  return typeof code === 'string' ? code : '';
+}
+
+function sqlState(err: unknown): string {
+  const code = errorCode(err);
+  return /^[0-9A-Z]{5}$/.test(code) ? code : 'none';
+}
+
+function failureStage(attempt: 'admit' | 'resolve', err: unknown): PreviewFailureStage {
+  const code = errorCode(err);
+  if (code.startsWith('08') || CONNECT_CODES.has(code)) return 'connect';
+  return attempt;
+}
+
 export async function openPreviewLink(input: {
   token: string;
   ip: string;
@@ -23,9 +59,11 @@ export async function openPreviewLink(input: {
   previewSecret?: string;
 }): Promise<PreviewPlay> {
   const now = input.now ?? Date.now();
+  let attempt: 'admit' | 'resolve' = 'admit';
   try {
     const admitted = await sql.begin((tx) => admitPreviewPage(tx, input.ip, now));
     if (!admitted) return { kind: 'limited' };
+    attempt = 'resolve';
     const rows = await sql<ResolvedRow[]>`
       select html_path, title from public.resolve_preview_link(${input.token})`;
     const row = rows[0];
@@ -38,8 +76,8 @@ export async function openPreviewLink(input: {
     const previewToken = mintPreviewToken(input.previewSecret ?? CDN_PREVIEW_SECRET, gameId, { version });
     if (!previewToken) return { kind: 'miss' };
     return { kind: 'play', gameId, title: row.title, version, previewToken };
-  } catch {
-    console.error('preview play failed');
+  } catch (err) {
+    console.error(`preview play failed stage=${failureStage(attempt, err)} code=${sqlState(err)}`);
     return { kind: 'error' };
   }
 }
