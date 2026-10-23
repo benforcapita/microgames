@@ -10,3 +10,6 @@ data/
 test-results/
 playwright-report/
 launch/out/
+.stryker-tmp/
+reports/
+stryker.log
