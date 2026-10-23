@@ -5,9 +5,10 @@
 // non-numeric eq. used to bubble up as a 502).
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { createHandler } from './handler.mjs';
+import { createHandler, SHORT_CACHE } from './handler.mjs';
+import { rewriteGameUrl } from './api/g.mjs';
 import { mintPreviewToken, readPreviewGrant } from './preview-token.mjs';
-import { CSP_SOURCES } from './csp.mjs';
+import { CSP_SOURCES, previewDocumentPath } from './csp.mjs';
 
 const SECRET = 'test-preview-secret';
 const PORTAL = 'http://127.0.0.1:4321';
@@ -25,8 +26,10 @@ const FILES: Record<string, string> = {
   'provgm01/index.html': '<!doctype html><html><body>p</body></html>',
   'pend0001/index.html': '<!doctype html><html><body>CURRENT-OBJECT</body></html>',
   'pend0001/3/index.html': '<!doctype html><html><body>ARCHIVE-V3</body></html>',
+  'pend0001/3/game.js': 'owner-script',
   'prev0001/index.html': '<!doctype html><html><body>BUNDLE-V2-FAILED</body></html>',
   'prev0001/1/index.html': '<!doctype html><html><body>BUNDLE-V1</body></html>',
+  'prev0001/1/game.js': 'paint();',
   'cur00001/index.html': '<!doctype html><html><body>BUNDLE-V1</body></html>',
 };
 
@@ -71,14 +74,14 @@ function harness(opts: { cdnOrigin?: string } = {}) {
     cdnOrigin: opts.cdnOrigin ?? CDN,
     fetch: fakeFetch as typeof fetch,
   });
-  const get = async (path: string, headers: Record<string, string> = {}) => {
+  const get = async (path: string, headers: Record<string, string> = {}, method = 'GET') => {
     let status = 0, body = '';
     const out: Record<string, string> = {};
     const res = {
       writeHead(s: number, h: Record<string, string>) { status = s; for (const [k, v] of Object.entries(h)) out[k.toLowerCase()] = String(v); },
       end(b?: unknown) { body = b === undefined ? '' : String(b); },
     };
-    await handle({ method: 'GET', url: path, headers } as never, res as never);
+    await handle({ method, url: path, headers } as never, res as never);
     return { status, body, headers: out };
   };
   return { get, calls };
@@ -168,11 +171,22 @@ describe('UP-1: the game document is served at its versioned URL', () => {
     const embed = encodeURIComponent(PORTAL);
     const r = await get(`/g/pend0001/index.html?embed=${embed}&pt=${pt}`);
     assert.equal(r.status, 302);
-    assert.equal(r.headers.location, `/g/pend0001/3/index.html?embed=${embed}&pt=${pt}`);
+    assert.equal(r.headers.location, `${previewDocumentPath('pend0001', 3, pt)}?embed=${embed}`);
     const doc = await get(r.headers.location);
     assert.equal(doc.status, 200);
     assert.equal(doc.headers['cache-control'], 'private, no-store');
     assert.match(doc.headers['content-security-policy'], new RegExp(`${CDN.replace(/\./g, '\\.')}/g/pend0001/3/`));
+    const script = new URL('game.js', `${CDN}${r.headers.location}`);
+    assert.equal(script.search, '');
+    assert.equal(script.pathname, `/g/pend0001/3/~pt/${encodeURIComponent(pt)}/game.js`);
+    const sibling = await get(script.pathname);
+    assert.equal(sibling.status, 200);
+    assert.equal(sibling.body, 'owner-script');
+    assert.equal(sibling.headers['content-type'], 'text/javascript; charset=utf-8');
+    assert.equal(sibling.headers['cache-control'], 'private, no-store');
+    const dropped = new URL('game.js', `${CDN}/g/pend0001/3/index.html?embed=${embed}&pt=${pt}`);
+    assert.equal(dropped.pathname, '/g/pend0001/3/game.js');
+    assert.equal((await get(dropped.pathname)).status, 404);
     // Without a token the redirect target (and the redirect itself) stays 404.
     assert.equal((await get('/g/pend0001/index.html')).status, 404);
     assert.equal((await get('/g/pend0001/3/index.html')).status, 404);
@@ -211,6 +225,77 @@ describe('UP-1: the game document is served at its versioned URL', () => {
     const only = await get(`/g/cur00001/1/index.html?pt=${first}`);
     assert.equal(only.status, 200);
     assert.match(only.body, /BUNDLE-V1/);
+  });
+
+  it('a pinned path token serves sibling files of that version and nothing else', async () => {
+    const { get } = harness();
+    const token = mintPreviewToken(SECRET, 'prev0001', { version: 1 })!;
+    const docPath = previewDocumentPath('prev0001', 1, token);
+    const doc = await get(`${docPath}?embed=${encodeURIComponent(PORTAL)}`);
+    assert.equal(doc.status, 200);
+    assert.match(doc.body, /BUNDLE-V1/);
+    assert.equal(doc.headers['cache-control'], 'private, no-store');
+    assert.match(doc.headers['content-security-policy'], /\/g\/prev0001\/1\//);
+    const script = new URL('game.js', `${CDN}${docPath}`);
+    assert.equal(script.pathname, `/g/prev0001/1/~pt/${encodeURIComponent(token)}/game.js`);
+    const painted = await get(script.pathname);
+    assert.equal(painted.status, 200);
+    assert.equal(painted.body, 'paint();');
+    assert.equal(painted.headers['x-content-type-options'], 'nosniff');
+    assert.equal((await get(`/g/prev0001/1/index.html?pt=${token}`)).status, 200);
+    assert.equal((await get(`/g/prev0001/1/game.js?pt=${token}`)).status, 200);
+    assert.equal((await get('/g/prev0001/1/game.js')).status, 404);
+    for (const path of [
+      `/g/prev0001/2/~pt/${encodeURIComponent(token)}/index.html`,
+      `/g/prev0001/2/~pt/${encodeURIComponent(token)}/game.js`,
+      `/g/prev0001/~pt/${encodeURIComponent(token)}/thumb.webp`,
+      `/g/prev0001/1/~pt/${encodeURIComponent(token)}`,
+      '/g/prev0001/1/~pt/%/index.html',
+    ]) {
+      const missed = await get(path);
+      assert.equal(missed.status, 404, path);
+      assert.equal(missed.body.includes('BUNDLE-V1'), false, path);
+      assert.equal(missed.body.includes('BUNDLE-V2-FAILED'), false, path);
+    }
+    const rewritten = rewriteGameUrl(`/?__p=${encodeURIComponent(`prev0001/1/~pt/${token}/index.html`)}&embed=${encodeURIComponent(PORTAL)}`);
+    assert.equal(rewritten, `${docPath}?embed=${encodeURIComponent(PORTAL)}`);
+    assert.equal((await get(rewritten)).status, 200);
+    assert.equal((await get('/g/live0001/3/~pt/not-a-token/sprites/hero.png')).status, 404);
+    assert.equal((await get('/g/live0001/3/sprites/hero.png')).status, 200);
+  });
+
+  it('a ~pt path and the owner redirect are private no-store, including when the answer is 404', async () => {
+    const { get } = harness();
+    const owner = mintPreviewToken(SECRET, 'pend0001')!;
+    const redirect = await get(`/g/pend0001/index.html?embed=${encodeURIComponent(PORTAL)}&pt=${owner}`);
+    assert.equal(redirect.status, 302);
+    assert.equal(redirect.headers['cache-control'], 'private, no-store');
+    const location = redirect.headers.location ?? '';
+    assert.equal(location.includes('/~pt/'), true);
+    assert.equal(new URL(location, CDN).searchParams.has('pt'), false);
+    const pinned = mintPreviewToken(SECRET, 'prev0001', { version: 1 })!;
+    for (const path of [
+      `/g/prev0001/1/~pt/${encodeURIComponent(pinned)}/sprites/missing.png`,
+      `/g/prev0001/2/~pt/${encodeURIComponent(pinned)}/index.html`,
+      `/g/prev0001/1/~pt/${encodeURIComponent(pinned)}`,
+      `/g/prev0001/1/~pt/${encodeURIComponent(pinned)}/../game.js`,
+      '/g/live0001/3/~pt/not-a-token/sprites/hero.png',
+      '/g/prev0001/1/~pt/%/game.js',
+    ]) {
+      const missed = await get(path);
+      assert.equal(missed.status, 404);
+      assert.equal(missed.headers['cache-control'], 'private, no-store');
+      assert.equal(missed.headers['x-content-type-options'], 'nosniff');
+    }
+    const denied = await get('/g/live0001/3/~pt/not-a-token/sprites/hero.png', {}, 'POST');
+    assert.equal(denied.status, 405);
+    assert.equal(denied.headers['cache-control'], 'private, no-store');
+    const publicAsset = await get('/g/live0001/3/sprites/hero.png');
+    assert.equal(publicAsset.status, 200);
+    assert.equal(publicAsset.headers['cache-control'], SHORT_CACHE);
+    const publicRedirect = await get('/g/live0001/index.html');
+    assert.equal(publicRedirect.status, 302);
+    assert.equal(publicRedirect.headers['cache-control'], 'no-cache');
   });
 
   it('thumbnails keep their unversioned route — no redirect', async () => {

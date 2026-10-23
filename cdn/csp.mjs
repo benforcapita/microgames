@@ -29,6 +29,12 @@ export function ownAssetSource(cdnOrigin, id, version) {
   return `${origin.origin}/g/${id}/${version}/`;
 }
 
+export const PREVIEW_PATH_MARK = '~pt';
+
+export function previewDocumentPath(gameId, version, token) {
+  return `/g/${gameId}/${version}/${PREVIEW_PATH_MARK}/${encodeURIComponent(token)}/index.html`;
+}
+
 /** The full CSP header for a game document, given the allowed frame-ancestors and (optionally) its own asset folder. */
 export const gameCsp = (ancestors, own = '') => {
   const o = own ? ` ${own}` : '';

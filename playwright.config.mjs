@@ -29,6 +29,27 @@ export default defineConfig({
   timeout: 60_000,
   workers: 1,
   reporter: 'list',
+  projects: [
+    { name: 'chromium', testIgnore: /preview-play-(phone|siblings)\.spec\.mjs/ },
+    {
+      name: 'webkit-phone',
+      testMatch: /preview-play-(phone|siblings)\.spec\.mjs/,
+      use: {
+        browserName: 'webkit',
+        viewport: { width: 390, height: 844 },
+        launchOptions: { args: [] },
+      },
+    },
+    {
+      name: 'chromium-phone',
+      testMatch: /preview-play-siblings\.spec\.mjs/,
+      use: {
+        browserName: 'chromium',
+        viewport: { width: 390, height: 844 },
+        launchOptions: { args: ['--disable-site-isolation-trials'] },
+      },
+    },
+  ],
   use: {
     baseURL: WEB,
     browserName: 'chromium',

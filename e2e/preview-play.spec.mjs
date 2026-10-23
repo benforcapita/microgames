@@ -208,11 +208,11 @@ test('a logged-out visitor can play a valid preview and cannot find the game any
     await page.getByRole('button', { name: 'Play' }).click();
     const frame = page.locator('iframe.mg-frame');
     await expect(frame).toHaveAttribute('sandbox', 'allow-scripts allow-pointer-lock');
-    await expect(frame).toHaveAttribute('src', new RegExp(`/g/${gameId}/1/index.html`));
+    await expect(frame).toHaveAttribute('src', new RegExp(`/g/${gameId}/1/~pt/[^/]+/index\\.html`));
     const src = await frame.getAttribute('src');
     if (!src) throw new Error('preview frame has no source');
     const frameUrl = new URL(src);
-    expect(frameUrl.pathname).toBe(`/g/${gameId}/1/index.html`);
+    expect(frameUrl.pathname).toMatch(new RegExp(`^/g/${gameId}/1/~pt/[^/]+/index\\.html$`));
     const playedDoc = await page.request.get(src.split('#')[0]);
     expect(playedDoc.status()).toBe(200);
     const playedHtml = await playedDoc.text();
@@ -221,7 +221,7 @@ test('a logged-out visitor can play a valid preview and cannot find the game any
     expect(await (await page.request.get(`${CDN}/g/${gameId}/2/index.html${frameUrl.search}`)).text()).not.toContain('BUNDLE-V2-FAILED');
     expect(await (await page.request.get(`${CDN}/g/${gameId}/index.html${frameUrl.search}`)).text()).not.toContain('BUNDLE-V2-FAILED');
     await expect(page.frameLocator('iframe.mg-frame').locator('canvas').first()).toBeVisible();
-    const gameFrame = page.frames().find((f) => f.url().includes(`/g/${gameId}/1/index.html`));
+    const gameFrame = page.frames().find((f) => f.url().includes(`/g/${gameId}/1/`) && f.url().includes('/index.html'));
     if (!gameFrame) throw new Error('preview frame did not load');
     await page.evaluate(() => {
       window.__mgOverlay = false;
@@ -253,10 +253,7 @@ test('a logged-out visitor can play a valid preview and cannot find the game any
     expect(adOutcome).toContain('AD_BREAK_DONE');
     expect(adOutcome).toContain('REWARD_GRANTED');
     expect(sawOverlay).toBe(false);
-    const bare = new URL(src);
-    bare.search = '';
-    bare.hash = '';
-    expect((await page.request.get(bare.toString())).status()).toBe(404);
+    expect((await page.request.get(`${CDN}/g/${gameId}/1/index.html`)).status()).toBe(404);
 
     const unknown = `/p/${freshToken()}`;
     const paths = [unknown, `/p/${expired.token}`, `/p/${revoked.token}`, '/p/x', `/p/${'z'.repeat(80)}`];

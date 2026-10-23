@@ -1,3 +1,5 @@
+import { previewDocumentPath } from '../../cdn/csp.mjs';
+
 export function gameFrameSrc(
   cdnOrigin: string,
   gameId: string,
@@ -7,8 +9,13 @@ export function gameFrameSrc(
   bundleVersion?: number,
 ): string {
   const base = cdnOrigin.replace(/\/$/, '');
-  const pt = previewToken ? `&pt=${encodeURIComponent(previewToken)}` : '';
   const versioned = bundleVersion !== undefined && Number.isSafeInteger(bundleVersion) && bundleVersion >= 1;
+  const embed = `embed=${encodeURIComponent(embedOrigin)}`;
+  const hash = `#mgs=${encodeURIComponent(save)}`;
+  if (previewToken && versioned) {
+    return `${base}${previewDocumentPath(gameId, bundleVersion, previewToken)}?${embed}${hash}`;
+  }
+  const pt = previewToken ? `&pt=${encodeURIComponent(previewToken)}` : '';
   const doc = versioned ? `${bundleVersion}/index.html` : 'index.html';
-  return `${base}/g/${gameId}/${doc}?embed=${encodeURIComponent(embedOrigin)}${pt}#mgs=${encodeURIComponent(save)}`;
+  return `${base}/g/${gameId}/${doc}?${embed}${pt}${hash}`;
 }

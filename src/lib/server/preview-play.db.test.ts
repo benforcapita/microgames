@@ -470,7 +470,8 @@ describe('preview play', () => {
       if (play.kind !== 'play') return;
       assert.equal(play.version, 1);
       const src = new URL(gameFrameSrc('http://cdn.test', play.gameId, 'http://portal.test', '{}', play.previewToken, play.version));
-      assert.equal(src.pathname, `/g/${gameId}/1/index.html`);
+      assert.match(src.pathname, new RegExp(`^/g/${gameId}/1/~pt/[^/]+/index\\.html$`));
+      assert.equal(src.searchParams.get('pt'), null);
       const get = playCdn(bundles.files, 2);
       const doc = await get(`${src.pathname}${src.search}`);
       assert.equal(doc.status, 200);

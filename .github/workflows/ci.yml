@@ -41,7 +41,7 @@ jobs:
 
   db-e2e:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -83,8 +83,8 @@ jobs:
         run: node --input-type=module -e "import fs from 'node:fs'; import { localSupabaseEnv } from './scripts/lib/local-supabase.mjs'; const env = localSupabaseEnv(); for (const k of ['PUBLIC_SUPABASE_URL', 'PUBLIC_SUPABASE_PUBLISHABLE_KEY', 'SUPABASE_SECRET_KEY', 'DATABASE_URL', 'MAILPIT_URL']) { const v = env[k]; if (!v) { if (k === 'MAILPIT_URL') continue; console.error('missing ' + k + ' from supabase status'); process.exit(1); } if (['PUBLIC_SUPABASE_PUBLISHABLE_KEY', 'SUPABASE_SECRET_KEY', 'DATABASE_URL'].includes(k)) console.log('::add-mask::' + v); fs.appendFileSync(process.env.GITHUB_ENV, k + '=' + v + '\n'); }"
       - name: Smoke
         run: npm run smoke
-      - name: Install Playwright Chromium
-        run: npx playwright install --with-deps chromium
+      - name: Install Playwright Chromium and WebKit
+        run: npx playwright install --with-deps chromium webkit
       - name: DB tests
         shell: bash
         run: npm test 2>&1 | tee "$RUNNER_TEMP/db-tests.tap"
@@ -93,7 +93,7 @@ jobs:
       - name: DB e2e
         env:
           PLAYWRIGHT_JSON_OUTPUT_NAME: ${{ runner.temp }}/db-e2e.json
-        run: npx playwright test e2e/db-sessions.spec.mjs e2e/preview-links.spec.mjs e2e/preview-play.spec.mjs --reporter=list,json
+        run: npx playwright test e2e/db-sessions.spec.mjs e2e/preview-links.spec.mjs e2e/preview-play.spec.mjs e2e/preview-play-phone.spec.mjs e2e/preview-play-siblings.spec.mjs --reporter=list,json
       - name: Assert no DB e2e tests skipped
         run: node scripts/ci/assert-no-db-skips.mjs "$RUNNER_TEMP/db-e2e.json"
       - name: Upload SL-3 screenshots
@@ -102,6 +102,12 @@ jobs:
         with:
           name: sl3-screenshots-${{ matrix.run }}
           path: test-results/screenshots/sl-3-*.png
+      - name: Upload SL-6 screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sl6-screenshots-${{ matrix.run }}
+          path: test-results/screenshots/sl-6-*.png
       - name: Stop local Supabase
         if: always()
         run: supabase stop
