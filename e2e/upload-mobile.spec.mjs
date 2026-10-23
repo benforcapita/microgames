@@ -18,12 +18,13 @@ const overflow = (page) => page.evaluate(() => {
 test('upload page has no horizontal overflow at 360, 390 and 430 px', async ({ page }) => {
   test.setTimeout(120_000);
   const stamp = Date.now().toString(36);
+  const handle = `mmmmmmmm${stamp}`.slice(0, 32);
   await page.goto('/login?mode=signup&next=/me');
   await page.locator('input[name="email"]').fill(`mob1-${stamp}@example.com`);
   await page.locator('input[name="password"]').fill('testpass1');
   await page.getByRole('button', { name: 'Sign up' }).click();
   await page.waitForURL(/\/onboarding/);
-  await page.locator('input[name="handle"]').fill(`mob1${stamp}`.slice(0, 32));
+  await page.locator('input[name="handle"]').fill(handle);
   await page.getByRole('button', { name: 'Claim handle' }).click();
   await page.waitForURL(/\/me(#upload)?$/);
 

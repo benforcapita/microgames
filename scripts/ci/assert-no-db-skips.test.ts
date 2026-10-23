@@ -423,6 +423,7 @@ console.log(JSON.stringify({ ok }));`;
       const expectedPairs: [string, number][] = [
         ['byte-budget input is fully analysed with median < 0.75 x AST_BUDGET.ms (450 ms)', 1],
         ['a 3x linear slowdown is caught (relative, machine-speed independent)', 1],
+        ['a swipe in the game then a tap on the × leaves fullscreen', 1],
       ];
       assert.deepStrictEqual(actualPairs, expectedPairs);
     });
@@ -969,6 +970,48 @@ console.log(JSON.stringify({ ok }));`;
       assert.equal(result.totalTests, 1);
       assert.equal(result.errors.length, 0);
       assert.equal(result.allowed.get(allowlistedName), 1);
+    });
+
+    function skippedWith(title: string, annotations: PlaywrightAnnotationFixture[]) {
+      return createPlaywrightReport([
+        {
+          title: 'e2e/share-links.spec.ts',
+          suites: [
+            {
+              title: 'share links',
+              specs: [
+                {
+                  title,
+                  tests: [{ ...createSkippedTest('skipped'), annotations }],
+                },
+              ],
+            },
+          ],
+        },
+      ]);
+    }
+
+    it('a skipped todo annotation exits 1', () => {
+      const title = 'a preview page is noindex';
+      const res = runJsonFixture(skippedWith(title, [
+        { type: 'todo', description: 'waiting on #115' },
+      ]));
+      assert.equal(res.status, 1);
+      assert.match(res.stderr, new RegExp(title));
+    });
+
+    it('a skipped test with an empty todo description exits 1', () => {
+      const title = 'unnamed pending preview';
+      const res = runJsonFixture(skippedWith(title, [{ type: 'todo', description: '   ' }]));
+      assert.equal(res.status, 1);
+      assert.match(res.stderr, new RegExp(title));
+    });
+
+    it('a skipped fixme without a todo annotation exits 1', () => {
+      const title = 'fixme with no todo name';
+      const res = runJsonFixture(skippedWith(title, [{ type: 'fixme' }]));
+      assert.equal(res.status, 1);
+      assert.match(res.stderr, new RegExp(title));
     });
   });
 });
