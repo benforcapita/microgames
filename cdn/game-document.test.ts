@@ -120,6 +120,14 @@ describe('UP-1: the game document is served at its versioned URL', () => {
     assert.equal(directive(csp, 'default-src'), "default-src 'none'");
   });
 
+  it('lets single-file builds load module scripts from data: URLs', async () => {
+    const { get } = harness();
+    const r = await get('/g/live0001/3/index.html');
+    const tokens = directive(r.headers['content-security-policy'], 'script-src').split(/\s+/);
+    assert.ok(tokens.includes('data:'), tokens.join(' '));
+    assert.ok(tokens.includes('blob:'));
+  });
+
   it('a relative asset URL in the framed document resolves to a 200 on the versioned path', async () => {
     const { get } = harness();
     const doc = await get('/g/live0001/index.html');
